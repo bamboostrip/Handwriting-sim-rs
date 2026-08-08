@@ -8,7 +8,10 @@
 
 use std::path::Path;
 
-use docx_rs::{read_docx, DocumentChild, Paragraph as DxParagraph, SpecialIndentType};
+use docx_rs::{
+    read_docx, BasedOn, DocumentChild, Paragraph as DxParagraph, ParagraphChild, RunProperty, Sz,
+    SpecialIndentType, Styles,
+};
 
 use crate::core::models::{Align, Paragraph};
 
@@ -24,7 +27,7 @@ pub fn load_paragraphs(path: &Path, font_size: f32) -> Result<Vec<Paragraph>, St
             continue;
         }
         let align = resolve_align(dx);
-        let indent = resolve_indent(dx, font_size);
+        let indent = resolve_indent(dx, font_size, &docx.styles);
         result.push(Paragraph { text, align, first_line_indent: indent });
     }
     Ok(result)
@@ -72,25 +75,151 @@ fn resolve_align(dx: &DxParagraph) -> Align {
     }
 }
 
-/// 首行缩进（像素）：firstLineChars 优先，其次 firstLine EMU 按文档字号还原。
-fn resolve_indent(dx: &DxParagraph, font_size: f32) -> f32 {
-    let Some(ind) = dx.property.indent.as_ref() else { return 0.0 };
-    if let Some(chars) = ind.first_line_chars {
-        return chars as f32 / 100.0 * font_size;
+/// 首行缩进（像素）。三级回退：
+/// 1. 直接格式 `firstLineChars`；2. 直接格式 `firstLine`（EMU，按探测文档字号还原字符数）；
+/// 3. 段落所应用样式沿 `based_on` 链继承的 `firstLineChars`。
+fn resolve_indent(dx: &DxParagraph, font_size: f32, styles: &Styles) -> f32 {
+    if let Some(ind) = dx.property.indent.as_ref() {
+        if let Some(chars) = ind.first_line_chars {
+            return chars as f32 / 100.0 * font_size;
+        }
+        if let Some(SpecialIndentType::FirstLine(emu)) = ind.special_indent {
+            // EMU → pt（1in = 914400 EMU，1pt = 1/72in）→ 按文档字号还原字符数
+            let pt = emu as f32 / 12700.0;
+            let doc_font_size = doc_font_size_pt(dx, styles);
+            let chars = pt / doc_font_size;
+            return chars * font_size;
+        }
     }
-    if let Some(SpecialIndentType::FirstLine(emu)) = ind.special_indent {
-        // EMU → pt（1in = 914400 EMU，1pt = 1/72in）→ 按文档字号还原字符数
-        let pt = emu as f32 / 12700.0;
-        let doc_font_size = doc_font_size_pt(dx);
-        let chars = pt / doc_font_size;
-        return chars * font_size;
+    // 无直接格式时，沿样式链继承 firstLineChars
+    if let Some(ps) = dx.property.style.as_ref() {
+        if let Some(chars) = style_chain_first_line_chars(&ps.val, styles) {
+            return chars as f32 / 100.0 * font_size;
+        }
     }
     0.0
 }
 
-/// 文档字号探测（pt）：run 直接格式优先，兜底 12（完整样式链在任务 6 扩展）。
-fn doc_font_size_pt(_dx: &DxParagraph) -> f32 {
+/// 文档字号探测（pt）。级联：run 直接格式 > 段落样式链（沿 based_on）> Normal > docDefaults > 12。
+///
+/// # docx-rs 0.4.22 读取能力限制
+/// 本 crate 的 `Sz.val`、`BasedOn.val` 与 `DocDefaults` 内部字段均为私有且无 getter，
+/// 无法直接读取。这里利用三者（及其容器）的 `serde::Serialize` 实现经 JSON 提取数值：
+/// - `Sz` 序列化为裸 u32（半磅）；`BasedOn` 序列化为裸字符串（父样式 id）；
+/// - `DocDefaults` 序列化为 `{"runPropertyDefault":{"runProperty":{"sz":…}}}` 可逐层取值。
+fn doc_font_size_pt(dx: &DxParagraph, styles: &Styles) -> f32 {
+    // 1) run 直接格式（取段落首个 run 的 rPr）
+    if let Some(rp) = first_run_property(dx) {
+        if let Some(sz) = rp.sz.as_ref() {
+            if let Some(pt) = sz_half_points_to_pt(sz) {
+                return pt;
+            }
+        }
+    }
+    // 2) 段落所应用样式链
+    if let Some(ps) = dx.property.style.as_ref() {
+        if let Some(pt) = style_chain_size(&ps.val, styles) {
+            return pt;
+        }
+    }
+    // 3) Normal 样式（未显式声明 pStyle 时隐含 Normal）
+    if let Some(pt) = style_chain_size("Normal", styles) {
+        return pt;
+    }
+    // 4) docDefaults
+    if let Some(pt) = doc_defaults_size(styles) {
+        return pt;
+    }
     12.0
+}
+
+/// 段落首个 run 的 rPr（用于 run 级字号）。
+fn first_run_property(dx: &DxParagraph) -> Option<&RunProperty> {
+    dx.children.iter().find_map(|item| match item {
+        ParagraphChild::Run(run) => Some(&run.run_property),
+        _ => None,
+    })
+}
+
+/// `Sz` 私有字段经 `Serialize`（裸 u32，半磅）读取，换算为 pt。
+fn sz_half_points_to_pt(sz: &Sz) -> Option<f32> {
+    let s = serde_json::to_string(sz).ok()?;
+    let half: u32 = serde_json::from_str(&s).ok()?;
+    if half == 0 {
+        return None;
+    }
+    Some(half as f32 / 2.0)
+}
+
+/// `BasedOn` 私有字段经 `Serialize`（裸字符串）读取父样式 id。
+fn based_on_id(b: &BasedOn) -> Option<String> {
+    let s = serde_json::to_string(b).ok()?;
+    serde_json::from_str::<String>(&s).ok()
+}
+
+/// 沿 `based_on` 收集样式 id 链（含起始，去环），字号与缩进共用这一条遍历。
+fn style_chain_ids(start: &str, styles: &Styles) -> Vec<String> {
+    let mut chain = Vec::new();
+    let mut cur = start.to_string();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if !seen.insert(cur.clone()) {
+            break;
+        }
+        let Some(style) = styles.styles.iter().find(|s| s.style_id == cur) else {
+            break;
+        };
+        chain.push(cur);
+        let Some(base) = style.based_on.as_ref() else { break };
+        let Some(base_id) = based_on_id(base) else { break };
+        cur = base_id;
+    }
+    chain
+}
+
+/// 沿样式链取首个非零字号（pt）。
+fn style_chain_size(start: &str, styles: &Styles) -> Option<f32> {
+    for id in style_chain_ids(start, styles) {
+        let Some(style) = styles.styles.iter().find(|s| s.style_id == id) else {
+            continue;
+        };
+        if let Some(sz) = style.run_property.sz.as_ref() {
+            if let Some(pt) = sz_half_points_to_pt(sz) {
+                return Some(pt);
+            }
+        }
+    }
+    None
+}
+
+/// 沿样式链取首个 `firstLineChars`（缩进继承）。
+fn style_chain_first_line_chars(start: &str, styles: &Styles) -> Option<i32> {
+    for id in style_chain_ids(start, styles) {
+        let Some(style) = styles.styles.iter().find(|s| s.style_id == id) else {
+            continue;
+        };
+        let Some(ind) = style.paragraph_property.indent.as_ref() else {
+            continue;
+        };
+        if let Some(chars) = ind.first_line_chars {
+            return Some(chars);
+        }
+    }
+    None
+}
+
+/// `DocDefaults` 私有内部字段经 `Serialize` 逐层提取运行默认字号（pt）。
+fn doc_defaults_size(styles: &Styles) -> Option<f32> {
+    let json = serde_json::to_value(&styles.doc_defaults).ok()?;
+    let half = json
+        .get("runPropertyDefault")?
+        .get("runProperty")?
+        .get("sz")?
+        .as_u64()? as u32;
+    if half == 0 {
+        return None;
+    }
+    Some(half as f32 / 2.0)
 }
 
 #[cfg(test)]
@@ -121,20 +250,33 @@ mod tests {
         let document_xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#
         );
-        zip_docx(document_xml.as_bytes())
+        zip_docx(document_xml.as_bytes(), None)
     }
 
     /// 打包最小 docx（store 无压缩）：document.xml + 必需关系/类型文件。
-    fn zip_docx(document_xml: &[u8]) -> Vec<u8> {
-        let content_types = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+    /// 传入 `styles_xml` 时，在 [Content_Types] 与 document.xml.rels 中声明 styles 关系并加入该 part。
+    fn zip_docx(document_xml: &[u8], styles_xml: Option<&[u8]>) -> Vec<u8> {
+        let has_styles = styles_xml.is_some();
+        let content_types: &[u8] = if has_styles {
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#.as_slice()
+        } else {
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.as_slice()
+        };
         let root_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
-        let doc_rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#;
-        let entries: Vec<(&str, &[u8])> = vec![
+        let doc_rels: &[u8] = if has_styles {
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.as_slice()
+        } else {
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#.as_slice()
+        };
+        let mut entries: Vec<(&str, &[u8])> = vec![
             ("[Content_Types].xml", content_types),
             ("_rels/.rels", root_rels),
             ("word/document.xml", document_xml),
             ("word/_rels/document.xml.rels", doc_rels),
         ];
+        if let Some(styles) = styles_xml {
+            entries.push(("word/styles.xml", styles));
+        }
         zip_store(&entries)
     }
 
@@ -240,9 +382,58 @@ mod tests {
         let document_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:ind w:firstLine="914400"/></w:pPr><w:r><w:t>indent</w:t></w:r></w:p></w:body></w:document>"#;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("emu.docx");
-        std::fs::write(&path, zip_docx(document_xml)).unwrap();
+        // 无 styles.xml：doc 字号落到 12pt 兜底 → 72/12=6 字符 ×36=216。
+        std::fs::write(&path, zip_docx(document_xml, None)).unwrap();
         let paras = load_paragraphs(&path, 36.0).unwrap();
         assert_eq!(paras.len(), 1);
         assert_eq!(paras[0].first_line_indent, 216.0);
+    }
+
+    #[test]
+    fn indent_inherits_first_line_chars_from_style_chain() {
+        // 段落自身无 firstLineChars/EMU，沿 pStyle→basedOn 链继承 BasePara 的 firstLineChars。
+        let document_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="MyPara"/></w:pPr><w:r><w:t>styled</w:t></w:r></w:p></w:body></w:document>"#;
+        let styles_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="MyPara"><w:name w:val="My Para"/><w:basedOn w:val="BasePara"/></w:style><w:style w:type="paragraph" w:styleId="BasePara"><w:name w:val="Base Para"/><w:pPr><w:ind w:firstLineChars="200"/></w:pPr></w:style></w:styles>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("style-indent.docx");
+        std::fs::write(&path, zip_docx(document_xml, Some(styles_xml))).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].first_line_indent, 72.0); // 200/100 * 36
+    }
+
+    #[test]
+    fn doc_font_size_reads_run_sz() {
+        // run rPr sz=48（半磅）→ 24pt；EMU 914400=72pt → 72/24=3 字符 ×36=108。
+        let document_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:ind w:firstLine="914400"/></w:pPr><w:r><w:rPr><w:sz w:val="48"/></w:rPr><w:t>run</w:t></w:r></w:p></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run-sz.docx");
+        std::fs::write(&path, zip_docx(document_xml, None)).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras[0].first_line_indent, 108.0);
+    }
+
+    #[test]
+    fn doc_font_size_reads_paragraph_style_sz() {
+        // 段落无 run sz，但 pStyle=MyPara 的 rPr sz=48 → 24pt → EMU 还原 3 字符 ×36=108。
+        let document_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="MyPara"/><w:ind w:firstLine="914400"/></w:pPr><w:r><w:t>styled</w:t></w:r></w:p></w:body></w:document>"#;
+        let styles_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="MyPara"><w:name w:val="My Para"/><w:rPr><w:sz w:val="48"/></w:rPr></w:style></w:styles>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("style-sz.docx");
+        std::fs::write(&path, zip_docx(document_xml, Some(styles_xml))).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras[0].first_line_indent, 108.0);
+    }
+
+    #[test]
+    fn doc_font_size_reads_doc_defaults_sz() {
+        // 无 run sz、无 pStyle：docDefaults rPrDefault sz=36 → 18pt → EMU 72/18=4 字符 ×36=144。
+        let document_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:ind w:firstLine="914400"/></w:pPr><w:r><w:t>default</w:t></w:r></w:p></w:body></w:document>"#;
+        let styles_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="36"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("default-sz.docx");
+        std::fs::write(&path, zip_docx(document_xml, Some(styles_xml))).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras[0].first_line_indent, 144.0);
     }
 }
