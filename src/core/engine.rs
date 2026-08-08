@@ -30,6 +30,9 @@ pub enum EngineError {
     Image(String),
 }
 
+/// 预览降采样的最大背景宽度阈值。
+const PREVIEW_MAX_WIDTH: u32 = 4096;
+
 /// 渲染引擎接口。
 pub trait Engine {
     /// 渲染第一页（预览用）。
@@ -58,6 +61,32 @@ impl DefaultEngine {
             .map(|img| img.to_rgb8())
     }
 
+    /// 预览专用降采样加载：宽 > 4096 时 LANCZOS 降采样 + 空间参数等比缩放。
+    fn load_background_for_preview(
+        params: &HandwritingParams,
+    ) -> Result<(RgbImage, HandwritingParams), EngineError> {
+        let bg = Self::load_background(&params.background_path)?;
+        if bg.width() <= PREVIEW_MAX_WIDTH {
+            return Ok((bg, params.clone()));
+        }
+        let scale = PREVIEW_MAX_WIDTH as f32 / bg.width() as f32;
+        let new_height = (bg.height() as f32 * scale).round().max(1.0) as u32;
+        let thumb = image::imageops::resize(&bg, PREVIEW_MAX_WIDTH, new_height, image::imageops::FilterType::Lanczos3);
+        let mut scaled = params.clone();
+        for f in [
+            &mut scaled.font_size, &mut scaled.line_spacing, &mut scaled.word_spacing,
+            &mut scaled.left_margin, &mut scaled.right_margin,
+            &mut scaled.top_margin, &mut scaled.bottom_margin,
+            &mut scaled.word_spacing_sigma, &mut scaled.line_spacing_sigma,
+            &mut scaled.font_size_sigma, &mut scaled.perturb_x_sigma,
+            &mut scaled.perturb_y_sigma,
+        ] {
+            *f *= scale;
+        }
+        scaled.font_size = scaled.font_size.max(1.0);
+        Ok((thumb, scaled))
+    }
+
     /// 渲染一页（纯文本路径）。
     fn render_page_from(
         &self,
@@ -81,9 +110,20 @@ impl Engine for DefaultEngine {
         params.validate()?;
         let font =
             FontFace::load(Path::new(&params.font_path), params.font_size).map_err(EngineError::Font)?;
-        let background = Self::load_background(&params.background_path)?;
+        let (background, scaled) = Self::load_background_for_preview(params)?;
         let mut rng = StdRng::seed_from_u64(self.seed);
-        let (page, _) = self.render_page_from(params, &font, &mut rng, &params.text, 0, &background)?;
+        if !params.paragraphs.is_empty() {
+            let pages = layout::layout_paragraphs(
+                &scaled, &font, &mut rng, &params.paragraphs,
+                background.width() as usize, background.height() as usize,
+            );
+            let canvas = perturb::perturb_mask(
+                &pages[0], background.width() as usize, background.height() as usize,
+                &scaled, &mut rng, &background.as_raw(),
+            );
+            return Ok(rgba_from_rgb(&canvas, background.width() as usize, background.height() as usize));
+        }
+        let (page, _) = self.render_page_from(&scaled, &font, &mut rng, &params.text, 0, &background)?;
         Ok(page)
     }
 
@@ -93,6 +133,22 @@ impl Engine for DefaultEngine {
             FontFace::load(Path::new(&params.font_path), params.font_size).map_err(EngineError::Font)?;
         let background = Self::load_background(&params.background_path)?;
         let mut rng = StdRng::seed_from_u64(self.seed);
+        if !params.paragraphs.is_empty() {
+            let pages = layout::layout_paragraphs(
+                params, &font, &mut rng, &params.paragraphs,
+                background.width() as usize, background.height() as usize,
+            );
+            return pages
+                .into_iter()
+                .map(|mask| {
+                    let canvas = perturb::perturb_mask(
+                        &mask, background.width() as usize, background.height() as usize,
+                        params, &mut rng, &background.as_raw(),
+                    );
+                    Ok(rgba_from_rgb(&canvas, background.width() as usize, background.height() as usize))
+                })
+                .collect();
+        }
         let mut pages = Vec::new();
         let mut start = 0;
         loop {
@@ -146,6 +202,7 @@ pub fn export(params: &HandwritingParams, out_dir: &Path, seed: u64) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::models::{Align, Paragraph};
     use image::Rgb;
     use std::fs;
 
@@ -210,6 +267,77 @@ mod tests {
             .unwrap();
         assert!(gray_min < 128, "应有深色前景：{gray_min}");
 
+        fs::remove_dir_all(dir.path()).ok();
+    }
+
+    #[test]
+    fn paragraph_path_preview_matches_export_with_same_seed() {
+        let Some(font) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let bg = dir.path().join("bg.png");
+        let mut img = RgbImage::new(400, 300);
+        for px in img.pixels_mut() {
+            *px = Rgb([255, 255, 255]);
+        }
+        img.save(&bg).unwrap();
+
+        let mut params = make_params(&font, &bg);
+        params.paragraphs = vec![
+            Paragraph {
+                text: "第一段文字，居中。".into(),
+                align: Align::Center,
+                first_line_indent: 40.0,
+            },
+            Paragraph {
+                text: "第二段文字，右对齐。".into(),
+                align: Align::Right,
+                first_line_indent: 0.0,
+            },
+        ];
+        params.text = String::new();
+
+        let pages = DefaultEngine::new(42).render_pages(&params).unwrap();
+        assert!(!pages.is_empty());
+        let out = dir.path().join("out");
+        let files = DefaultEngine::new(42).save_all(&params, &out).unwrap();
+        assert_eq!(files.len(), pages.len());
+        for (path, page) in files.iter().zip(pages.iter()) {
+            let saved = image::open(path).unwrap().to_rgba8();
+            assert_eq!(saved.as_raw(), page.as_raw());
+        }
+        assert!(
+            pages[0].as_raw().chunks_exact(4).any(|px| (px[0] as u16 + px[1] as u16 + px[2] as u16) / 3 < 128),
+            "段落路径应有深色前景"
+        );
+        fs::remove_dir_all(dir.path()).ok();
+    }
+
+    #[test]
+    fn render_preview_downsample_only_for_huge_background() {
+        let Some(font) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        // 5000px 宽背景（> 4096 阈值）；背景高度需足够容纳一行，
+        // 否则降采样后（scale≈0.82）首行超出可绘制区导致空白页
+        let bg = dir.path().join("bg.png");
+        let mut img = RgbImage::new(5000, 600);
+        for px in img.pixels_mut() {
+            *px = Rgb([255, 255, 255]);
+        }
+        img.save(&bg).unwrap();
+
+        let params = make_params(&font, &bg);
+        let page = DefaultEngine::new(1).render_preview(&params).unwrap();
+        // 降采样后预览输出缩略背景尺寸（4096 宽），与 Python 版行为一致
+        assert_eq!(page.width(), 4096, "降采样后预览应输出缩略背景尺寸");
+        // 预览仍应正确渲染（有深色前景）
+        let gray_min = page.as_raw().chunks_exact(4).map(|px| (px[0] as u16 + px[1] as u16 + px[2] as u16) / 3).min().unwrap();
+        assert!(gray_min < 128, "降采样预览应有深色前景：{gray_min}");
         fs::remove_dir_all(dir.path()).ok();
     }
 
