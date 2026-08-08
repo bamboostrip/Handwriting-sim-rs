@@ -266,6 +266,7 @@ pub fn layout_paragraphs(
     height: usize,
 ) -> Vec<Vec<bool>> {
     let line_spacing = params.total_line_spacing();
+    let lead = line_spacing - params.font_size;
     let limit = height as f32 - params.bottom_margin - params.font_size;
 
     // 所有段落共用同一 rng 流，先全部排版为逐行列表
@@ -280,12 +281,12 @@ pub fn layout_paragraphs(
 
     let mut pages: Vec<Vec<bool>> = Vec::new();
     let mut page_canvas = vec![false; width * height];
-    let mut draw_y = params.top_margin;
+    let mut draw_y = params.top_margin + lead;
     for (band, off) in all_lines {
         if draw_y > limit && page_canvas.iter().any(|&b| b) {
             pages.push(std::mem::take(&mut page_canvas));
             page_canvas = vec![false; width * height];
-            draw_y = params.top_margin;
+            draw_y = params.top_margin + lead;
         }
         if let Some(band) = band {
             let row0 = (draw_y + off).round() as isize;
@@ -499,7 +500,7 @@ mod tests {
         let mut paras = vec![para(), para()];
         paras[1].text = "第二段内容，足够长以触发跨页。".into();
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        let pages = layout_paragraphs(&p, &font, &mut rng, &paras, 300, 200);
+        let pages = layout_paragraphs(&p, &font, &mut rng, &paras, 300, 250);
         assert_eq!(pages.len(), 2, "矮画布应产生两页");
         assert!(pages[0].iter().any(|&b| b), "首页应有墨迹");
         assert!(pages[1].iter().any(|&b| b), "第二页应有墨迹");
