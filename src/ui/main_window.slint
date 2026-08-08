@@ -1,0 +1,155 @@
+// 手写模拟器主窗口。
+//
+// 阶段 2：GUI 与引擎接通。
+// - 参数控件通过 `<=>` 双向绑定暴露给 Rust 侧（get_/set_ 方法）
+// - 预览区显示引擎输出的 RGBA 图像（Rust 侧 set_preview_image）
+// - 字体/背景路径由 Rust 侧文件对话框选择后写入 LineEdit
+
+import {
+    Button,
+    HorizontalBox,
+    LineEdit,
+    ScrollView,
+    Slider,
+    SpinBox,
+    TextEdit,
+    VerticalBox,
+    AboutSlint,
+} from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    title: "手写模拟器";
+    preferred-width: 1080px;
+    preferred-height: 720px;
+
+    // ---- 双向绑定参数（Rust 侧 get_/set_ 访问） ----
+    in-out property <string> input-text <=> input-edit.text;
+    in-out property <int> font-size <=> font-size-spin.value;
+    in-out property <int> line-spacing <=> line-spacing-spin.value;
+    in-out property <int> word-spacing <=> word-spacing-spin.value;
+    in-out property <int> perturb-x <=> perturb-x-spin.value;
+    in-out property <int> perturb-y <=> perturb-y-spin.value;
+    in-out property <float> perturb-theta <=> perturb-theta-slider.value;
+    in-out property <string> font-path-text <=> font-path-edit.text;
+    in-out property <string> background-path-text <=> background-path-edit.text;
+
+    // ---- Rust → UI ----
+    in property <string> status-text: "就绪";
+    in property <image> preview-image;
+
+    // ---- UI → Rust 回调 ----
+    callback regenerate;
+    callback choose-font;
+    callback choose-background;
+    callback export-files;
+
+    VerticalBox {
+        HorizontalBox {
+            // ---- 左侧参数面板 ----
+            Rectangle {
+                width: 360px;
+                ScrollView {
+                    VerticalBox {
+                        padding: 12px;
+                        spacing: 6px;
+
+                        Text { text: "文本内容"; font-size: 14px; }
+                        input-edit := TextEdit {
+                            text: "请输入要手写的文字…";
+                            height: 140px;
+                            wrap: word-wrap;
+                        }
+
+                        Text { text: "字体文件"; font-size: 14px; }
+                        HorizontalBox {
+                            spacing: 4px;
+                            font-path-edit := LineEdit { placeholder-text: "未选择字体"; }
+                            Button {
+                                text: "选择…";
+                                clicked => { root.choose-font(); }
+                            }
+                        }
+
+                        Text { text: "背景图片"; font-size: 14px; }
+                        HorizontalBox {
+                            spacing: 4px;
+                            background-path-edit := LineEdit { placeholder-text: "未选择背景"; }
+                            Button {
+                                text: "选择…";
+                                clicked => { root.choose-background(); }
+                            }
+                        }
+
+                        Text { text: "字号"; font-size: 14px; }
+                        font-size-spin := SpinBox { value: 36; minimum: 8; maximum: 200; }
+
+                        Text { text: "行间距（不含字高）"; font-size: 14px; }
+                        line-spacing-spin := SpinBox { value: 48; minimum: 0; maximum: 200; }
+
+                        Text { text: "字间距"; font-size: 14px; }
+                        word-spacing-spin := SpinBox { value: 5; minimum: 0; maximum: 100; }
+
+                        Text { text: "笔画扰动标准差"; font-size: 14px; }
+                        HorizontalBox {
+                            spacing: 4px;
+                            VerticalBox {
+                                Text { text: "x 平移"; font-size: 11px; color: #888; }
+                                perturb-x-spin := SpinBox { value: 2; minimum: 0; maximum: 20; }
+                            }
+                            VerticalBox {
+                                Text { text: "y 平移"; font-size: 11px; color: #888; }
+                                perturb-y-spin := SpinBox { value: 2; minimum: 0; maximum: 20; }
+                            }
+                            VerticalBox {
+                                Text { text: "θ 旋转"; font-size: 11px; color: #888; }
+                                perturb-theta-slider := Slider { value: 0.05; minimum: 0; maximum: 1; }
+                            }
+                        }
+
+                        Text { text: "提示：选择字体与背景后点击「生成预览」"; font-size: 11px; color: #888; }
+                    }
+                }
+            }
+
+            // ---- 右侧预览区域 ----
+            Rectangle {
+                background: #d5ddd5;
+                width: 800px;
+                Image {
+                    source: preview-image;
+                    image-fit: contain;
+                    width: 100%;
+                    height: 100%;
+                }
+            }
+        }
+
+        // ---- 底部工具条 ----
+        HorizontalBox {
+            padding: 6px;
+            spacing: 8px;
+
+            Rectangle {
+                height: 30px;
+                Text {
+                    text: status-text;
+                    vertical-alignment: center;
+                    color: #555;
+                }
+            }
+            Button {
+                text: "生成预览";
+                clicked => { root.regenerate(); }
+            }
+            Button {
+                text: "导出图片…";
+                clicked => { root.export-files(); }
+            }
+            // Royalty-free 许可合规预留：若切换为 Royalty-free 版本，
+            // 需在应用内显示 AboutSlint（见 docs/03-licensing.md）。
+            AboutSlint {
+                height: 26px;
+            }
+        }
+    }
+}
