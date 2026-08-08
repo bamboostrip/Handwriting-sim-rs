@@ -33,18 +33,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seed_counter = Rc::new(RefCell::new(
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64,
     ));
+    // 最近一次载入预设的完整参数（含 slint 无控件的边距/sigma/end_chars/start_chars 等），
+    // 作为 collect_params 的基础，避免载入预设时这些字段被静默丢弃。
+    let preset_params = Rc::new(RefCell::new(Option::<HandwritingParams>::None));
 
     // ---- 生成预览（防抖） ----
     {
         let weak = ui.as_weak();
         let timer = Rc::clone(&timer);
         let seed = Rc::clone(&seed_counter);
+        let preset_params = Rc::clone(&preset_params);
         ui.on_regenerate(move || {
             let Some(ui) = weak.upgrade() else { return };
             let timer = Rc::clone(&timer);
             let seed = Rc::clone(&seed);
+            let preset_params = Rc::clone(&preset_params);
             timer.start(TimerMode::SingleShot, Duration::from_millis(PREVIEW_DEBOUNCE_MS), move || {
-                match render_and_show(&ui, &seed) {
+                match render_and_show(&ui, &preset_params, &seed) {
                     Ok(()) => {}
                     Err(e) => ui.set_status_text(SharedString::from(format!("渲染失败：{e}"))),
                 }
@@ -84,10 +89,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let seed = Rc::clone(&seed_counter);
+        let preset_params = Rc::clone(&preset_params);
         ui.on_export_files(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(dir) = rfd::FileDialog::new().pick_folder() else { return };
-            let params = match collect_params(&ui) {
+            let params = match collect_params(&ui, &preset_params) {
                 Ok(p) => p,
                 Err(e) => {
                     ui.set_status_text(SharedString::from(format!("参数错误：{e}")));
@@ -214,6 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ---- 保存预设 ----
     {
         let weak = ui.as_weak();
+        let preset_params = Rc::clone(&preset_params);
         ui.on_save_preset(move || {
             let Some(ui) = weak.upgrade() else { return };
             if let Some(path) = rfd::FileDialog::new()
@@ -221,7 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .set_file_name("preset.json")
                 .save_file()
             {
-                let params = match collect_params(&ui) {
+                let params = match collect_params(&ui, &preset_params) {
                     Ok(p) => p,
                     Err(e) => {
                         ui.set_status_text(SharedString::from(format!("参数错误：{e}")));
@@ -242,6 +249,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ---- 载入预设 ----
     {
         let weak = ui.as_weak();
+        let preset_params = Rc::clone(&preset_params);
         ui.on_load_preset(move || {
             let Some(ui) = weak.upgrade() else { return };
             if let Some(path) = rfd::FileDialog::new()
@@ -250,6 +258,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 match presets::load(&path) {
                     Ok(p) => {
+                        // 完整参数入缓存，供 collect_params 作基础（含边距/sigma/end_chars/start_chars 等）
+                        *preset_params.borrow_mut() = Some(p.clone());
                         ui.set_font_path_text(SharedString::from(p.font_path));
                         ui.set_background_path_text(SharedString::from(p.background_path));
                         ui.set_font_size(p.font_size as i32);
@@ -258,7 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_perturb_x(p.perturb_x_sigma as i32);
                         ui.set_perturb_y(p.perturb_y_sigma as i32);
                         ui.set_perturb_theta(p.perturb_theta_sigma);
-                        ui.set_status_text(SharedString::from("预设已载入"));
+                        ui.set_status_text(SharedString::from("预设已载入（含边距/扰动参数）"));
                     }
                     Err(e) => ui.set_status_text(SharedString::from(format!("载入失败：{e}"))),
                 }
@@ -271,8 +281,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 收集 UI 参数为 `HandwritingParams` 并校验。
-fn collect_params(ui: &MainWindow) -> Result<HandwritingParams, EngineError> {
-    let mut params = HandwritingParams::default();
+/// 以最近载入预设为基础（`preset_params`），再用 UI 控件值覆盖对应字段，
+/// 从而保留预设中 slint 无控件的边距/sigma/end_chars/start_chars 等参数。
+fn collect_params(
+    ui: &MainWindow,
+    preset_params: &RefCell<Option<HandwritingParams>>,
+) -> Result<HandwritingParams, EngineError> {
+    let mut params = preset_params.borrow().clone().unwrap_or_default();
     if ui.get_input_mode() == 1 {
         // 段落模式：从模型收集段落
         let model = ui.get_paragraphs();
@@ -311,8 +326,12 @@ fn collect_params(ui: &MainWindow) -> Result<HandwritingParams, EngineError> {
 }
 
 /// 渲染预览并显示到 UI，seed 递增保证每次刷新笔画变化。
-fn render_and_show(ui: &MainWindow, seed_counter: &RefCell<u64>) -> Result<(), EngineError> {
-    let params = collect_params(ui)?;
+fn render_and_show(
+    ui: &MainWindow,
+    preset_params: &RefCell<Option<HandwritingParams>>,
+    seed_counter: &RefCell<u64>,
+) -> Result<(), EngineError> {
+    let params = collect_params(ui, preset_params)?;
     let seed = {
         let mut s = seed_counter.borrow_mut();
         *s += 1;

@@ -343,6 +343,36 @@ mod tests {
     }
 
     #[test]
+    fn render_preview_no_downsample_for_normal_background() {
+        let Some(font) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        // 2000px 宽背景（≤ 4096 阈值）：不应降采样，输出应与背景同尺寸
+        let bg = dir.path().join("bg.png");
+        let mut img = RgbImage::new(2000, 300);
+        for px in img.pixels_mut() {
+            *px = Rgb([255, 255, 255]);
+        }
+        img.save(&bg).unwrap();
+
+        let params = make_params(&font, &bg);
+        let page = DefaultEngine::new(1).render_preview(&params).unwrap();
+        assert_eq!(page.width(), 2000, "≤4096 背景不应降采样");
+        assert_eq!(page.height(), 300);
+        // 预览仍应正确渲染（有深色前景）
+        let gray_min = page
+            .as_raw()
+            .chunks_exact(4)
+            .map(|px| (px[0] as u16 + px[1] as u16 + px[2] as u16) / 3)
+            .min()
+            .unwrap();
+        assert!(gray_min < 128, "预览应有深色前景：{gray_min}");
+        fs::remove_dir_all(dir.path()).ok();
+    }
+
+    #[test]
     fn render_preview_rejects_invalid_params() {
         let params = HandwritingParams::default();
         assert!(matches!(
