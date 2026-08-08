@@ -2,8 +2,9 @@
 //!
 //! 对应 Python 版 `HandwritingEngine`（默认 fast 后端）的接口：
 //! `render_preview` / `generate` / `save_all`。
-//! 当前实现对齐 `FastEngine` 的**纯文本路径**；段落路径（paragraphs）
-//! 作为后续迭代（见 docs/02-migration-plan.md 的迁移阶段划分）。
+//! 支持双路径：纯文本路径（`text`）与段落路径（`paragraphs` 非空时启用，
+//! 对齐/缩进/右对齐/跨页，见 layout::layout_paragraphs）。
+//! 预览对超大背景（宽 > 4096）做降采样并等比缩放空间参数，导出始终全分辨率。
 
 use std::path::{Path, PathBuf};
 
