@@ -1,0 +1,25 @@
+# 构建产物
+/target
+**/*.rs.bk
+
+# 本地运行产物（与 Python 版保持一致）
+/output
+
+# 用户字体（版权隔离：发布包不含字体，本地自用）
+/fonts
+
+# 预设中的绝对路径差异不入库
+*.local.json
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# 系统
+Thumbs.db
+.DS_Store
+
+# 临时
+.staging-rust-new/
