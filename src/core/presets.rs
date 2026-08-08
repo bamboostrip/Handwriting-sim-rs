@@ -110,18 +110,23 @@ fn from_preset_map(data: &Map<String, Value>) -> Result<HandwritingParams, Prese
     if let Some(v) = str_("start_chars") { p.start_chars = v; }
     if let Some(v) = str_("font_path") { p.font_path = from_portable_path(&v); }
     if let Some(v) = str_("background_path") { p.background_path = from_portable_path(&v); }
-    // 颜色：优先 #RRGGBB，其次 red/green/blue
+    // 颜色：优先 #RRGGBB，其次 red/green/blue。
+    // 用 Option 切片 + from_str_radix 安全解析：color 存在但无法解析时返回错误（对齐 Python 版 parse_color 失败抛错），
+    // 避免对含多字节字符的字符串按字节切片落在字符内部导致 panic。
     if let Some(v) = str_("color") {
         let hex = v.trim_start_matches('#');
-        if hex.len() == 6 {
-            if let (Ok(r), Ok(g), Ok(b)) = (
-                u8::from_str_radix(&hex[0..2], 16),
-                u8::from_str_radix(&hex[2..4], 16),
-                u8::from_str_radix(&hex[4..6], 16),
-            ) {
-                p.fill = [r, g, b];
-            }
+        let parse = |range: std::ops::Range<usize>| -> Result<u8, PresetError> {
+            let s = hex
+                .get(range)
+                .ok_or_else(|| PresetError::Format(format!("color 应为 #RRGGBB，但得到 \"{v}\"")))?;
+            u8::from_str_radix(s, 16)
+                .map_err(|_| PresetError::Format(format!("color 应为 #RRGGBB，但得到 \"{v}\"")))
+        };
+        // 也要求恰好 6 个十六进制字符（含多字节字符时字节数≠字符数，避免误判）
+        if hex.len() != 6 || hex.chars().count() != 6 {
+            return Err(PresetError::Format(format!("color 应为 #RRGGBB，但得到 \"{v}\"")));
         }
+        p.fill = [parse(0..2)?, parse(2..4)?, parse(4..6)?];
     } else {
         let rgb = |key: &str| data.get(key).and_then(|v| v.as_i64()).map(|i| i as u8).unwrap_or(0);
         p.fill = [rgb("red"), rgb("green"), rgb("blue")];
@@ -231,6 +236,24 @@ mod tests {
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.fill, [1, 2, 3]);
         assert_eq!(loaded.font_size, 20.0);
+    }
+
+    #[test]
+    fn load_invalid_color_returns_format_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad_color.json");
+        // "ab中c" 去掉 '#' 后四字符共 6 字节（多字节），旧实现按字节切片会 panic；
+        // 新实现应安全返回 Err(PresetError::Format(_))。
+        std::fs::write(
+            &path,
+            r##"{"version": 2, "params": {"color": "#ab中c"}}"##,
+        )
+        .unwrap();
+        let result = load(&path);
+        assert!(
+            matches!(result, Err(PresetError::Format(_))),
+            "color 含多字节字符应返回 Format 错误，实际：{result:?}"
+        );
     }
 
     #[test]
