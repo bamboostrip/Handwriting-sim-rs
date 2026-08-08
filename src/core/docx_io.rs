@@ -26,6 +26,8 @@ pub fn load_paragraphs(path: &Path, font_size: f32) -> Result<Vec<Paragraph>, St
         if text.trim().is_empty() {
             continue;
         }
+        // 与 Python 版一致：存 `para.text.strip()` 后的文本
+        let text = text.trim().to_string();
         let align = resolve_align(dx);
         let indent = resolve_indent(dx, font_size, &docx.styles);
         result.push(Paragraph { text, align, first_line_indent: indent });
@@ -143,8 +145,20 @@ fn first_run_property(dx: &DxParagraph) -> Option<&RunProperty> {
 
 /// `Sz` 私有字段经 `Serialize`（裸 u32，半磅）读取，换算为 pt。
 fn sz_half_points_to_pt(sz: &Sz) -> Option<f32> {
-    let s = serde_json::to_string(sz).ok()?;
-    let half: u32 = serde_json::from_str(&s).ok()?;
+    let s = match serde_json::to_string(sz) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[docx_io] 警告：docx-rs 序列化字号字段结构变化，无法读取字号，已降级：{e}");
+            return None;
+        }
+    };
+    let half: u32 = match serde_json::from_str(&s) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("[docx_io] 警告：docx-rs 字号字段序列化格式变化，无法读取字号，已降级：{e}");
+            return None;
+        }
+    };
     if half == 0 {
         return None;
     }
@@ -153,8 +167,20 @@ fn sz_half_points_to_pt(sz: &Sz) -> Option<f32> {
 
 /// `BasedOn` 私有字段经 `Serialize`（裸字符串）读取父样式 id。
 fn based_on_id(b: &BasedOn) -> Option<String> {
-    let s = serde_json::to_string(b).ok()?;
-    serde_json::from_str::<String>(&s).ok()
+    let s = match serde_json::to_string(b) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[docx_io] 警告：docx-rs 序列化 basedOn 字段结构变化，无法读取父样式，已降级：{e}");
+            return None;
+        }
+    };
+    match serde_json::from_str::<String>(&s) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            eprintln!("[docx_io] 警告：docx-rs basedOn 字段序列化格式变化，无法读取父样式，已降级：{e}");
+            None
+        }
+    }
 }
 
 /// 沿 `based_on` 收集样式 id 链（含起始，去环），字号与缩进共用这一条遍历。
@@ -210,7 +236,13 @@ fn style_chain_first_line_chars(start: &str, styles: &Styles) -> Option<i32> {
 
 /// `DocDefaults` 私有内部字段经 `Serialize` 逐层提取运行默认字号（pt）。
 fn doc_defaults_size(styles: &Styles) -> Option<f32> {
-    let json = serde_json::to_value(&styles.doc_defaults).ok()?;
+    let json = match serde_json::to_value(&styles.doc_defaults) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[docx_io] 警告：docx-rs 序列化 docDefaults 字段结构变化，无法读取默认字号，已降级：{e}");
+            return None;
+        }
+    };
     let half = json
         .get("runPropertyDefault")?
         .get("runProperty")?
@@ -367,6 +399,21 @@ mod tests {
         assert_eq!(paras[0].first_line_indent, 72.0); // 200/100 * 36
         assert_eq!(paras[1].align, Align::Right);
         assert_eq!(paras[1].first_line_indent, 0.0);
+        assert_eq!(paras[2].text, "第三段默认");
+        assert_eq!(paras[2].align, Align::Left);
+        assert_eq!(paras[2].first_line_indent, 0.0);
+    }
+
+    #[test]
+    fn load_paragraphs_trims_whitespace() {
+        // 与 Python `para.text.strip()` 一致：首尾空白应被修剪
+        let bytes = build_docx(&[("  首尾带空格  ", AlignmentType::Left, None)]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trim.docx");
+        std::fs::write(&path, bytes).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].text, "首尾带空格");
     }
 
     #[test]
