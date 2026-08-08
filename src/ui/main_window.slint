@@ -7,6 +7,7 @@
 
 import {
     Button,
+    ComboBox,
     HorizontalBox,
     LineEdit,
     ScrollView,
@@ -16,6 +17,12 @@ import {
     VerticalBox,
     AboutSlint,
 } from "std-widgets.slint";
+
+export struct ParagraphItem {
+    text: string,
+    align-index: int,   // 0=left 1=center 2=right
+    indent: int,        // 首行缩进（像素）
+}
 
 export component MainWindow inherits Window {
     title: "手写模拟器";
@@ -37,11 +44,24 @@ export component MainWindow inherits Window {
     in property <string> status-text: "就绪";
     in property <image> preview-image;
 
+    // 模式：0=纯文本 1=段落
+    in-out property <int> input-mode: 0;
+    in-out property <[ParagraphItem]> paragraphs;
+    in property <bool> paragraphs-visible;
+
     // ---- UI → Rust 回调 ----
     callback regenerate;
     callback choose-font;
     callback choose-background;
     callback export-files;
+    callback add-paragraph;
+    callback remove-paragraph(int);
+    callback import-docx;
+    callback save-preset;
+    callback load-preset;
+    callback paragraph-edited(int, string);
+    callback paragraph-align-changed(int, int);
+    callback paragraph-indent-changed(int, int);
 
     VerticalBox {
         HorizontalBox {
@@ -54,10 +74,66 @@ export component MainWindow inherits Window {
                         spacing: 6px;
 
                         Text { text: "文本内容"; font-size: 14px; }
+                        HorizontalBox {
+                            spacing: 4px;
+                            input-mode-combo := ComboBox {
+                                model: ["纯文本", "段落"];
+                                current-index <=> root.input-mode;
+                            }
+                            Button {
+                                text: "添加段落";
+                                enabled: root.input-mode == 1;
+                                clicked => { root.add-paragraph(); }
+                            }
+                            Button {
+                                text: "导入 docx…";
+                                enabled: root.input-mode == 1;
+                                clicked => { root.import-docx(); }
+                            }
+                        }
+
                         input-edit := TextEdit {
                             text: "请输入要手写的文字…";
                             height: 140px;
                             wrap: word-wrap;
+                            visible: root.input-mode == 0;
+                        }
+
+                        VerticalBox {
+                            visible: root.input-mode == 1;
+                            spacing: 4px;
+                            for item[idx] in root.paragraphs : HorizontalBox {
+                                spacing: 4px;
+                                item-edit := TextEdit {
+                                    text: item.text;
+                                    edited(text) => { root.paragraph-edited(idx, text); }
+                                    height: 60px;
+                                    wrap: word-wrap;
+                                }
+                                VerticalBox {
+                                    spacing: 2px;
+                                    Text { text: "对齐"; font-size: 11px; color: #888; }
+                                    align-combo := ComboBox {
+                                        model: ["左对齐", "居中", "右对齐"];
+                                        current-index: item.align-index;
+                                        selected => { root.paragraph-align-changed(idx, align-combo.current-index); }
+                                    }
+                                }
+                                VerticalBox {
+                                    spacing: 2px;
+                                    Text { text: "首行缩进"; font-size: 11px; color: #888; }
+                                    item-indent := SpinBox {
+                                        value: item.indent;
+                                        edited(value) => { root.paragraph-indent-changed(idx, value); }
+                                        minimum: 0;
+                                        maximum: 500;
+                                    }
+                                }
+                                Button {
+                                    text: "删除";
+                                    clicked => { root.remove-paragraph(idx); }
+                                }
+                            }
                         }
 
                         Text { text: "字体文件"; font-size: 14px; }
@@ -136,6 +212,14 @@ export component MainWindow inherits Window {
                     vertical-alignment: center;
                     color: #555;
                 }
+            }
+            Button {
+                text: "保存预设…";
+                clicked => { root.save-preset(); }
+            }
+            Button {
+                text: "载入预设…";
+                clicked => { root.load-preset(); }
             }
             Button {
                 text: "生成预览";
