@@ -49,6 +49,7 @@ impl FontFace {
     /// - `origin_x` / `origin_y`：**基线**起点。
     /// - 掩码为 `width * height` 的逐行 bool 数组，命中像素置 `true`。
     /// - 覆盖度按阈值二值化（对齐 PIL mode="1" 的近似行为），阈值 0.5。
+    #[allow(clippy::too_many_arguments)]
     pub fn rasterize(
         &self,
         ch: char,

@@ -4,7 +4,7 @@
 //! 1. `w:firstLineChars`（1/100 字符）× 渲染字号 → 像素；
 //! 2. `w:firstLine`（EMU）按文档字号还原字符数 × 渲染字号；
 //! 3. 样式链（based_on）继承。
-//! 忽略空段落。
+//! 4. 忽略空段落。
 
 use std::path::Path;
 
