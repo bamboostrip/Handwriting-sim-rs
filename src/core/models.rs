@@ -42,6 +42,23 @@ pub enum MiswriteMode {
     Rewrite, // 错字划掉后，后文正常位置重写
 }
 
+impl MiswriteMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MiswriteMode::Above => "above",
+            MiswriteMode::Rewrite => "rewrite",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<MiswriteMode, String> {
+        match s {
+            "above" => Ok(MiswriteMode::Above),
+            "rewrite" => Ok(MiswriteMode::Rewrite),
+            other => Err(format!("未知重写方式：{other:?}，可选 above/rewrite")),
+        }
+    }
+}
+
 /// 单个段落的排版信息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Paragraph {
