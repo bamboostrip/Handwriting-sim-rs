@@ -29,6 +29,8 @@ pub enum EngineError {
     Io(#[from] std::io::Error),
     #[error("图像处理失败：{0}")]
     Image(String),
+    #[error("PDF 导出失败：{0}")]
+    Pdf(String),
     #[error("页面区域过小，无法排版任何文字（请检查边距 / 字号 / 背景尺寸）")]
     TextAreaTooSmall,
 }
@@ -244,6 +246,43 @@ pub fn render_all_pages_preview(
         start = consumed;
     }
     Ok(pages)
+}
+
+/// 便捷入口：导出 PDF（位图层方案，300 DPI）。
+///
+/// 复用 `render_pages` 全分辨率渲染，逐页嵌入位图；
+/// 页物理尺寸 = 像素 @ 300 DPI（A4 扫描背景 2480×3508 → 恰好 A4 页）。
+pub fn export_pdf(
+    params: &HandwritingParams,
+    out_path: &Path,
+    seed: u64,
+) -> Result<(), EngineError> {
+    let pages = DefaultEngine::new(seed).render_pages(params)?;
+    let mut doc = printpdf::PdfDocument::new("handwrite-sim");
+    let mut pdf_pages = Vec::with_capacity(pages.len());
+    for page in &pages {
+        let (w, h) = page.dimensions();
+        let raw = printpdf::RawImage::from_dynamic_image(image::DynamicImage::ImageRgba8(page.clone()))
+            .map_err(EngineError::Pdf)?;
+        let id = doc.add_image(&raw);
+        let ops = vec![printpdf::Op::UseXobject {
+            id,
+            transform: printpdf::XObjectTransform {
+                dpi: Some(300.0),
+                ..Default::default()
+            },
+        }];
+        pdf_pages.push(printpdf::PdfPage::new(
+            printpdf::Mm(w as f32 * 25.4 / 300.0),
+            printpdf::Mm(h as f32 * 25.4 / 300.0),
+            ops,
+        ));
+    }
+    doc.with_pages(pdf_pages);
+    let mut warnings = Vec::new();
+    let bytes = doc.save(&printpdf::PdfSaveOptions::default(), &mut warnings);
+    std::fs::write(out_path, bytes)?;
+    Ok(())
 }
 
 /// 预览专用：边界提示叠加（对齐 Python 版 `workers._bounds_overlay`）。
@@ -584,5 +623,57 @@ mod tests {
         assert!(corner[1] > border[1], "边框线应比边距外更接近提示色");
         // alpha 通道保持不透明
         assert_eq!(out.as_raw()[3], 255);
+    }
+
+    #[test]
+    fn export_pdf_produces_valid_multipage_pdf() {
+        let Some(font) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let bg = dir.path().join("bg.png");
+        let mut img = RgbImage::new(400, 200);
+        for px in img.pixels_mut() {
+            *px = Rgb([255, 255, 255]);
+        }
+        img.save(&bg).unwrap();
+
+        let mut params = make_params(&font, &bg);
+        params.text = "这是第一页的内容，需要足够长才能触发换页。第二行继续。第三行再来一些。第四行补充。".into();
+        params.font_size = 36.0;
+        params.line_spacing = 40.0;
+
+        let pages = DefaultEngine::new(7).render_pages(&params).unwrap();
+        assert!(pages.len() >= 2, "长文本应产生多页，实际 {}", pages.len());
+
+        let out = dir.path().join("out.pdf");
+        export_pdf(&params, &out, 7).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        assert!(bytes.starts_with(b"%PDF-"), "应以 %PDF- 开头");
+        assert!(bytes.len() > 1000, "PDF 应包含图像数据");
+
+        // 用 printpdf 读回验证页数与页尺寸
+        let mut warnings = Vec::new();
+        let doc = printpdf::PdfDocument::parse(&bytes, &printpdf::PdfParseOptions::default(), &mut warnings)
+            .unwrap_or_else(|e| panic!("PDF 解析失败：{e}"));
+        assert_eq!(doc.page_count(), pages.len(), "PDF 页数应与 render_pages 一致");
+        // 页物理尺寸 ≈ 像素 @ 300 DPI。printpdf 0.12 的 PdfPage 无 width/height
+        // 字段，页尺寸在 media_box: Rect 中，单位 Pt（1/72 英寸）
+        let (w, h) = pages[0].dimensions();
+        let page = doc.pages.first().expect("至少一页");
+        let expect_w_pt = w as f32 * 72.0 / 300.0;
+        let expect_h_pt = h as f32 * 72.0 / 300.0;
+        assert!(
+            (page.media_box.width.0 - expect_w_pt).abs() < 0.1,
+            "页宽 {} vs {expect_w_pt}",
+            page.media_box.width.0
+        );
+        assert!(
+            (page.media_box.height.0 - expect_h_pt).abs() < 0.1,
+            "页高 {} vs {expect_h_pt}",
+            page.media_box.height.0
+        );
+        fs::remove_dir_all(dir.path()).ok();
     }
 }
