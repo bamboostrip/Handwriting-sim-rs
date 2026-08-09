@@ -72,6 +72,8 @@ pub enum ParamsError {
     OutOfRangeColor { value: u8 },
     #[error("颜色格式无效：{0}（应为 #RRGGBB）")]
     InvalidColor(String),
+    #[error("行距（line_spacing + font_size）必须大于 0")]
+    NoLineSpacing,
 }
 
 /// 解析 `#RRGGBB` 颜色字符串（兼容不带 # 前缀的写法）。
@@ -186,12 +188,15 @@ impl HandwritingParams {
             ("perturb_y_sigma", self.perturb_y_sigma),
             ("perturb_theta_sigma", self.perturb_theta_sigma),
         ] {
-            if value < 0.0 {
-                return Err(ParamsError::Negative { name });
-            }
+        if value < 0.0 {
+            return Err(ParamsError::Negative { name });
         }
-        Ok(())
     }
+    if self.total_line_spacing() <= 0.0 {
+        return Err(ParamsError::NoLineSpacing);
+    }
+    Ok(())
+}
 
     /// 行距含字高（与 Python 版 `total_line_spacing` 语义一致）。
     pub fn total_line_spacing(&self) -> f32 {
