@@ -27,7 +27,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 rfd = "0.15"
-docx-rs = "0.4"
+# docx 导入：手写解析（zip + quick-xml），完整对齐 Python 版 docx_io.py 语义，
+# 避免第三方 docx 库读取 API 限制（详见 docs/superpowers/specs 阶段三设计）
+zip = "8"
+quick-xml = "0.41"
 
 [build-dependencies]
 # 编译 .slint 界面描述（与 slint 同版本）
