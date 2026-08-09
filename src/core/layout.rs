@@ -456,7 +456,7 @@ mod tests {
         let lines = layout_paragraph(&p, &font, &mut rng, &pa, 600);
         let first = lines[0].0.as_ref().expect("首行应有墨迹");
         let (mut max_x, mut min_x) = (0usize, usize::MAX);
-        for (_y, row) in first.chunks(600).enumerate() {
+        for row in first.chunks(600) {
             for (x, &b) in row.iter().enumerate() {
                 if b {
                     max_x = max_x.max(x);

@@ -101,7 +101,7 @@ impl DefaultEngine {
         let (width, height) = (background.width() as usize, background.height() as usize);
         let result = layout::layout_page(params, font, rng, text, start, width, height);
         let canvas =
-            perturb::perturb_mask(&result.mask, width, height, params, rng, &background.as_raw());
+            perturb::perturb_mask(&result.mask, width, height, params, rng, background.as_raw());
         Ok((rgba_from_rgb(&canvas, width, height), result.consumed))
     }
 }
@@ -120,7 +120,7 @@ impl Engine for DefaultEngine {
             );
             let canvas = perturb::perturb_mask(
                 &pages[0], background.width() as usize, background.height() as usize,
-                &scaled, &mut rng, &background.as_raw(),
+                &scaled, &mut rng, background.as_raw(),
             );
             return Ok(rgba_from_rgb(&canvas, background.width() as usize, background.height() as usize));
         }
@@ -144,7 +144,7 @@ impl Engine for DefaultEngine {
                 .map(|mask| {
                     let canvas = perturb::perturb_mask(
                         &mask, background.width() as usize, background.height() as usize,
-                        params, &mut rng, &background.as_raw(),
+                        params, &mut rng, background.as_raw(),
                     );
                     Ok(rgba_from_rgb(&canvas, background.width() as usize, background.height() as usize))
                 })

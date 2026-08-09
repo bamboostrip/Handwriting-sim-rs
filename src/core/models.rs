@@ -218,11 +218,13 @@ mod tests {
         let bg = dir.path().join("bg.png");
         std::fs::write(&font, b"dummy").unwrap();
         std::fs::write(&bg, b"dummy").unwrap();
-        let mut p = HandwritingParams::default();
-        p.text = "你好".into();
-        p.font_path = font.to_string_lossy().into_owned();
-        p.background_path = bg.to_string_lossy().into_owned();
-        p.perturb_theta_sigma = -1.0;
+        let p = HandwritingParams {
+            text: "你好".into(),
+            font_path: font.to_string_lossy().into_owned(),
+            background_path: bg.to_string_lossy().into_owned(),
+            perturb_theta_sigma: -1.0,
+            ..HandwritingParams::default()
+        };
         assert!(matches!(p.validate(), Err(ParamsError::Negative { name: "perturb_theta_sigma" })));
     }
 
