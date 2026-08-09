@@ -31,6 +31,8 @@ rfd = "0.15"
 # 避免第三方 docx 库读取 API 限制（详见 docs/superpowers/specs 阶段三设计）
 zip = "8"
 quick-xml = "0.41"
+# PDF 导出：位图层方案（MIT；禁用默认 html feature 避开 azul git 依赖）
+printpdf = { version = "0.12", default-features = false, features = ["images"] }
 
 [build-dependencies]
 # 编译 .slint 界面描述（与 slint 同版本）
