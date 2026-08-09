@@ -23,7 +23,7 @@ crates.io 上 `slint` crate 的默认许可是 GPLv3——这是发布平台的�
 本项目**确定开源**（MIT），因此：
 - 直接使用 crates.io 的 GPLv3 版 Slint，程序整体按 GPLv3 分发
 - 应用自身代码仍标注 MIT（GPL 传染作用于"完整程序分发"，源码模块保留各自许可）
-- GUI 内置 `AboutSlint` 组件（`main_window.slint` 底部），为未来切换预埋
+- GPLv3 无归因展示义务，GUI 不显示 `AboutSlint`
 
 ## 未来商业化切换路径
 
@@ -36,7 +36,7 @@ crates.io 上 `slint` crate 的默认许可是 GPLv3——这是发布平台的�
    slint = { git = "https://github.com/slint-ui/slint", tag = "v1.x.x" }
    ```
 
-2. **保持 `AboutSlint` 显示**（已预埋）满足归因义务。
+2. **添加 `AboutSlint` 组件**（在 `main_window.slint` 底部状态栏引入）满足归因义务。
 3. 应用代码仍可保持 MIT（或按需调整）。
 
 ⚠️ 嵌入式场景（把软件装进设备/工控屏销售）不受 Royalty-free 覆盖，
@@ -57,6 +57,6 @@ crates.io 上 `slint` crate 的默认许可是 GPLv3——这是发布平台的�
 
 ## 合规检查
 
-- [ ] GUI 底部可见 `AboutSlint`（切换 Royalty-free 后仍满足）
+- [ ] 若切换 Royalty-free：在 GUI 中添加并展示 `AboutSlint`
 - [ ] 发布包不含字体文件（版权隔离，与 Python 版一致）
 - [ ] 若未来切换许可，更新本文件与 README 的许可说明

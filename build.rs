@@ -3,4 +3,6 @@
 fn main() {
     slint_build::compile("src/ui/main_window.slint").expect("编译 main_window.slint 失败");
     println!("cargo:rerun-if-changed=src/ui/main_window.slint");
+    // main_window.slint 通过 import 引用的主题文件，变更同样需要重编译
+    println!("cargo:rerun-if-changed=src/ui/theme.slint");
 }

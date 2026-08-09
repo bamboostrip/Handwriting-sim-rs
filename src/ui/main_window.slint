@@ -5,20 +5,29 @@
 // - 预览区显示引擎输出的 RGBA 图像（Rust 侧 set_preview_image），支持翻页与底色切换
 // - 预设下拉框（Rust 侧 VecModel<String> 驱动）快捷切换
 // - 文字颜色 / 边距 / 扰动 σ / 边界提示（对齐 Python 版 ui.py 控件集）
+//
+// 样式对齐 Python 版 gui/ui.py：
+// - 布局方向：左侧预览区（可伸缩）+ 翻页导航，右侧固定 400px 参数面板 + 「预览/导出」主按钮
+// - 配色与按钮/分组框样式见 theme.slint（对应 Python `_LIGHT_QSS`）
+// - 排版参数为「数值 | 扰动 σ」表格，笔画扰动/边距使用带标题的分组框
 
 import {
-    Button,
     CheckBox,
     ComboBox,
-    HorizontalBox,
     LineEdit,
     ScrollView,
     Slider,
     SpinBox,
     TextEdit,
-    VerticalBox,
-    AboutSlint,
 } from "std-widgets.slint";
+import {
+    Theme,
+    GreenButton,
+    PrimaryButton,
+    GroupTitle,
+    SectionLabel,
+    FieldLabel,
+} from "theme.slint";
 
 export struct ParagraphItem {
     text: string,
@@ -28,8 +37,9 @@ export struct ParagraphItem {
 
 export component MainWindow inherits Window {
     title: "手写模拟器";
-    preferred-width: 1080px;
-    preferred-height: 720px;
+    preferred-width: 1280px;
+    preferred-height: 840px;
+    background: Theme.bg;
 
     // ---- 双向绑定参数（Rust 侧 get_/set_ 访问） ----
     in-out property <string> input-text <=> input-edit.text;
@@ -64,7 +74,8 @@ export component MainWindow inherits Window {
     in property <string> status-text: "就绪";
     in property <image> preview-image;
     in property <string> page-text: "第 1 / 1 页";
-    in-out property <color> preview-bg: #d5ddd5;
+    // 预览区底色（对齐 Python 版 PreviewLabel 初始 #c8d0ca）
+    in-out property <color> preview-bg: #c8d0ca;
 
     // 模式：0=纯文本 1=段落
     in-out property <int> input-mode: 0;
@@ -88,243 +99,24 @@ export component MainWindow inherits Window {
     callback next-page;
     callback toggle-preview-bg;
 
-    VerticalBox {
-        HorizontalBox {
-            // ---- 左侧参数面板 ----
-            Rectangle {
-                width: 380px;
-                ScrollView {
-                    VerticalBox {
-                        padding: 12px;
-                        spacing: 6px;
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
 
-                        Text { text: "文本内容"; font-size: 14px; }
-                        HorizontalBox {
-                            spacing: 4px;
-                            input-mode-combo := ComboBox {
-                                model: ["纯文本", "段落"];
-                                current-index <=> root.input-mode;
-                            }
-                            Button {
-                                text: "添加段落";
-                                enabled: root.input-mode == 1;
-                                clicked => { root.add-paragraph(); }
-                            }
-                            Button {
-                                text: "导入 docx…";
-                                enabled: root.input-mode == 1;
-                                clicked => { root.import-docx(); }
-                            }
-                        }
+        HorizontalLayout {
+            spacing: 10px;
 
-                        input-edit := TextEdit {
-                            text: "请输入要手写的文字…";
-                            height: 120px;
-                            wrap: word-wrap;
-                            visible: root.input-mode == 0;
-                        }
+            // ---- 左侧：预览区 + 翻页导航（对齐 Python 版左列） ----
+            VerticalLayout {
+                spacing: 6px;
+                horizontal-stretch: 1;
 
-                        VerticalBox {
-                            visible: root.input-mode == 1;
-                            spacing: 4px;
-                            for item[idx] in root.paragraphs : HorizontalBox {
-                                spacing: 4px;
-                                item-edit := TextEdit {
-                                    text: item.text;
-                                    edited(text) => { root.paragraph-edited(idx, text); }
-                                    height: 56px;
-                                    wrap: word-wrap;
-                                }
-                                VerticalBox {
-                                    spacing: 2px;
-                                    Text { text: "对齐"; font-size: 11px; color: #888; }
-                                    align-combo := ComboBox {
-                                        model: ["左对齐", "居中", "右对齐"];
-                                        current-index: item.align-index;
-                                        selected => { root.paragraph-align-changed(idx, align-combo.current-index); }
-                                    }
-                                }
-                                VerticalBox {
-                                    spacing: 2px;
-                                    Text { text: "首行缩进"; font-size: 11px; color: #888; }
-                                    item-indent := SpinBox {
-                                        value: item.indent;
-                                        edited(value) => { root.paragraph-indent-changed(idx, value); }
-                                        minimum: 0;
-                                        maximum: 500;
-                                    }
-                                }
-                                Button {
-                                    text: "删除";
-                                    clicked => { root.remove-paragraph(idx); }
-                                }
-                            }
-                        }
-
-                        Text { text: "字体文件"; font-size: 14px; }
-                        HorizontalBox {
-                            spacing: 4px;
-                            font-path-edit := LineEdit { placeholder-text: "未选择字体"; }
-                            Button {
-                                text: "选择…";
-                                clicked => { root.choose-font(); }
-                            }
-                        }
-
-                        Text { text: "背景图片"; font-size: 14px; }
-                        HorizontalBox {
-                            spacing: 4px;
-                            background-path-edit := LineEdit { placeholder-text: "未选择背景"; }
-                            Button {
-                                text: "选择…";
-                                clicked => { root.choose-background(); }
-                            }
-                        }
-
-                        // ---- 文字颜色 ----
-                        HorizontalBox {
-                            spacing: 4px;
-                            Text { text: "文字颜色"; font-size: 14px; }
-                            font-color-edit := LineEdit {
-                                text: "#000000";
-                                placeholder-text: "#000000";
-                                input-type: text;
-                            }
-                        }
-
-                        // ---- 预设：下拉快捷切换 + 载入/保存 ----
-                        HorizontalBox {
-                            spacing: 4px;
-                            Text { text: "预设"; font-size: 14px; }
-                            preset-combo := ComboBox {
-                                model: root.preset-list;
-                                current-index: root.preset-index;
-                                selected => { root.preset-selected(preset-combo.current-index); }
-                                horizontal-stretch: 1;
-                            }
-                            Button {
-                                text: "载入…";
-                                clicked => { root.load-preset(); }
-                            }
-                            Button {
-                                text: "保存…";
-                                clicked => { root.save-preset(); }
-                            }
-                        }
-
-                        // ---- 排版参数（数值 + 扰动 σ） ----
-                        Text { text: "排版参数"; font-size: 14px; }
-                        HorizontalBox {
-                            spacing: 4px;
-                            VerticalBox {
-                                spacing: 2px;
-                                Text { text: "字间距"; font-size: 11px; color: #888; }
-                                word-spacing-spin := SpinBox { value: 5; minimum: 0; maximum: 100; }
-                            }
-                            VerticalBox {
-                                spacing: 2px;
-                                Text { text: "字距 σ"; font-size: 11px; color: #888; }
-                                word-spacing-sigma-spin := SpinBox { value: 2; minimum: 0; maximum: 20; }
-                            }
-                        }
-                        HorizontalBox {
-                            spacing: 4px;
-                            VerticalBox {
-                                spacing: 2px;
-                                Text { text: "行间距（不含字高）"; font-size: 11px; color: #888; }
-                                line-spacing-spin := SpinBox { value: 48; minimum: 0; maximum: 200; }
-                            }
-                            VerticalBox {
-                                spacing: 2px;
-                                Text { text: "行距 σ"; font-size: 11px; color: #888; }
-                                line-spacing-sigma-spin := SpinBox { value: 2; minimum: 0; maximum: 20; }
-                            }
-                        }
-                        HorizontalBox {
-                            spacing: 4px;
-                            VerticalBox {
-                                spacing: 2px;
-                                Text { text: "字号"; font-size: 11px; color: #888; }
-                                font-size-spin := SpinBox { value: 36; minimum: 8; maximum: 200; }
-                            }
-                            VerticalBox {
-                                spacing: 2px;
-                                Text { text: "字号 σ"; font-size: 11px; color: #888; }
-                                font-size-sigma-spin := SpinBox { value: 2; minimum: 0; maximum: 20; }
-                            }
-                        }
-
-                        Text { text: "笔画扰动标准差"; font-size: 14px; }
-                        HorizontalBox {
-                            spacing: 4px;
-                            VerticalBox {
-                                spacing: 2px;
-                                Text { text: "x 平移"; font-size: 11px; color: #888; }
-                                perturb-x-spin := SpinBox { value: 2; minimum: 0; maximum: 20; }
-                            }
-                            VerticalBox {
-                                spacing: 2px;
-                                Text { text: "y 平移"; font-size: 11px; color: #888; }
-                                perturb-y-spin := SpinBox { value: 2; minimum: 0; maximum: 20; }
-                            }
-                            VerticalBox {
-                                spacing: 2px;
-                                Text { text: "θ 旋转"; font-size: 11px; color: #888; }
-                                perturb-theta-slider := Slider { value: 0.05; minimum: 0; maximum: 1; }
-                            }
-                        }
-
-                        // ---- 边距（位置式布局：上/下/左/右） ----
-                        Text { text: "边距"; font-size: 14px; }
-                        GridLayout {
-                            spacing: 6px;
-                            Row {
-                                Rectangle { }
-                                margin-top-spin := SpinBox {
-                                    value: 30; minimum: 0; maximum: 500;
-                                    horizontal-alignment: center;
-                                }
-                                Rectangle { }
-                            }
-                            Row {
-                                margin-left-spin := SpinBox { value: 30; minimum: 0; maximum: 500; }
-                                Text {
-                                    text: "边距";
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    color: #4ca6a6;
-                                    font-weight: 700;
-                                }
-                                margin-right-spin := SpinBox { value: 30; minimum: 0; maximum: 500; }
-                            }
-                            Row {
-                                Rectangle { }
-                                margin-bottom-spin := SpinBox {
-                                    value: 30; minimum: 0; maximum: 500;
-                                    horizontal-alignment: center;
-                                }
-                                Rectangle { }
-                            }
-                            Row {
-                                bounds-check := CheckBox { text: "边界提示"; }
-                                bounds-color-edit := LineEdit {
-                                    text: "#4ca6a6";
-                                    placeholder-text: "#4ca6a6";
-                                }
-                                Rectangle { }
-                            }
-                        }
-
-                        Text { text: "提示：选择字体与背景后点击「生成预览」"; font-size: 11px; color: #888; }
-                    }
-                }
-            }
-
-            // ---- 右侧预览区域 ----
-            VerticalBox {
                 Rectangle {
                     background: preview-bg;
-                    width: 800px;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: Theme.group-border;
+                    vertical-stretch: 1;
                     Image {
                         source: preview-image;
                         image-fit: contain;
@@ -332,57 +124,371 @@ export component MainWindow inherits Window {
                         height: 100%;
                     }
                 }
-                // ---- 预览翻页导航 ----
-                HorizontalBox {
-                    spacing: 8px;
-                    padding: 4px;
-                    Button {
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    GreenButton {
                         text: "◀ 上一页";
                         clicked => { root.prev-page(); }
                     }
                     Text {
                         text: page-text;
+                        horizontal-stretch: 1;
                         horizontal-alignment: center;
                         vertical-alignment: center;
-                        color: #555;
+                        font-family: "楷体";
+                        font-size: Theme.base-font;
+                        color: Theme.text;
                     }
-                    Button {
+                    GreenButton {
                         text: "下一页 ▶";
                         clicked => { root.next-page(); }
                     }
-                    Button {
+                    GreenButton {
                         text: "预览底色";
                         clicked => { root.toggle-preview-bg(); }
                     }
                 }
             }
-        }
 
-        // ---- 底部工具条 ----
-        HorizontalBox {
-            padding: 6px;
-            spacing: 8px;
+            // ---- 右侧：参数面板（可滚动）+ 主按钮 ----
+            VerticalLayout {
+                width: 460px;
+                spacing: 8px;
 
-            Rectangle {
-                height: 30px;
-                Text {
-                    text: status-text;
-                    vertical-alignment: center;
-                    color: #555;
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 6px;
+                        padding-right: 10px;
+                        spacing: 8px;
+
+                        // ---- 待处理文本 ----
+                        SectionLabel { text: "待处理文本"; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            input-mode-combo := ComboBox {
+                                model: ["纯文本", "段落"];
+                                current-index <=> root.input-mode;
+                                min-width: 90px;
+                                horizontal-stretch: 0;
+                            }
+                            GreenButton {
+                                text: "添加段落";
+                                enabled: root.input-mode == 1;
+                                clicked => { root.add-paragraph(); }
+                            }
+                            GreenButton {
+                                text: "导入 docx";
+                                enabled: root.input-mode == 1;
+                                clicked => { root.import-docx(); }
+                            }
+                        }
+
+                        input-edit := TextEdit {
+                            placeholder-text: "请输入文本内容，支持多行。";
+                            height: 120px;
+                            wrap: word-wrap;
+                            visible: root.input-mode == 0;
+                        }
+
+                        VerticalLayout {
+                            visible: root.input-mode == 1;
+                            spacing: 4px;
+                            for item[idx] in root.paragraphs : HorizontalLayout {
+                                spacing: 4px;
+                                item-edit := TextEdit {
+                                    text: item.text;
+                                    edited(text) => { root.paragraph-edited(idx, text); }
+                                    height: 56px;
+                                    wrap: word-wrap;
+                                    horizontal-stretch: 1;
+                                }
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    Text { text: "对齐"; font-size: 11px; color: Theme.sub-text; }
+                                    align-combo := ComboBox {
+                                        model: ["左对齐", "居中", "右对齐"];
+                                        current-index: item.align-index;
+                                        selected => { root.paragraph-align-changed(idx, align-combo.current-index); }
+                                        min-width: 80px;
+                                    }
+                                }
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    Text { text: "首行缩进"; font-size: 11px; color: Theme.sub-text; }
+                                    item-indent := SpinBox {
+                                        value: item.indent;
+                                        edited(value) => { root.paragraph-indent-changed(idx, value); }
+                                        minimum: 0;
+                                        maximum: 500;
+                                        min-width: 64px;
+                                    }
+                                }
+                                GreenButton {
+                                    text: "删除";
+                                    clicked => { root.remove-paragraph(idx); }
+                                }
+                            }
+                        }
+
+                        // ---- 字体 / 背景文件选择 ----
+                        GridLayout {
+                            spacing: 6px;
+                            Row {
+                                FieldLabel { text: "字体"; }
+                                font-path-edit := LineEdit {
+                                    placeholder-text: "未选择字体";
+                                    horizontal-stretch: 1;
+                                    min-width: 60px;
+                                }
+                                GreenButton {
+                                    text: "选择";
+                                    clicked => { root.choose-font(); }
+                                }
+                            }
+                            Row {
+                                FieldLabel { text: "背景"; }
+                                background-path-edit := LineEdit {
+                                    placeholder-text: "未选择背景";
+                                    horizontal-stretch: 1;
+                                    min-width: 60px;
+                                }
+                                GreenButton {
+                                    text: "选择";
+                                    clicked => { root.choose-background(); }
+                                }
+                            }
+                        }
+
+                        // ---- 文字颜色（#RRGGBB 十六进制） ----
+                        HorizontalLayout {
+                            spacing: 6px;
+                            FieldLabel { text: "文字颜色"; }
+                            font-color-edit := LineEdit {
+                                text: "#000000";
+                                placeholder-text: "#000000";
+                                min-width: 96px;
+                                horizontal-stretch: 0;
+                                horizontal-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+
+                        // ---- 预设：下拉快捷切换 + 载入/保存 ----
+                        HorizontalLayout {
+                            spacing: 6px;
+                            FieldLabel { text: "预设"; }
+                            preset-combo := ComboBox {
+                                model: root.preset-list;
+                                current-index: root.preset-index;
+                                selected => { root.preset-selected(preset-combo.current-index); }
+                                horizontal-stretch: 1;
+                                min-width: 90px;
+                            }
+                            GreenButton {
+                                text: "载入预设";
+                                clicked => { root.load-preset(); }
+                            }
+                            GreenButton {
+                                text: "保存预设";
+                                clicked => { root.save-preset(); }
+                            }
+                        }
+
+                        // ---- 排版参数（数值 + 扰动 σ 表格，对齐 Python 版 QGroupBox） ----
+                        Rectangle {
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.group-border;
+                            GroupTitle { text: "排版参数"; x: 10px; y: -8px; }
+                            GridLayout {
+                                padding-top: 16px;
+                                padding-bottom: 10px;
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 6px;
+                                Row {
+                                    Rectangle { }
+                                    FieldLabel { text: "数值"; font-weight: 700; horizontal-alignment: center; }
+                                    Rectangle { width: 14px; }
+                                    FieldLabel { text: "扰动 σ"; font-weight: 700; horizontal-alignment: center; }
+                                }
+                                Row {
+                                    FieldLabel { text: "字水平间距"; }
+                                    word-spacing-spin := SpinBox {
+                                        value: 5; minimum: 0; maximum: 100;
+                                        min-width: 70px;
+                                        horizontal-alignment: center;
+                                    }
+                                    FieldLabel { text: "σ"; horizontal-alignment: center; }
+                                    word-spacing-sigma-spin := SpinBox {
+                                        value: 2; minimum: 0; maximum: 20;
+                                        min-width: 70px;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                                Row {
+                                    FieldLabel { text: "字竖直间距"; }
+                                    line-spacing-spin := SpinBox {
+                                        value: 48; minimum: 0; maximum: 200;
+                                        min-width: 70px;
+                                        horizontal-alignment: center;
+                                    }
+                                    FieldLabel { text: "σ"; horizontal-alignment: center; }
+                                    line-spacing-sigma-spin := SpinBox {
+                                        value: 2; minimum: 0; maximum: 20;
+                                        min-width: 70px;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                                Row {
+                                    FieldLabel { text: "字体大小"; }
+                                    font-size-spin := SpinBox {
+                                        value: 36; minimum: 8; maximum: 200;
+                                        min-width: 70px;
+                                        horizontal-alignment: center;
+                                    }
+                                    FieldLabel { text: "σ"; horizontal-alignment: center; }
+                                    font-size-sigma-spin := SpinBox {
+                                        value: 2; minimum: 0; maximum: 20;
+                                        min-width: 70px;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        // ---- 笔画扰动 ----
+                        Rectangle {
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.group-border;
+                            GroupTitle { text: "笔画扰动"; x: 10px; y: -8px; }
+                            GridLayout {
+                                padding-top: 16px;
+                                padding-bottom: 10px;
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 6px;
+                                Row {
+                                    FieldLabel { text: "水平笔画位移"; }
+                                    perturb-x-spin := SpinBox {
+                                        value: 2; minimum: 0; maximum: 20;
+                                        horizontal-stretch: 1;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                                Row {
+                                    FieldLabel { text: "竖直笔画位移"; }
+                                    perturb-y-spin := SpinBox {
+                                        value: 2; minimum: 0; maximum: 20;
+                                        horizontal-stretch: 1;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                                Row {
+                                    FieldLabel { text: "笔画旋转"; }
+                                    perturb-theta-slider := Slider {
+                                        value: 0.05; minimum: 0; maximum: 1;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                            }
+                        }
+
+                        // ---- 边距：位置式布局（上/下/左/右环绕中心「边距」） ----
+                        Rectangle {
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.group-border;
+                            GroupTitle { text: "边距"; x: 10px; y: -8px; }
+                            GridLayout {
+                                padding-top: 16px;
+                                padding-bottom: 10px;
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 6px;
+                                Row {
+                                    Rectangle { }
+                                    margin-top-spin := SpinBox {
+                                        value: 30; minimum: 0; maximum: 500;
+                                        horizontal-alignment: center;
+                                    }
+                                    Rectangle { }
+                                }
+                                Row {
+                                    margin-left-spin := SpinBox { value: 30; minimum: 0; maximum: 500; }
+                                    Text {
+                                        text: "边距";
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        font-family: "楷体";
+                                        font-weight: 700;
+                                        color: #4ca6a6;
+                                    }
+                                    margin-right-spin := SpinBox { value: 30; minimum: 0; maximum: 500; }
+                                }
+                                Row {
+                                    Rectangle { }
+                                    margin-bottom-spin := SpinBox {
+                                        value: 30; minimum: 0; maximum: 500;
+                                        horizontal-alignment: center;
+                                    }
+                                    Rectangle { }
+                                }
+                                Row {
+                                    bounds-check := CheckBox { text: "边界提示(仅预览)"; }
+                                    bounds-color-edit := LineEdit {
+                                        text: "#4ca6a6";
+                                        placeholder-text: "#4ca6a6";
+                                        min-width: 96px;
+                                        horizontal-stretch: 0;
+                                        horizontal-alignment: center;
+                                    }
+                                    Rectangle { }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "提示：选择字体与背景后点击「预览」";
+                            font-family: "楷体";
+                            font-size: 11px;
+                            color: Theme.sub-text;
+                        }
+                    }
+                }
+
+                // ---- 底部主按钮（对齐 Python 版 primary 按钮行） ----
+                HorizontalLayout {
+                    spacing: 10px;
+                    PrimaryButton {
+                        text: "预览";
+                        horizontal-stretch: 1;
+                        clicked => { root.regenerate(); }
+                    }
+                    PrimaryButton {
+                        text: "导出";
+                        horizontal-stretch: 1;
+                        clicked => { root.export-files(); }
+                    }
                 }
             }
-            Button {
-                text: "生成预览";
-                clicked => { root.regenerate(); }
-            }
-            Button {
-                text: "导出图片…";
-                clicked => { root.export-files(); }
-            }
-            // Royalty-free 许可合规预留：若切换为 Royalty-free 版本，
-            // 需在应用内显示 AboutSlint（见 docs/03-licensing.md）。
-            AboutSlint {
-                height: 26px;
+        }
+
+        // ---- 底部状态栏 ----
+        // 当前使用 GPLv3 版 Slint，无归因展示义务，故不显示 AboutSlint；
+        // 若未来切换 Royalty-free 许可，需恢复 AboutSlint（见 docs/03-licensing.md）。
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: status-text;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                font-family: "楷体";
+                font-size: 12px;
+                color: Theme.sub-text;
             }
         }
     }
