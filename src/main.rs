@@ -32,8 +32,19 @@ const PREVIEW_BG_COLORS: [&str; 2] = ["#c8d0ca", "#565b56"];
 /// 预设下拉框占位项。
 const PRESET_PLACEHOLDER: &str = "— 选择预设 —";
 
+/// GUI 调试日志：debug 构建默认输出（便于定位卡死/慢渲染环节），
+/// release 构建需 `HANDWRITE_DEBUG=1` 才输出。
+macro_rules! gui_dbg {
+    ($($arg:tt)*) => {{
+        if cfg!(debug_assertions) || std::env::var_os("HANDWRITE_DEBUG").is_some() {
+            eprintln!("[GUI] {}", format_args!($($arg)*));
+        }
+    }};
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui = MainWindow::new()?;
+    gui_dbg!("GUI 启动完成（MainWindow 构建 + 预设扫描完毕），等待操作");
 
     // ---- 状态 ----
     let timer = Rc::new(Timer::default());
@@ -64,25 +75,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let index = Rc::clone(&preview_index);
         ui.on_regenerate(move || {
             let Some(ui) = weak.upgrade() else { return };
+            gui_dbg!("「预览」按钮触发（300ms 防抖后开始渲染）");
             let timer = Rc::clone(&timer);
             let seed = Rc::clone(&seed);
             let preset_params = Rc::clone(&preset_params);
             let pages = Rc::clone(&pages);
             let index = Rc::clone(&index);
             timer.start(TimerMode::SingleShot, Duration::from_millis(PREVIEW_DEBOUNCE_MS), move || {
-                if std::env::var_os("HANDWRITE_DEBUG").is_some() {
-                    eprintln!("[GUI] 预览渲染开始（seed={}）", seed.borrow());
-                }
+                gui_dbg!("预览渲染开始（seed={}）", seed.borrow());
                 match render_and_show(&ui, &preset_params, &seed, &pages, &index) {
                     Ok(()) => {
-                        if std::env::var_os("HANDWRITE_DEBUG").is_some() {
-                            eprintln!("[GUI] 预览渲染结束（成功）");
-                        }
+                        gui_dbg!("预览渲染结束（成功）");
                     }
                     Err(e) => {
-                        if std::env::var_os("HANDWRITE_DEBUG").is_some() {
-                            eprintln!("[GUI] 预览渲染失败：{e}");
-                        }
+                        gui_dbg!("预览渲染失败：{e}");
                         ui.set_status_text(SharedString::from(format!("渲染失败：{e}")))
                     }
                 }
@@ -534,28 +540,26 @@ fn render_and_show(
 ) -> Result<(), EngineError> {
     let t0 = std::time::Instant::now();
     let params = collect_params(ui, preset_params)?;
-    if std::env::var_os("HANDWRITE_DEBUG").is_some() {
-        eprintln!(
-            "[GUI] 参数收集完成：{:.0}ms（文本 {} 字 / 段落 {} 段 / 字体 {} / 背景 {}）",
-            t0.elapsed().as_secs_f64() * 1000.0,
-            params.text.chars().count(),
-            params.paragraphs.len(),
-            params.font_path,
-            params.background_path,
-        );
-    }
+    gui_dbg!(
+        "参数收集完成：{:.0}ms（文本 {} 字 / 段落 {} 段 / 字体 {} / 背景 {}）",
+        t0.elapsed().as_secs_f64() * 1000.0,
+        params.text.chars().count(),
+        params.paragraphs.len(),
+        params.font_path,
+        params.background_path,
+    );
     let seed = {
         let mut s = seed_counter.borrow_mut();
         *s += 1;
         *s
     };
     let mut pages = render_all_pages_preview(&params, seed)?;
-    if std::env::var_os("HANDWRITE_DEBUG").is_some() {
+    {
         let w = pages.first().map(|p| p.width()).unwrap_or(0);
         let h = pages.first().map(|p| p.height()).unwrap_or(0);
         let mb = pages.len() as u64 * w as u64 * h as u64 * 4 / 1024 / 1024;
-        eprintln!(
-            "[GUI] 引擎渲染完成：{:.0}ms（{} 页，{}x{}，约 {mb} MB）",
+        gui_dbg!(
+            "引擎渲染完成：{:.0}ms（{} 页，{}x{}，约 {mb} MB）",
             t0.elapsed().as_secs_f64() * 1000.0,
             pages.len(),
             w,
@@ -568,9 +572,7 @@ fn render_and_show(
         for page in pages.iter_mut() {
             *page = overlay_bounds(page, &params, color);
         }
-        if std::env::var_os("HANDWRITE_DEBUG").is_some() {
-            eprintln!("[GUI] 边界提示叠加完成：{:.0}ms", t0.elapsed().as_secs_f64() * 1000.0);
-        }
+        gui_dbg!("边界提示叠加完成：{:.0}ms", t0.elapsed().as_secs_f64() * 1000.0);
     }
     *preview_pages.borrow_mut() = pages;
     *preview_index.borrow_mut() = 0;
