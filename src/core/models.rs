@@ -34,6 +34,14 @@ impl Align {
     }
 }
 
+/// 错字划掉后的重写方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MiswriteMode {
+    #[default]
+    Above,   // 错字正上方略偏右，小一号重写
+    Rewrite, // 错字划掉后，后文正常位置重写
+}
+
 /// 单个段落的排版信息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Paragraph {
@@ -74,6 +82,8 @@ pub enum ParamsError {
     InvalidColor(String),
     #[error("行距（line_spacing + font_size）必须大于 0")]
     NoLineSpacing,
+    #[error("错字率必须在 0~1 之间：{value}")]
+    MiswriteRate { value: f32 },
 }
 
 /// 解析 `#RRGGBB` 颜色字符串（兼容不带 # 前缀的写法）。
@@ -122,6 +132,14 @@ pub struct HandwritingParams {
     pub perturb_y_sigma: f32,
     pub perturb_theta_sigma: f32,
 
+    // ---- 写错字模拟 ----
+    /// 每字符被判定为错字的概率（0~1，UI 中为 0~30%）。
+    #[serde(default)]
+    pub miswrite_rate: f32,
+    /// 错字重写方式。
+    #[serde(default)]
+    pub miswrite_rewrite_mode: MiswriteMode,
+
     // ---- 排版细节 ----
     pub end_chars: String,
     pub start_chars: String,
@@ -149,6 +167,8 @@ impl Default for HandwritingParams {
             perturb_x_sigma: 2.0,
             perturb_y_sigma: 2.0,
             perturb_theta_sigma: 0.05,
+            miswrite_rate: 0.0,
+            miswrite_rewrite_mode: MiswriteMode::Above,
             end_chars: "，。".to_string(),
             start_chars: String::new(),
         }
@@ -194,6 +214,9 @@ impl HandwritingParams {
     }
     if self.total_line_spacing() <= 0.0 {
         return Err(ParamsError::NoLineSpacing);
+    }
+    if !(0.0..=1.0).contains(&self.miswrite_rate) {
+        return Err(ParamsError::MiswriteRate { value: self.miswrite_rate });
     }
     Ok(())
 }
@@ -252,5 +275,35 @@ mod tests {
         assert_eq!(Align::parse("center").unwrap(), Align::Center);
         assert_eq!(Align::Center.as_str(), "center");
         assert!(Align::parse("top").is_err());
+    }
+
+    #[test]
+    fn miswrite_defaults_off_and_above() {
+        let p = HandwritingParams::default();
+        assert_eq!(p.miswrite_rate, 0.0);
+        assert_eq!(p.miswrite_rewrite_mode, MiswriteMode::Above);
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_miswrite_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        let font = dir.path().join("font.ttf");
+        let bg = dir.path().join("bg.png");
+        std::fs::write(&font, b"dummy").unwrap();
+        std::fs::write(&bg, b"dummy").unwrap();
+        let base = HandwritingParams {
+            text: "你好".into(),
+            font_path: font.to_string_lossy().into_owned(),
+            background_path: bg.to_string_lossy().into_owned(),
+            ..HandwritingParams::default()
+        };
+        assert!(matches!(
+            base.clone().validate(),
+            Ok(())
+        ));
+        let p = HandwritingParams { miswrite_rate: -0.01, ..base.clone() };
+        assert!(matches!(p.validate(), Err(ParamsError::MiswriteRate { .. })));
+        let p = HandwritingParams { miswrite_rate: 1.01, ..base };
+        assert!(matches!(p.validate(), Err(ParamsError::MiswriteRate { .. })));
     }
 }
