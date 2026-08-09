@@ -7,6 +7,7 @@
 //! 预览对超大背景（宽 > `PREVIEW_MAX_WIDTH`）做降采样并等比缩放空间参数，导出始终全分辨率。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use image::{RgbImage, RgbaImage};
 use rand::{rngs::StdRng, SeedableRng};
@@ -39,6 +40,46 @@ pub enum EngineError {
 /// 2048 宽对 ~800px 的预览区已远超显示精度；比 4096 减少 4 倍渲染/内存开销
 /// （千万像素级背景逐页缓存 4096 宽时每页可达 ~95MB）。
 const PREVIEW_MAX_WIDTH: u32 = 2048;
+
+/// 预览背景缓存（路径+修改时间 → (原始宽度, 缩略图)）。
+///
+/// 32MP 级背景解码+降采样需数秒；每次预览（换 seed 重画笔画）都重新处理
+/// 是最大的重复开销，缓存后只有首次预览慢，后续亚秒级。最多保留 2 份，
+/// 超限清空（预览场景通常只有一个背景）。
+static PREVIEW_BG_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(String, u64), Arc<(u32, RgbImage)>>>> =
+    std::sync::OnceLock::new();
+
+/// 背景缓存键：路径 + 文件修改时间（秒），文件被替换时自动失效。
+fn bg_cache_key(path: &str) -> (String, u64) {
+    let mtime = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    (path.to_string(), mtime)
+}
+
+/// 按 `src_w`（原始背景宽度）等比缩放空间参数；无需降采样时原样返回。
+fn scaled_params_for(params: &HandwritingParams, src_w: u32) -> HandwritingParams {
+    if src_w <= PREVIEW_MAX_WIDTH {
+        return params.clone();
+    }
+    let scale = PREVIEW_MAX_WIDTH as f32 / src_w as f32;
+    let mut scaled = params.clone();
+    for f in [
+        &mut scaled.font_size, &mut scaled.line_spacing, &mut scaled.word_spacing,
+        &mut scaled.left_margin, &mut scaled.right_margin,
+        &mut scaled.top_margin, &mut scaled.bottom_margin,
+        &mut scaled.word_spacing_sigma, &mut scaled.line_spacing_sigma,
+        &mut scaled.font_size_sigma, &mut scaled.perturb_x_sigma,
+        &mut scaled.perturb_y_sigma,
+    ] {
+        *f *= scale;
+    }
+    scaled.font_size = scaled.font_size.max(1.0);
+    scaled
+}
 
 /// 调试日志：`HANDWRITE_DEBUG=1` 时输出到 stderr（带耗时毫秒），否则静默。
 /// 用于排查预览/导出卡死时的环节定位，不参与任何业务逻辑。
@@ -80,52 +121,71 @@ impl DefaultEngine {
     ///
     /// 重采样用 `fast_image_resize`（SIMD + rayon 多线程）：实测 32MP 背景 Lanczos3
     /// 降采样 79s → ~2s；`image::imageops::resize` 对千万像素级输入极慢（单线程朴素实现）。
+    /// 结果按路径+修改时间缓存：首次预览后，后续预览（换 seed）直接复用缩略图。
     fn load_background_for_preview(
         params: &HandwritingParams,
     ) -> Result<(RgbImage, HandwritingParams), EngineError> {
         let t0 = std::time::Instant::now();
-        let bg = Self::load_background(&params.background_path)?;
-        if bg.width() <= PREVIEW_MAX_WIDTH {
-            dbg_log("背景加载完成（未降采样）", t0.elapsed().as_millis());
-            return Ok((bg, params.clone()));
+        let key = bg_cache_key(&params.background_path);
+
+        // 缓存命中：直接复用缩略图，仅重算缩放参数（毫秒级）
+        if let Some(entry) = PREVIEW_BG_CACHE
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap()
+            .get(&key)
+        {
+            let (src_w, thumb) = (entry.0, &entry.1);
+            let scaled = scaled_params_for(params, src_w);
+            dbg_log(
+                &format!("背景命中缓存（原始宽 {src_w}px，缩略图 {}x{}）", thumb.width(), thumb.height()),
+                t0.elapsed().as_millis(),
+            );
+            return Ok((thumb.clone(), scaled));
         }
-        let scale = PREVIEW_MAX_WIDTH as f32 / bg.width() as f32;
-        let new_height = (bg.height() as f32 * scale).round().max(1.0) as u32;
-        let (src_w, src_h) = (bg.width(), bg.height());
-        let src = fast_image_resize::images::Image::from_vec_u8(
-            src_w,
-            src_h,
-            bg.into_raw(),
-            fast_image_resize::PixelType::U8x3,
-        )
-        .map_err(|e| EngineError::Image(format!("构造重采样源图失败：{e}")))?;
-        let mut dst = fast_image_resize::images::Image::new(
-            PREVIEW_MAX_WIDTH,
-            new_height,
-            fast_image_resize::PixelType::U8x3,
-        );
-        let mut resizer = fast_image_resize::Resizer::new();
-        resizer
-            .resize(&src, &mut dst, &fast_image_resize::ResizeOptions::new())
-            .map_err(|e| EngineError::Image(format!("背景降采样失败：{e}")))?;
-        let thumb = RgbImage::from_raw(PREVIEW_MAX_WIDTH, new_height, dst.into_vec())
-            .ok_or_else(|| EngineError::Image("背景降采样输出尺寸异常".into()))?;
+
+        let bg = Self::load_background(&params.background_path)?;
+        let src_w = bg.width();
+        let scaled = scaled_params_for(params, src_w);
+        let thumb = if bg.width() <= PREVIEW_MAX_WIDTH {
+            bg
+        } else {
+            let scale = PREVIEW_MAX_WIDTH as f32 / bg.width() as f32;
+            let new_height = (bg.height() as f32 * scale).round().max(1.0) as u32;
+            let (src_w, src_h) = (bg.width(), bg.height());
+            let src = fast_image_resize::images::Image::from_vec_u8(
+                src_w,
+                src_h,
+                bg.into_raw(),
+                fast_image_resize::PixelType::U8x3,
+            )
+            .map_err(|e| EngineError::Image(format!("构造重采样源图失败：{e}")))?;
+            let mut dst = fast_image_resize::images::Image::new(
+                PREVIEW_MAX_WIDTH,
+                new_height,
+                fast_image_resize::PixelType::U8x3,
+            );
+            let mut resizer = fast_image_resize::Resizer::new();
+            resizer
+                .resize(&src, &mut dst, &fast_image_resize::ResizeOptions::new())
+                .map_err(|e| EngineError::Image(format!("背景降采样失败：{e}")))?;
+            RgbImage::from_raw(PREVIEW_MAX_WIDTH, new_height, dst.into_vec())
+                .ok_or_else(|| EngineError::Image("背景降采样输出尺寸异常".into()))?
+        };
         dbg_log(
-            &format!("背景加载+降采样（{}x{} → {}x{}）", src_w, src_h, thumb.width(), thumb.height()),
+            &format!("背景加载+降采样（{}x{} → {}x{}）", src_w, thumb.height() * src_w / thumb.width().max(1), thumb.width(), thumb.height()),
             t0.elapsed().as_millis(),
         );
-        let mut scaled = params.clone();
-        for f in [
-            &mut scaled.font_size, &mut scaled.line_spacing, &mut scaled.word_spacing,
-            &mut scaled.left_margin, &mut scaled.right_margin,
-            &mut scaled.top_margin, &mut scaled.bottom_margin,
-            &mut scaled.word_spacing_sigma, &mut scaled.line_spacing_sigma,
-            &mut scaled.font_size_sigma, &mut scaled.perturb_x_sigma,
-            &mut scaled.perturb_y_sigma,
-        ] {
-            *f *= scale;
+        {
+            let mut map = PREVIEW_BG_CACHE
+                .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+                .lock()
+                .unwrap();
+            if map.len() >= 2 {
+                map.clear();
+            }
+            map.insert(key, Arc::new((src_w, thumb.clone())));
         }
-        scaled.font_size = scaled.font_size.max(1.0);
         Ok((thumb, scaled))
     }
 
@@ -273,6 +333,7 @@ pub fn render_all_pages_preview(
     dbg_log(&format!("参数校验通过（文本 {} 字 / 段落 {} 段）", params.text.chars().count(), params.paragraphs.len()), t0.elapsed().as_millis());
     let font =
         FontFace::load(Path::new(&params.font_path), params.font_size).map_err(EngineError::Font)?;
+    dbg_log("字体加载完成", t0.elapsed().as_millis());
     let (background, scaled) = DefaultEngine::load_background_for_preview(params)?;
     let (width, height) = (background.width() as usize, background.height() as usize);
     dbg_log(&format!("画布 {width}x{height}，开始排版"), t0.elapsed().as_millis());
@@ -310,7 +371,8 @@ pub fn render_all_pages_preview(
         }
         start = consumed;
     }
-    dbg_log(&format!("预览渲染完成（共 {page_no} 页）"), t0.elapsed().as_millis());
+    let done_ms = t0.elapsed().as_millis();
+    dbg_log(&format!("预览渲染完成（共 {page_no} 页）"), done_ms);
     Ok(pages)
 }
 
