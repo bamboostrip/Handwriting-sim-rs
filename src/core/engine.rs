@@ -29,6 +29,8 @@ pub enum EngineError {
     Io(#[from] std::io::Error),
     #[error("图像处理失败：{0}")]
     Image(String),
+    #[error("页面区域过小，无法排版任何文字（请检查边距 / 字号 / 背景尺寸）")]
+    TextAreaTooSmall,
 }
 
 /// 预览降采样的最大背景宽度阈值。
@@ -158,6 +160,10 @@ impl Engine for DefaultEngine {
             if consumed >= params.text.chars().count() {
                 break;
             }
+            if consumed <= start {
+                // 一页未消费任何字符（文本区过小等）：再渲染只会无限追加空白页
+                return Err(EngineError::TextAreaTooSmall);
+            }
             start = consumed;
         }
         Ok(pages)
@@ -230,6 +236,10 @@ pub fn render_all_pages_preview(
         pages.push(page);
         if consumed >= params.text.chars().count() {
             break;
+        }
+        if consumed <= start {
+            // 一页未消费任何字符（文本区过小等）：再渲染只会无限追加空白页
+            return Err(EngineError::TextAreaTooSmall);
         }
         start = consumed;
     }
@@ -489,6 +499,58 @@ mod tests {
             assert_eq!(p.dimensions(), preview.dimensions());
         }
         fs::remove_dir_all(dir.path()).ok();
+    }
+
+    /// 文本区过小（小背景 + 默认边距）时，多页循环必须终止而不是无限追加空白页。
+    /// 回归：点击预览导致 GUI 卡死（渲染线程死循环）。
+    #[test]
+    fn render_pages_terminates_on_tiny_text_area() {
+        let Some(font) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let bg = dir.path().join("bg.png");
+        // 64x64 小背景：默认边距(30) + 行距(48) + 字号(36) 下文本区为空
+        let mut img = RgbImage::new(64, 64);
+        for px in img.pixels_mut() {
+            *px = Rgb([255, 255, 255]);
+        }
+        img.save(&bg).unwrap();
+
+        let params = make_params(&font, &bg);
+        // 不允许死循环：若死循环此处会挂起（配合 cargo test 超时观察）
+        let pages = DefaultEngine::new(42).render_pages(&params);
+        assert!(
+            matches!(pages, Err(EngineError::TextAreaTooSmall)),
+            "导出路径应明确报错而不是无限追加空白页，实际 {pages:?}"
+        );
+
+        let preview = render_all_pages_preview(&params, 42);
+        assert!(
+            matches!(preview, Err(EngineError::TextAreaTooSmall)),
+            "预览路径应明确报错，实际 {preview:?}"
+        );
+        fs::remove_dir_all(dir.path()).ok();
+    }
+
+    /// 行距+字号为 0 时 layout_page 的 y 不再推进，必须被校验拦截。
+    #[test]
+    fn validate_rejects_zero_total_line_spacing() {
+        let dir = tempfile::tempdir().unwrap();
+        let font = dir.path().join("font.ttf");
+        let bg = dir.path().join("bg.png");
+        std::fs::write(&font, b"dummy").unwrap();
+        std::fs::write(&bg, b"dummy").unwrap();
+        let p = HandwritingParams {
+            text: "你好".into(),
+            font_path: font.to_string_lossy().into_owned(),
+            background_path: bg.to_string_lossy().into_owned(),
+            font_size: 0.0,
+            line_spacing: 0.0,
+            ..HandwritingParams::default()
+        };
+        assert!(matches!(p.validate(), Err(ParamsError::NoLineSpacing)));
     }
 
     #[test]
