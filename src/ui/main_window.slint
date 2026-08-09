@@ -53,6 +53,9 @@ export component MainWindow inherits Window {
     in-out property <int> perturb-x <=> perturb-x-spin.value;
     in-out property <int> perturb-y <=> perturb-y-spin.value;
     in-out property <float> perturb-theta <=> perturb-theta-slider.value;
+    // 写错字模拟：错字率（0~30%）+ 重写方式
+    in-out property <float> miswrite-rate <=> miswrite-rate-slider.value;
+    in-out property <int> miswrite-mode-index <=> miswrite-mode-combo.current-index;
     in-out property <string> font-path-text <=> font-path-edit.text;
     in-out property <string> background-path-text <=> background-path-edit.text;
     // 文字颜色（#RRGGBB）
@@ -98,6 +101,7 @@ export component MainWindow inherits Window {
     callback prev-page;
     callback next-page;
     callback toggle-preview-bg;
+    callback export-pdf;
 
     VerticalLayout {
         padding: 8px;
@@ -397,6 +401,44 @@ export component MainWindow inherits Window {
                             }
                         }
 
+                        // ---- 写错字模拟 ----
+                        Rectangle {
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.group-border;
+                            GroupTitle { text: "写错字"; x: 10px; y: -8px; }
+                            GridLayout {
+                                padding-top: 16px;
+                                padding-bottom: 10px;
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 6px;
+                                Row {
+                                    FieldLabel { text: "错字率"; }
+                                    miswrite-rate-slider := Slider {
+                                        value: 0; minimum: 0; maximum: 30; step: 0.1;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Text {
+                                        text: "${round(root.miswrite-rate * 10) / 10}%";
+                                        min-width: 56px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        font-size: 12px;
+                                        color: Theme.text;
+                                    }
+                                }
+                                Row {
+                                    FieldLabel { text: "重写方式"; }
+                                    miswrite-mode-combo := ComboBox {
+                                        model: ["正上方重写", "后文重写"];
+                                        current-index: 0;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                            }
+                        }
+
                         // ---- 边距：位置式布局（上/下/左/右环绕中心「边距」） ----
                         Rectangle {
                             border-radius: 6px;
@@ -472,6 +514,11 @@ export component MainWindow inherits Window {
                         text: "导出";
                         horizontal-stretch: 1;
                         clicked => { root.export-files(); }
+                    }
+                    PrimaryButton {
+                        text: "导出 PDF";
+                        horizontal-stretch: 1;
+                        clicked => { root.export-pdf(); }
                     }
                 }
             }

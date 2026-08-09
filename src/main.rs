@@ -15,8 +15,8 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use handwrite_sim::core::docx_io;
-use handwrite_sim::core::engine::{export, overlay_bounds, render_all_pages_preview, EngineError};
-use handwrite_sim::core::models::{parse_color, Align, HandwritingParams, Paragraph};
+use handwrite_sim::core::engine::{export, export_pdf, overlay_bounds, render_all_pages_preview, EngineError};
+use handwrite_sim::core::models::{parse_color, Align, HandwritingParams, MiswriteMode, Paragraph};
 use handwrite_sim::core::presets;
 use handwrite_sim::ui::{MainWindow, ParagraphItem};
 use image::RgbaImage;
@@ -171,6 +171,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_status_text(SharedString::from(msg));
                 }
                 Err(e) => ui.set_status_text(SharedString::from(format!("导出失败：{e}"))),
+            }
+        });
+    }
+
+    // ---- 导出 PDF（位图层，300 DPI） ----
+    {
+        let weak = ui.as_weak();
+        let seed = Rc::clone(&seed_counter);
+        let preset_params = Rc::clone(&preset_params);
+        ui.on_export_pdf(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("PDF", &["pdf"])
+                .set_file_name("handwrite.pdf")
+                .save_file()
+            else {
+                return;
+            };
+            let params = match collect_params(&ui, &preset_params) {
+                Ok(p) => p,
+                Err(e) => {
+                    ui.set_status_text(SharedString::from(format!("参数错误：{e}")));
+                    return;
+                }
+            };
+            let seed_val = *seed.borrow();
+            match export_pdf(&params, &path, seed_val) {
+                Ok(()) => ui.set_status_text(SharedString::from(format!("PDF 已导出：{}", path.display()))),
+                Err(e) => ui.set_status_text(SharedString::from(format!("导出 PDF 失败：{e}"))),
             }
         });
     }
@@ -408,6 +437,11 @@ fn apply_preset_to_ui(
     ui.set_perturb_x(p.perturb_x_sigma as i32);
     ui.set_perturb_y(p.perturb_y_sigma as i32);
     ui.set_perturb_theta(p.perturb_theta_sigma);
+    ui.set_miswrite_rate(p.miswrite_rate * 100.0);
+    ui.set_miswrite_mode_index(match p.miswrite_rewrite_mode {
+        MiswriteMode::Above => 0,
+        MiswriteMode::Rewrite => 1,
+    });
     ui.set_font_color(SharedString::from(format!(
         "#{:02x}{:02x}{:02x}",
         p.fill[0], p.fill[1], p.fill[2]
@@ -466,6 +500,12 @@ fn collect_params(
     params.bottom_margin = ui.get_margin_bottom() as f32;
     params.left_margin = ui.get_margin_left() as f32;
     params.right_margin = ui.get_margin_right() as f32;
+    // 写错字模拟
+    params.miswrite_rate = ui.get_miswrite_rate() as f32 / 100.0;
+    params.miswrite_rewrite_mode = match ui.get_miswrite_mode_index() {
+        1 => MiswriteMode::Rewrite,
+        _ => MiswriteMode::Above,
+    };
     // 文字颜色
     params.fill = parse_color(ui.get_font_color().as_str()).map_err(EngineError::Params)?;
     params.validate().map_err(EngineError::Params)?;
