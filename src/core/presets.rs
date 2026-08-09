@@ -78,6 +78,8 @@ fn to_preset_map(params: &HandwritingParams) -> Map<String, Value> {
     m.insert("perturb_x_sigma".into(), json!(params.perturb_x_sigma));
     m.insert("perturb_y_sigma".into(), json!(params.perturb_y_sigma));
     m.insert("perturb_theta_sigma".into(), json!(params.perturb_theta_sigma));
+    m.insert("miswrite_rate".into(), json!(params.miswrite_rate));
+    m.insert("miswrite_rewrite_mode".into(), json!(params.miswrite_rewrite_mode.as_str()));
     m.insert("end_chars".into(), json!(params.end_chars));
     m.insert("start_chars".into(), json!(params.start_chars));
     m.insert("color".into(), json!(format!("#{:02x}{:02x}{:02x}", params.fill[0], params.fill[1], params.fill[2])));
@@ -108,6 +110,13 @@ fn from_preset_map(data: &Map<String, Value>) -> Result<HandwritingParams, Prese
     if let Some(v) = num("perturb_theta_sigma") { p.perturb_theta_sigma = v; }
     if let Some(v) = str_("end_chars") { p.end_chars = v; }
     if let Some(v) = str_("start_chars") { p.start_chars = v; }
+    if let Some(v) = num("miswrite_rate") { p.miswrite_rate = v; }
+    if let Some(v) = str_("miswrite_rewrite_mode") {
+        match crate::core::models::MiswriteMode::parse(&v) {
+            Ok(m) => p.miswrite_rewrite_mode = m,
+            Err(_) => return Err(PresetError::Format(format!("miswrite_rewrite_mode 未知：{v:?}"))),
+        }
+    }
     if let Some(v) = str_("font_path") { p.font_path = from_portable_path(&v); }
     if let Some(v) = str_("background_path") { p.background_path = from_portable_path(&v); }
     // 颜色：优先 #RRGGBB，其次 red/green/blue。
@@ -254,6 +263,26 @@ mod tests {
             matches!(result, Err(PresetError::Format(_))),
             "color 含多字节字符应返回 Format 错误，实际：{result:?}"
         );
+    }
+
+    #[test]
+    fn preset_roundtrips_miswrite_fields_and_old_json_defaults() {
+        use crate::core::models::MiswriteMode;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preset.json");
+        let mut p = sample_params();
+        p.miswrite_rate = 0.12;
+        p.miswrite_rewrite_mode = MiswriteMode::Rewrite;
+        save(&p, &path).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.miswrite_rate, 0.12);
+        assert_eq!(loaded.miswrite_rewrite_mode, MiswriteMode::Rewrite);
+        // 旧格式预设（无新字段）应回退默认值
+        let old = dir.path().join("old.json");
+        std::fs::write(&old, r#"{"version": 2, "params": {"font_size": 30}}"#).unwrap();
+        let legacy = load(&old).unwrap();
+        assert_eq!(legacy.miswrite_rate, 0.0);
+        assert_eq!(legacy.miswrite_rewrite_mode, MiswriteMode::Above);
     }
 
     #[test]
