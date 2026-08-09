@@ -70,9 +70,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pages = Rc::clone(&pages);
             let index = Rc::clone(&index);
             timer.start(TimerMode::SingleShot, Duration::from_millis(PREVIEW_DEBOUNCE_MS), move || {
+                if std::env::var_os("HANDWRITE_DEBUG").is_some() {
+                    eprintln!("[GUI] 预览渲染开始（seed={}）", seed.borrow());
+                }
                 match render_and_show(&ui, &preset_params, &seed, &pages, &index) {
-                    Ok(()) => {}
-                    Err(e) => ui.set_status_text(SharedString::from(format!("渲染失败：{e}"))),
+                    Ok(()) => {
+                        if std::env::var_os("HANDWRITE_DEBUG").is_some() {
+                            eprintln!("[GUI] 预览渲染结束（成功）");
+                        }
+                    }
+                    Err(e) => {
+                        if std::env::var_os("HANDWRITE_DEBUG").is_some() {
+                            eprintln!("[GUI] 预览渲染失败：{e}");
+                        }
+                        ui.set_status_text(SharedString::from(format!("渲染失败：{e}")))
+                    }
                 }
             });
         });
@@ -520,18 +532,44 @@ fn render_and_show(
     preview_pages: &RefCell<Vec<RgbaImage>>,
     preview_index: &RefCell<usize>,
 ) -> Result<(), EngineError> {
+    let t0 = std::time::Instant::now();
     let params = collect_params(ui, preset_params)?;
+    if std::env::var_os("HANDWRITE_DEBUG").is_some() {
+        eprintln!(
+            "[GUI] 参数收集完成：{:.0}ms（文本 {} 字 / 段落 {} 段 / 字体 {} / 背景 {}）",
+            t0.elapsed().as_secs_f64() * 1000.0,
+            params.text.chars().count(),
+            params.paragraphs.len(),
+            params.font_path,
+            params.background_path,
+        );
+    }
     let seed = {
         let mut s = seed_counter.borrow_mut();
         *s += 1;
         *s
     };
     let mut pages = render_all_pages_preview(&params, seed)?;
+    if std::env::var_os("HANDWRITE_DEBUG").is_some() {
+        let w = pages.first().map(|p| p.width()).unwrap_or(0);
+        let h = pages.first().map(|p| p.height()).unwrap_or(0);
+        let mb = pages.len() as u64 * w as u64 * h as u64 * 4 / 1024 / 1024;
+        eprintln!(
+            "[GUI] 引擎渲染完成：{:.0}ms（{} 页，{}x{}，约 {mb} MB）",
+            t0.elapsed().as_secs_f64() * 1000.0,
+            pages.len(),
+            w,
+            h,
+        );
+    }
     // 边界提示（仅预览）：非渲染区半透明着色 + 边距框线
     if ui.get_bounds_visible() {
         let color = parse_color(ui.get_bounds_color().as_str()).unwrap_or([76, 166, 166]);
         for page in pages.iter_mut() {
             *page = overlay_bounds(page, &params, color);
+        }
+        if std::env::var_os("HANDWRITE_DEBUG").is_some() {
+            eprintln!("[GUI] 边界提示叠加完成：{:.0}ms", t0.elapsed().as_secs_f64() * 1000.0);
         }
     }
     *preview_pages.borrow_mut() = pages;

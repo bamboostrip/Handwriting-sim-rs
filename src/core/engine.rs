@@ -38,6 +38,14 @@ pub enum EngineError {
 /// 预览降采样的最大背景宽度阈值。
 const PREVIEW_MAX_WIDTH: u32 = 4096;
 
+/// 调试日志：`HANDWRITE_DEBUG=1` 时输出到 stderr（带耗时毫秒），否则静默。
+/// 用于排查预览/导出卡死时的环节定位，不参与任何业务逻辑。
+pub fn dbg_log(stage: &str, elapsed_ms: u128) {
+    if std::env::var_os("HANDWRITE_DEBUG").is_some() {
+        eprintln!("[引擎] {stage}：{elapsed_ms}ms");
+    }
+}
+
 /// 渲染引擎接口。
 pub trait Engine {
     /// 渲染第一页（预览用）。
@@ -70,13 +78,19 @@ impl DefaultEngine {
     fn load_background_for_preview(
         params: &HandwritingParams,
     ) -> Result<(RgbImage, HandwritingParams), EngineError> {
+        let t0 = std::time::Instant::now();
         let bg = Self::load_background(&params.background_path)?;
         if bg.width() <= PREVIEW_MAX_WIDTH {
+            dbg_log("背景加载完成（未降采样）", t0.elapsed().as_millis());
             return Ok((bg, params.clone()));
         }
         let scale = PREVIEW_MAX_WIDTH as f32 / bg.width() as f32;
         let new_height = (bg.height() as f32 * scale).round().max(1.0) as u32;
         let thumb = image::imageops::resize(&bg, PREVIEW_MAX_WIDTH, new_height, image::imageops::FilterType::Lanczos3);
+        dbg_log(
+            &format!("背景加载+Lanczos3 降采样（{}x{} → {}x{}）", bg.width(), bg.height(), thumb.width(), thumb.height()),
+            t0.elapsed().as_millis(),
+        );
         let mut scaled = params.clone();
         for f in [
             &mut scaled.font_size, &mut scaled.line_spacing, &mut scaled.word_spacing,
@@ -103,9 +117,16 @@ impl DefaultEngine {
         background: &RgbImage,
     ) -> Result<(RgbaImage, usize), EngineError> {
         let (width, height) = (background.width() as usize, background.height() as usize);
+        let t0 = std::time::Instant::now();
         let result = layout::layout_page(params, font, rng, text, start, width, height);
+        let t1 = t0.elapsed().as_millis();
         let canvas =
             perturb::perturb_mask(&result.mask, width, height, params, rng, background.as_raw());
+        let t2 = t0.elapsed().as_millis();
+        dbg_log(
+            &format!("单页排版 {t1}ms + 扰动 {t2}ms（消费 {}/{} 字）", result.consumed, text.chars().count()),
+            t2,
+        );
         Ok((rgba_from_rgb(&canvas, width, height), result.consumed))
     }
 }
@@ -133,33 +154,43 @@ impl Engine for DefaultEngine {
     }
 
     fn render_pages(&self, params: &HandwritingParams) -> Result<Vec<RgbaImage>, EngineError> {
+        let t0 = std::time::Instant::now();
         params.validate()?;
         let font =
             FontFace::load(Path::new(&params.font_path), params.font_size).map_err(EngineError::Font)?;
         let background = Self::load_background(&params.background_path)?;
+        dbg_log(&format!("字体+背景加载完成（背景 {}x{}）", background.width(), background.height()), t0.elapsed().as_millis());
         let mut rng = StdRng::seed_from_u64(self.seed);
         if !params.paragraphs.is_empty() {
             let pages = layout::layout_paragraphs(
                 params, &font, &mut rng, &params.paragraphs,
                 background.width() as usize, background.height() as usize,
             );
+            dbg_log(&format!("段落排版完成（{} 页，等待逐页扰动）", pages.len()), t0.elapsed().as_millis());
             return pages
                 .into_iter()
-                .map(|mask| {
+                .enumerate()
+                .map(|(index, mask)| {
+                    let t1 = std::time::Instant::now();
                     let canvas = perturb::perturb_mask(
                         &mask, background.width() as usize, background.height() as usize,
                         params, &mut rng, background.as_raw(),
                     );
+                    dbg_log(&format!("第 {} 页扰动完成", index + 1), t1.elapsed().as_millis());
                     Ok(rgba_from_rgb(&canvas, background.width() as usize, background.height() as usize))
                 })
                 .collect();
         }
         let mut pages = Vec::new();
         let mut start = 0;
+        let total_chars = params.text.chars().count();
+        let mut page_no = 0;
         loop {
+            page_no += 1;
             let (page, consumed) = self.render_page_from(params, &font, &mut rng, &params.text, start, &background)?;
             pages.push(page);
-            if consumed >= params.text.chars().count() {
+            dbg_log(&format!("第 {page_no} 页完成（消费 {consumed}/{total_chars} 字）"), t0.elapsed().as_millis());
+            if consumed >= total_chars {
                 break;
             }
             if consumed <= start {
@@ -168,6 +199,7 @@ impl Engine for DefaultEngine {
             }
             start = consumed;
         }
+        dbg_log(&format!("全部 {page_no} 页渲染完成"), t0.elapsed().as_millis());
         Ok(pages)
     }
 
@@ -213,30 +245,40 @@ pub fn render_all_pages_preview(
     params: &HandwritingParams,
     seed: u64,
 ) -> Result<Vec<RgbaImage>, EngineError> {
+    let t0 = std::time::Instant::now();
     params.validate()?;
+    dbg_log(&format!("参数校验通过（文本 {} 字 / 段落 {} 段）", params.text.chars().count(), params.paragraphs.len()), t0.elapsed().as_millis());
     let font =
         FontFace::load(Path::new(&params.font_path), params.font_size).map_err(EngineError::Font)?;
     let (background, scaled) = DefaultEngine::load_background_for_preview(params)?;
     let (width, height) = (background.width() as usize, background.height() as usize);
+    dbg_log(&format!("画布 {width}x{height}，开始排版"), t0.elapsed().as_millis());
     let mut rng = StdRng::seed_from_u64(seed);
     let engine = DefaultEngine::new(seed);
 
     if !params.paragraphs.is_empty() {
         let pages = layout::layout_paragraphs(&scaled, &font, &mut rng, &params.paragraphs, width, height);
-        return pages
-            .into_iter()
-            .map(|mask| {
-                let canvas = perturb::perturb_mask(&mask, width, height, &scaled, &mut rng, background.as_raw());
-                Ok(rgba_from_rgb(&canvas, width, height))
-            })
-            .collect();
+        dbg_log(&format!("段落排版完成（{} 页，等待逐页扰动）", pages.len()), t0.elapsed().as_millis());
+        let mut out = Vec::with_capacity(pages.len());
+        for (index, mask) in pages.into_iter().enumerate() {
+            let t1 = std::time::Instant::now();
+            let canvas = perturb::perturb_mask(&mask, width, height, &scaled, &mut rng, background.as_raw());
+            dbg_log(&format!("第 {} 页扰动完成", index + 1), t1.elapsed().as_millis());
+            out.push(rgba_from_rgb(&canvas, width, height));
+        }
+        dbg_log(&format!("预览渲染完成（共 {} 页）", out.len()), t0.elapsed().as_millis());
+        return Ok(out);
     }
     let mut pages = Vec::new();
     let mut start = 0;
+    let total_chars = params.text.chars().count();
+    let mut page_no = 0;
     loop {
+        page_no += 1;
         let (page, consumed) = engine.render_page_from(&scaled, &font, &mut rng, &params.text, start, &background)?;
         pages.push(page);
-        if consumed >= params.text.chars().count() {
+        dbg_log(&format!("第 {page_no} 页完成（消费 {consumed}/{total_chars} 字）"), t0.elapsed().as_millis());
+        if consumed >= total_chars {
             break;
         }
         if consumed <= start {
@@ -245,6 +287,7 @@ pub fn render_all_pages_preview(
         }
         start = consumed;
     }
+    dbg_log(&format!("预览渲染完成（共 {page_no} 页）"), t0.elapsed().as_millis());
     Ok(pages)
 }
 
