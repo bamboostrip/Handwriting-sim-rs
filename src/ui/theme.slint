@@ -1,0 +1,145 @@
+// 手写模拟器主题：配色与自定义控件对齐 Python 版 gui/ui.py 的 `_LIGHT_QSS`。
+//
+// Slint 标准控件（fluent 风格）不支持 QSS 式全局样式覆盖，
+// 因此按钮 / 分组标题等视觉控件在此自定义，颜色值与 Python 版一一对应；
+// 输入类控件（LineEdit/TextEdit/SpinBox/ComboBox）保留原生样式
+// （白底圆角细边框，形态与 Python 版 QSS 输入框接近）。
+
+export global Theme {
+    // 窗口与文字（QSS: QMainWindow #f4f7f4 / color #2b3430 / 10pt 楷体）
+    out property <color> bg: #f4f7f4;
+    out property <color> text: #2b3430;
+    out property <color> sub-text: #7d8a82;
+    // 分组框边框（QGroupBox border #d3ded6, radius 6）
+    out property <color> group-border: #d3ded6;
+    // 普通按钮（QPushButton: bg #dcf7e6, border #b7e4c9, radius 4）
+    out property <color> btn-bg: #dcf7e6;
+    out property <color> btn-border: #b7e4c9;
+    out property <color> btn-hover: #c9f0d8;
+    out property <color> btn-pressed: #b2e5c4;
+    out property <color> btn-disabled-bg: #ecf2ec;
+    out property <color> btn-disabled-text: #a3aca5;
+    // 主按钮（QPushButton[primary]: bg #9ddc80, border #7fc465, bold）
+    out property <color> primary-bg: #9ddc80;
+    out property <color> primary-border: #7fc465;
+    out property <color> primary-hover: #8ed271;
+    out property <color> primary-pressed: #7fbf63;
+    // 字号（Python 版 10pt ≈ 13px）
+    out property <length> base-font: 13px;
+}
+
+// 普通绿色按钮（对应 Python QPushButton 默认样式）。
+export component GreenButton inherits Rectangle {
+    callback clicked;
+    in property <string> text;
+    in property <bool> enabled: true;
+    // 布局侧可覆盖的最小宽度（Rectangle 自带 min-width 几何属性，故另起名）
+    in property <length> preferred-min-width: 0px;
+
+    width: max(root.preferred-min-width, lbl.preferred-width + 26px);
+    height: 28px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: Theme.btn-border;
+    background: !root.enabled
+        ? Theme.btn-disabled-bg
+        : touch.pressed
+            ? Theme.btn-pressed
+            : touch.has-hover
+                ? Theme.btn-hover
+                : Theme.btn-bg;
+    animate background { duration: 80ms; }
+
+    lbl := Text {
+        width: 100%;
+        height: 100%;
+        text: root.text;
+        font-family: "楷体";
+        font-size: Theme.base-font;
+        color: root.enabled ? Theme.text : Theme.btn-disabled-text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// 主按钮（对应 Python QPushButton[primary]，用于「预览/导出」）。
+export component PrimaryButton inherits Rectangle {
+    callback clicked;
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <length> preferred-min-width: 0px;
+
+    width: max(root.preferred-min-width, lbl.preferred-width + 32px);
+    height: 34px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: Theme.primary-border;
+    background: !root.enabled
+        ? Theme.btn-disabled-bg
+        : touch.pressed
+            ? Theme.primary-pressed
+            : touch.has-hover
+                ? Theme.primary-hover
+                : Theme.primary-bg;
+    animate background { duration: 80ms; }
+
+    lbl := Text {
+        width: 100%;
+        height: 100%;
+        text: root.text;
+        font-family: "楷体";
+        font-size: Theme.base-font;
+        font-weight: 700;
+        color: root.enabled ? Theme.text : Theme.btn-disabled-text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// 分组框标题：骑在 GroupBox 顶部边框上（QGroupBox::title 效果），
+// 使用窗口底色遮挡边框线。用法：置于带边框 Rectangle 内，y 取负值。
+export component GroupTitle inherits Rectangle {
+    in property <string> text;
+
+    width: lbl.preferred-width + 8px;
+    height: lbl.preferred-height;
+    background: Theme.bg;
+
+    lbl := Text {
+        x: 4px;
+        width: root.width - 4px;
+        height: root.height;
+        text: root.text;
+        font-family: "楷体";
+        font-size: Theme.base-font;
+        font-weight: 700;
+        color: Theme.text;
+        vertical-alignment: center;
+    }
+}
+
+// 面板分组标签（「待处理文本」「字体」等小标题样式）。
+export component SectionLabel inherits Text {
+    font-family: "楷体";
+    font-size: Theme.base-font;
+    font-weight: 700;
+    color: Theme.text;
+}
+
+// 行内普通标签。
+export component FieldLabel inherits Text {
+    font-family: "楷体";
+    font-size: Theme.base-font;
+    color: Theme.text;
+    vertical-alignment: center;
+}
