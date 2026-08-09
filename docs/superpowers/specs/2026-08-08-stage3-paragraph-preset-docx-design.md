@@ -172,6 +172,9 @@ derive——字段过滤与重命名（fill → color）用显式 map 更可控�
 
 ### 4.5 docx_io.rs（新文件，docx-rs）
 
+> **2026-08-09 更新：** 经调研（rdocx 读不到 `firstLineChars`、docx 1.1.2 已停更、docx-rs 存在私有字段需 serde hack 且其 `w:firstLine` 单位处理错误（把 twips 当 EMU）），
+> 最终采用 **zip + quick-xml 手写解析**（见下文），不再依赖 docx-rs。
+
 ```rust
 /// 从 docx 读取段落（忽略空段），对齐/首行缩进还原。
 pub fn load_paragraphs(path: &Path, font_size: f32) -> Result<Vec<Paragraph>, String>
