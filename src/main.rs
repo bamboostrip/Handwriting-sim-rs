@@ -1,22 +1,25 @@
 //! 手写模拟器桌面入口。
 //!
-//! 阶段 2：GUI 与引擎接通。
+//! 阶段 3：GUI 功能对齐 Python 版（1:1）。
 //! - 参数面板 ↔ `HandwritingParams` 双向绑定（Slint `<=>` 属性）
-//! - 「生成预览」防抖 300ms 后渲染并显示（对齐 Python 版自动预览体验）
-//! - 字体/背景经原生文件对话框选择（rfd）
-//! - 「导出图片」选择目录后批量导出 PNG
+//! - 「生成预览」防抖 300ms 后渲染全部页并翻页显示（对齐 Python 版自动预览 + 多页导航）
+//! - 预设下拉框（扫描 exe 旁 presets/ 目录）快捷切换 + 载入/保存
+//! - 文字颜色 / 边距 / 扰动 σ / 边界提示（仅预览叠加）
+//! - 字体/背景经原生文件对话框选择（rfd）；「导出图片」全分辨率批量导出
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use handwrite_sim::core::docx_io;
-use handwrite_sim::core::engine::{export, render_preview, EngineError};
-use handwrite_sim::core::models::{Align, HandwritingParams, Paragraph};
+use handwrite_sim::core::engine::{export, overlay_bounds, render_all_pages_preview, EngineError};
+use handwrite_sim::core::models::{parse_color, Align, HandwritingParams, Paragraph};
 use handwrite_sim::core::presets;
 use handwrite_sim::ui::{MainWindow, ParagraphItem};
+use image::RgbaImage;
 use slint::{
     ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer,
     TimerMode, VecModel,
@@ -24,18 +27,32 @@ use slint::{
 
 /// 预览防抖间隔（毫秒）。
 const PREVIEW_DEBOUNCE_MS: u64 = 300;
+/// 预览区底色循环（对齐 Python 版 `_PREVIEW_BG_COLORS`）。
+const PREVIEW_BG_COLORS: [&str; 2] = ["#c8d0ca", "#565b56"];
+/// 预设下拉框占位项。
+const PRESET_PLACEHOLDER: &str = "— 选择预设 —";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui = MainWindow::new()?;
 
-    // 状态：防抖定时器 + seed 计数器（每次预览递增，保证笔画刷新）
+    // ---- 状态 ----
     let timer = Rc::new(Timer::default());
     let seed_counter = Rc::new(RefCell::new(
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64,
     ));
-    // 最近一次载入预设的完整参数（含 slint 无控件的边距/sigma/end_chars/start_chars 等），
+    // 最近一次载入预设的完整参数（含 slint 未绑定的 end_chars/start_chars 等），
     // 作为 collect_params 的基础，避免载入预设时这些字段被静默丢弃。
     let preset_params = Rc::new(RefCell::new(Option::<HandwritingParams>::None));
+    // 预览全部页缓存 + 当前页索引（翻页用）
+    let preview_pages = Rc::new(RefCell::new(Vec::<RgbaImage>::new()));
+    let preview_index = Rc::new(RefCell::new(0usize));
+    // 预览区底色循环索引
+    let preview_bg_idx = Rc::new(RefCell::new(0usize));
+    // 预设下拉：显示名模型 + 索引→路径映射（0 为占位符）
+    let preset_model = Rc::new(VecModel::<SharedString>::default());
+    let preset_paths = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+    ui.set_preset_list(ModelRc::from(preset_model.clone()));
+    refresh_preset_combo(&preset_model, &preset_paths, &ui);
 
     // ---- 生成预览（防抖） ----
     {
@@ -43,17 +60,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let timer = Rc::clone(&timer);
         let seed = Rc::clone(&seed_counter);
         let preset_params = Rc::clone(&preset_params);
+        let pages = Rc::clone(&preview_pages);
+        let index = Rc::clone(&preview_index);
         ui.on_regenerate(move || {
             let Some(ui) = weak.upgrade() else { return };
             let timer = Rc::clone(&timer);
             let seed = Rc::clone(&seed);
             let preset_params = Rc::clone(&preset_params);
+            let pages = Rc::clone(&pages);
+            let index = Rc::clone(&index);
             timer.start(TimerMode::SingleShot, Duration::from_millis(PREVIEW_DEBOUNCE_MS), move || {
-                match render_and_show(&ui, &preset_params, &seed) {
+                match render_and_show(&ui, &preset_params, &seed, &pages, &index) {
                     Ok(()) => {}
                     Err(e) => ui.set_status_text(SharedString::from(format!("渲染失败：{e}"))),
                 }
             });
+        });
+    }
+
+    // ---- 预览翻页 ----
+    {
+        let weak = ui.as_weak();
+        let pages = Rc::clone(&preview_pages);
+        let index = Rc::clone(&preview_index);
+        ui.on_prev_page(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut idx = index.borrow_mut();
+            if *idx > 0 {
+                *idx -= 1;
+            }
+            drop(idx);
+            show_page(&ui, &pages, &index);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let pages = Rc::clone(&preview_pages);
+        let index = Rc::clone(&preview_index);
+        ui.on_next_page(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut idx = index.borrow_mut();
+            let total = pages.borrow().len();
+            if total > 0 && *idx + 1 < total {
+                *idx += 1;
+            }
+            drop(idx);
+            show_page(&ui, &pages, &index);
+        });
+    }
+
+    // ---- 预览底色切换 ----
+    {
+        let weak = ui.as_weak();
+        let idx = Rc::clone(&preview_bg_idx);
+        ui.on_toggle_preview_bg(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut i = idx.borrow_mut();
+            *i = (*i + 1) % PREVIEW_BG_COLORS.len();
+            ui.set_preview_bg(hex_color(PREVIEW_BG_COLORS[*i]));
         });
     }
 
@@ -85,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // ---- 导出图片 ----
+    // ---- 导出图片（始终全分辨率，预览降采样不影响导出） ----
     {
         let weak = ui.as_weak();
         let seed = Rc::clone(&seed_counter);
@@ -115,7 +179,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paragraph_model = Rc::new(VecModel::<ParagraphItem>::default());
     ui.set_paragraphs(ModelRc::from(paragraph_model.clone()));
 
-    // 添加段落
     {
         let model = Rc::clone(&paragraph_model);
         ui.on_add_paragraph(move || {
@@ -126,8 +189,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         });
     }
-
-    // 删除段落
     {
         let model = Rc::clone(&paragraph_model);
         ui.on_remove_paragraph(move |idx| {
@@ -137,7 +198,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-
     // 段落文本编辑写回（slint for + <=> 不支持写回模型项，故用单向绑定 + 回调）
     {
         let model = Rc::clone(&paragraph_model);
@@ -150,8 +210,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-
-    // 段落对齐切换写回
     {
         let model = Rc::clone(&paragraph_model);
         ui.on_paragraph_align_changed(move |idx, align| {
@@ -163,8 +221,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-
-    // 段落缩进修改写回
     {
         let model = Rc::clone(&paragraph_model);
         ui.on_paragraph_indent_changed(move |idx, indent| {
@@ -191,7 +247,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match docx_io::load_paragraphs(&path, font_size) {
                     Ok(paras) => {
                         let count = paras.len();
-                        // 清空后填充
                         while model.row_count() > 0 {
                             model.remove(0);
                         }
@@ -207,12 +262,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                         }
                         ui.set_input_mode(1);
-                        ui.set_status_text(SharedString::from(format!(
-                            "已导入 {count} 个段落"
-                        )));
+                        ui.set_status_text(SharedString::from(format!("已导入 {count} 个段落")));
                     }
                     Err(e) => ui.set_status_text(SharedString::from(format!("导入 docx 失败：{e}"))),
                 }
+            }
+        });
+    }
+
+    // ---- 预设下拉框选中 ----
+    {
+        let weak = ui.as_weak();
+        let preset_params = Rc::clone(&preset_params);
+        let paths = Rc::clone(&preset_paths);
+        ui.on_preset_selected(move |index| {
+            if index <= 0 {
+                return; // 占位符
+            }
+            let Some(ui) = weak.upgrade() else { return };
+            let idx = (index as usize).saturating_sub(1);
+            let Some(path) = paths.borrow().get(idx).cloned() else { return };
+            match presets::load(&path) {
+                Ok(p) => {
+                    apply_preset_to_ui(&ui, &preset_params, &p);
+                    ui.set_status_text(SharedString::from(format!("已载入预设：{}", path.display())));
+                }
+                Err(e) => ui.set_status_text(SharedString::from(format!("载入失败：{e}"))),
             }
         });
     }
@@ -221,10 +296,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let preset_params = Rc::clone(&preset_params);
+        let preset_model = Rc::clone(&preset_model);
+        let preset_paths = Rc::clone(&preset_paths);
         ui.on_save_preset(move || {
             let Some(ui) = weak.upgrade() else { return };
+            let default_dir = presets::assets_root().join("presets");
+            let default_path = default_dir.join("preset.json");
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("预设", &["json"])
+                .set_directory(default_dir.clone())
                 .set_file_name("preset.json")
                 .save_file()
             {
@@ -236,17 +316,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
                 match presets::save(&params, &path) {
-                    Ok(()) => ui.set_status_text(SharedString::from(format!(
-                        "预设已保存：{}",
-                        path.display()
-                    ))),
+                    Ok(()) => {
+                        ui.set_status_text(SharedString::from(format!(
+                            "预设已保存：{}",
+                            path.display()
+                        )));
+                        // 保存到 presets/ 目录时刷新下拉框
+                        if path.starts_with(default_path.parent().unwrap_or(&default_dir)) {
+                            refresh_preset_combo(&preset_model, &preset_paths, &ui);
+                        }
+                    }
                     Err(e) => ui.set_status_text(SharedString::from(format!("保存失败：{e}"))),
                 }
             }
         });
     }
 
-    // ---- 载入预设 ----
+    // ---- 载入预设（文件对话框） ----
     {
         let weak = ui.as_weak();
         let preset_params = Rc::clone(&preset_params);
@@ -258,16 +344,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 match presets::load(&path) {
                     Ok(p) => {
-                        // 完整参数入缓存，供 collect_params 作基础（含边距/sigma/end_chars/start_chars 等）
-                        *preset_params.borrow_mut() = Some(p.clone());
-                        ui.set_font_path_text(SharedString::from(p.font_path));
-                        ui.set_background_path_text(SharedString::from(p.background_path));
-                        ui.set_font_size(p.font_size as i32);
-                        ui.set_line_spacing(p.line_spacing as i32);
-                        ui.set_word_spacing(p.word_spacing as i32);
-                        ui.set_perturb_x(p.perturb_x_sigma as i32);
-                        ui.set_perturb_y(p.perturb_y_sigma as i32);
-                        ui.set_perturb_theta(p.perturb_theta_sigma);
+                        apply_preset_to_ui(&ui, &preset_params, &p);
                         ui.set_status_text(SharedString::from("预设已载入（含边距/扰动参数）"));
                     }
                     Err(e) => ui.set_status_text(SharedString::from(format!("载入失败：{e}"))),
@@ -280,16 +357,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// 把 `#RRGGBB` 解析为 slint 颜色（解析失败回退默认底色）。
+fn hex_color(hex: &str) -> slint::Color {
+    let rgb = parse_color(hex).unwrap_or([200, 208, 202]);
+    slint::Color::from_argb_u8(255, rgb[0], rgb[1], rgb[2])
+}
+
+/// 扫描 exe 旁 presets/ 目录，刷新预设下拉框（0 为占位符，其后为文件名）。
+fn refresh_preset_combo(
+    model: &Rc<VecModel<SharedString>>,
+    paths: &RefCell<Vec<PathBuf>>,
+    _ui: &MainWindow,
+) {
+    model.set_vec(vec![SharedString::from(PRESET_PLACEHOLDER)]);
+    paths.borrow_mut().clear();
+    let preset_dir = presets::assets_root().join("presets");
+    if let Ok(rd) = std::fs::read_dir(&preset_dir) {
+        let mut files: Vec<PathBuf> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().map(|e| e == "json").unwrap_or(false))
+            .collect();
+        files.sort();
+        for f in files {
+            let stem = f
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            model.push(SharedString::from(stem));
+            paths.borrow_mut().push(f);
+        }
+    }
+}
+
+/// 把预设参数回填 UI 控件（含新增的颜色/边距/σ 控件），并写入 preset_params 缓存。
+fn apply_preset_to_ui(
+    ui: &MainWindow,
+    preset_params: &RefCell<Option<HandwritingParams>>,
+    p: &HandwritingParams,
+) {
+    *preset_params.borrow_mut() = Some(p.clone());
+    ui.set_font_path_text(SharedString::from(p.font_path.clone()));
+    ui.set_background_path_text(SharedString::from(p.background_path.clone()));
+    ui.set_font_size(p.font_size as i32);
+    ui.set_line_spacing(p.line_spacing as i32);
+    ui.set_word_spacing(p.word_spacing as i32);
+    ui.set_word_spacing_sigma(p.word_spacing_sigma as i32);
+    ui.set_line_spacing_sigma(p.line_spacing_sigma as i32);
+    ui.set_font_size_sigma(p.font_size_sigma as i32);
+    ui.set_perturb_x(p.perturb_x_sigma as i32);
+    ui.set_perturb_y(p.perturb_y_sigma as i32);
+    ui.set_perturb_theta(p.perturb_theta_sigma);
+    ui.set_font_color(SharedString::from(format!(
+        "#{:02x}{:02x}{:02x}",
+        p.fill[0], p.fill[1], p.fill[2]
+    )));
+    ui.set_margin_top(p.top_margin as i32);
+    ui.set_margin_bottom(p.bottom_margin as i32);
+    ui.set_margin_left(p.left_margin as i32);
+    ui.set_margin_right(p.right_margin as i32);
+}
+
 /// 收集 UI 参数为 `HandwritingParams` 并校验。
 /// 以最近载入预设为基础（`preset_params`），再用 UI 控件值覆盖对应字段，
-/// 从而保留预设中 slint 无控件的边距/sigma/end_chars/start_chars 等参数。
+/// 从而保留预设中 slint 未绑定的 end_chars/start_chars 等参数。
 fn collect_params(
     ui: &MainWindow,
     preset_params: &RefCell<Option<HandwritingParams>>,
 ) -> Result<HandwritingParams, EngineError> {
     let mut params = preset_params.borrow().clone().unwrap_or_default();
     if ui.get_input_mode() == 1 {
-        // 段落模式：从模型收集段落
         let model = ui.get_paragraphs();
         let mut paras = Vec::new();
         for i in 0..model.row_count() {
@@ -314,22 +451,34 @@ fn collect_params(
     }
     params.font_path = ui.get_font_path_text().as_str().trim().to_string();
     params.background_path = ui.get_background_path_text().as_str().trim().to_string();
-    // SpinBox.value 为 int，转 f32 以支持预览降采样等浮点语义
+    // 排版参数（SpinBox.value 为 int，转 f32 以支持预览降采样等浮点语义）
     params.font_size = ui.get_font_size() as f32;
     params.line_spacing = ui.get_line_spacing() as f32;
     params.word_spacing = ui.get_word_spacing() as f32;
+    params.word_spacing_sigma = ui.get_word_spacing_sigma() as f32;
+    params.line_spacing_sigma = ui.get_line_spacing_sigma() as f32;
+    params.font_size_sigma = ui.get_font_size_sigma() as f32;
     params.perturb_x_sigma = ui.get_perturb_x() as f32;
     params.perturb_y_sigma = ui.get_perturb_y() as f32;
     params.perturb_theta_sigma = ui.get_perturb_theta();
+    // 边距
+    params.top_margin = ui.get_margin_top() as f32;
+    params.bottom_margin = ui.get_margin_bottom() as f32;
+    params.left_margin = ui.get_margin_left() as f32;
+    params.right_margin = ui.get_margin_right() as f32;
+    // 文字颜色
+    params.fill = parse_color(ui.get_font_color().as_str()).map_err(EngineError::Params)?;
     params.validate().map_err(EngineError::Params)?;
     Ok(params)
 }
 
-/// 渲染预览并显示到 UI，seed 递增保证每次刷新笔画变化。
+/// 渲染全部页（预览降采样路径）并显示，seed 递增保证每次刷新笔画变化。
 fn render_and_show(
     ui: &MainWindow,
     preset_params: &RefCell<Option<HandwritingParams>>,
     seed_counter: &RefCell<u64>,
+    preview_pages: &RefCell<Vec<RgbaImage>>,
+    preview_index: &RefCell<usize>,
 ) -> Result<(), EngineError> {
     let params = collect_params(ui, preset_params)?;
     let seed = {
@@ -337,12 +486,38 @@ fn render_and_show(
         *s += 1;
         *s
     };
-    let image = render_preview(&params, seed)?;
-    let (width, height) = image.dimensions();
-    let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&image.into_raw(), width, height);
-    ui.set_preview_image(Image::from_rgba8(buffer));
-    ui.set_status_text(SharedString::from(format!(
-        "预览完成（seed={seed}） {width}×{height}"
-    )));
+    let mut pages = render_all_pages_preview(&params, seed)?;
+    // 边界提示（仅预览）：非渲染区半透明着色 + 边距框线
+    if ui.get_bounds_visible() {
+        let color = parse_color(ui.get_bounds_color().as_str()).unwrap_or([76, 166, 166]);
+        for page in pages.iter_mut() {
+            *page = overlay_bounds(page, &params, color);
+        }
+    }
+    *preview_pages.borrow_mut() = pages;
+    *preview_index.borrow_mut() = 0;
+    show_page(ui, preview_pages, preview_index);
+    let total = preview_pages.borrow().len();
+    ui.set_status_text(SharedString::from(format!("预览完成（seed={seed}），共 {total} 页")));
     Ok(())
+}
+
+/// 把当前索引页显示到预览区并更新页码。
+fn show_page(
+    ui: &MainWindow,
+    preview_pages: &RefCell<Vec<RgbaImage>>,
+    preview_index: &RefCell<usize>,
+) {
+    let pages = preview_pages.borrow();
+    let total = pages.len();
+    if total == 0 {
+        ui.set_page_text(SharedString::from("第 1 / 1 页"));
+        return;
+    }
+    let i = (*preview_index.borrow()).min(total - 1);
+    let img = &pages[i];
+    let (width, height) = img.dimensions();
+    let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(img.as_raw(), width, height);
+    ui.set_preview_image(Image::from_rgba8(buffer));
+    ui.set_page_text(SharedString::from(format!("第 {} / {total} 页", i + 1)));
 }

@@ -1,12 +1,14 @@
 // 手写模拟器主窗口。
 //
-// 阶段 2：GUI 与引擎接通。
+// 阶段 3：GUI 功能对齐 Python 版（1:1）。
 // - 参数控件通过 `<=>` 双向绑定暴露给 Rust 侧（get_/set_ 方法）
-// - 预览区显示引擎输出的 RGBA 图像（Rust 侧 set_preview_image）
-// - 字体/背景路径由 Rust 侧文件对话框选择后写入 LineEdit
+// - 预览区显示引擎输出的 RGBA 图像（Rust 侧 set_preview_image），支持翻页与底色切换
+// - 预设下拉框（Rust 侧 VecModel<String> 驱动）快捷切换
+// - 文字颜色 / 边距 / 扰动 σ / 边界提示（对齐 Python 版 ui.py 控件集）
 
 import {
     Button,
+    CheckBox,
     ComboBox,
     HorizontalBox,
     LineEdit,
@@ -34,20 +36,39 @@ export component MainWindow inherits Window {
     in-out property <int> font-size <=> font-size-spin.value;
     in-out property <int> line-spacing <=> line-spacing-spin.value;
     in-out property <int> word-spacing <=> word-spacing-spin.value;
+    // 排版参数扰动 σ（对齐 Python 版 σ 列）
+    in-out property <int> word-spacing-sigma <=> word-spacing-sigma-spin.value;
+    in-out property <int> line-spacing-sigma <=> line-spacing-sigma-spin.value;
+    in-out property <int> font-size-sigma <=> font-size-sigma-spin.value;
     in-out property <int> perturb-x <=> perturb-x-spin.value;
     in-out property <int> perturb-y <=> perturb-y-spin.value;
     in-out property <float> perturb-theta <=> perturb-theta-slider.value;
     in-out property <string> font-path-text <=> font-path-edit.text;
     in-out property <string> background-path-text <=> background-path-edit.text;
+    // 文字颜色（#RRGGBB）
+    in-out property <string> font-color <=> font-color-edit.text;
+    // 边距（位置式布局：上/下/左/右）
+    in-out property <int> margin-top <=> margin-top-spin.value;
+    in-out property <int> margin-bottom <=> margin-bottom-spin.value;
+    in-out property <int> margin-left <=> margin-left-spin.value;
+    in-out property <int> margin-right <=> margin-right-spin.value;
+    // 边界提示（仅预览）：开关 + 提示颜色
+    in-out property <bool> bounds-visible <=> bounds-check.checked;
+    in-out property <string> bounds-color <=> bounds-color-edit.text;
+
+    // ---- 预设下拉框（Rust 侧 VecModel<String> 驱动） ----
+    in-out property <[string]> preset-list;
+    in property <int> preset-index: 0;
 
     // ---- Rust → UI ----
     in property <string> status-text: "就绪";
     in property <image> preview-image;
+    in property <string> page-text: "第 1 / 1 页";
+    in-out property <color> preview-bg: #d5ddd5;
 
     // 模式：0=纯文本 1=段落
     in-out property <int> input-mode: 0;
     in-out property <[ParagraphItem]> paragraphs;
-    in property <bool> paragraphs-visible;
 
     // ---- UI → Rust 回调 ----
     callback regenerate;
@@ -62,12 +83,16 @@ export component MainWindow inherits Window {
     callback paragraph-edited(int, string);
     callback paragraph-align-changed(int, int);
     callback paragraph-indent-changed(int, int);
+    callback preset-selected(int);
+    callback prev-page;
+    callback next-page;
+    callback toggle-preview-bg;
 
     VerticalBox {
         HorizontalBox {
             // ---- 左侧参数面板 ----
             Rectangle {
-                width: 360px;
+                width: 380px;
                 ScrollView {
                     VerticalBox {
                         padding: 12px;
@@ -94,7 +119,7 @@ export component MainWindow inherits Window {
 
                         input-edit := TextEdit {
                             text: "请输入要手写的文字…";
-                            height: 140px;
+                            height: 120px;
                             wrap: word-wrap;
                             visible: root.input-mode == 0;
                         }
@@ -107,7 +132,7 @@ export component MainWindow inherits Window {
                                 item-edit := TextEdit {
                                     text: item.text;
                                     edited(text) => { root.paragraph-edited(idx, text); }
-                                    height: 60px;
+                                    height: 56px;
                                     wrap: word-wrap;
                                 }
                                 VerticalBox {
@@ -156,29 +181,137 @@ export component MainWindow inherits Window {
                             }
                         }
 
-                        Text { text: "字号"; font-size: 14px; }
-                        font-size-spin := SpinBox { value: 36; minimum: 8; maximum: 200; }
+                        // ---- 文字颜色 ----
+                        HorizontalBox {
+                            spacing: 4px;
+                            Text { text: "文字颜色"; font-size: 14px; }
+                            font-color-edit := LineEdit {
+                                text: "#000000";
+                                placeholder-text: "#000000";
+                                input-type: text;
+                            }
+                        }
 
-                        Text { text: "行间距（不含字高）"; font-size: 14px; }
-                        line-spacing-spin := SpinBox { value: 48; minimum: 0; maximum: 200; }
+                        // ---- 预设：下拉快捷切换 + 载入/保存 ----
+                        HorizontalBox {
+                            spacing: 4px;
+                            Text { text: "预设"; font-size: 14px; }
+                            preset-combo := ComboBox {
+                                model: root.preset-list;
+                                current-index: root.preset-index;
+                                selected => { root.preset-selected(preset-combo.current-index); }
+                                horizontal-stretch: 1;
+                            }
+                            Button {
+                                text: "载入…";
+                                clicked => { root.load-preset(); }
+                            }
+                            Button {
+                                text: "保存…";
+                                clicked => { root.save-preset(); }
+                            }
+                        }
 
-                        Text { text: "字间距"; font-size: 14px; }
-                        word-spacing-spin := SpinBox { value: 5; minimum: 0; maximum: 100; }
+                        // ---- 排版参数（数值 + 扰动 σ） ----
+                        Text { text: "排版参数"; font-size: 14px; }
+                        HorizontalBox {
+                            spacing: 4px;
+                            VerticalBox {
+                                spacing: 2px;
+                                Text { text: "字间距"; font-size: 11px; color: #888; }
+                                word-spacing-spin := SpinBox { value: 5; minimum: 0; maximum: 100; }
+                            }
+                            VerticalBox {
+                                spacing: 2px;
+                                Text { text: "字距 σ"; font-size: 11px; color: #888; }
+                                word-spacing-sigma-spin := SpinBox { value: 2; minimum: 0; maximum: 20; }
+                            }
+                        }
+                        HorizontalBox {
+                            spacing: 4px;
+                            VerticalBox {
+                                spacing: 2px;
+                                Text { text: "行间距（不含字高）"; font-size: 11px; color: #888; }
+                                line-spacing-spin := SpinBox { value: 48; minimum: 0; maximum: 200; }
+                            }
+                            VerticalBox {
+                                spacing: 2px;
+                                Text { text: "行距 σ"; font-size: 11px; color: #888; }
+                                line-spacing-sigma-spin := SpinBox { value: 2; minimum: 0; maximum: 20; }
+                            }
+                        }
+                        HorizontalBox {
+                            spacing: 4px;
+                            VerticalBox {
+                                spacing: 2px;
+                                Text { text: "字号"; font-size: 11px; color: #888; }
+                                font-size-spin := SpinBox { value: 36; minimum: 8; maximum: 200; }
+                            }
+                            VerticalBox {
+                                spacing: 2px;
+                                Text { text: "字号 σ"; font-size: 11px; color: #888; }
+                                font-size-sigma-spin := SpinBox { value: 2; minimum: 0; maximum: 20; }
+                            }
+                        }
 
                         Text { text: "笔画扰动标准差"; font-size: 14px; }
                         HorizontalBox {
                             spacing: 4px;
                             VerticalBox {
+                                spacing: 2px;
                                 Text { text: "x 平移"; font-size: 11px; color: #888; }
                                 perturb-x-spin := SpinBox { value: 2; minimum: 0; maximum: 20; }
                             }
                             VerticalBox {
+                                spacing: 2px;
                                 Text { text: "y 平移"; font-size: 11px; color: #888; }
                                 perturb-y-spin := SpinBox { value: 2; minimum: 0; maximum: 20; }
                             }
                             VerticalBox {
+                                spacing: 2px;
                                 Text { text: "θ 旋转"; font-size: 11px; color: #888; }
                                 perturb-theta-slider := Slider { value: 0.05; minimum: 0; maximum: 1; }
+                            }
+                        }
+
+                        // ---- 边距（位置式布局：上/下/左/右） ----
+                        Text { text: "边距"; font-size: 14px; }
+                        GridLayout {
+                            spacing: 6px;
+                            Row {
+                                Rectangle { }
+                                margin-top-spin := SpinBox {
+                                    value: 30; minimum: 0; maximum: 500;
+                                    horizontal-alignment: center;
+                                }
+                                Rectangle { }
+                            }
+                            Row {
+                                margin-left-spin := SpinBox { value: 30; minimum: 0; maximum: 500; }
+                                Text {
+                                    text: "边距";
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    color: #4ca6a6;
+                                    font-weight: 700;
+                                }
+                                margin-right-spin := SpinBox { value: 30; minimum: 0; maximum: 500; }
+                            }
+                            Row {
+                                Rectangle { }
+                                margin-bottom-spin := SpinBox {
+                                    value: 30; minimum: 0; maximum: 500;
+                                    horizontal-alignment: center;
+                                }
+                                Rectangle { }
+                            }
+                            Row {
+                                bounds-check := CheckBox { text: "边界提示"; }
+                                bounds-color-edit := LineEdit {
+                                    text: "#4ca6a6";
+                                    placeholder-text: "#4ca6a6";
+                                }
+                                Rectangle { }
                             }
                         }
 
@@ -188,14 +321,39 @@ export component MainWindow inherits Window {
             }
 
             // ---- 右侧预览区域 ----
-            Rectangle {
-                background: #d5ddd5;
-                width: 800px;
-                Image {
-                    source: preview-image;
-                    image-fit: contain;
-                    width: 100%;
-                    height: 100%;
+            VerticalBox {
+                Rectangle {
+                    background: preview-bg;
+                    width: 800px;
+                    Image {
+                        source: preview-image;
+                        image-fit: contain;
+                        width: 100%;
+                        height: 100%;
+                    }
+                }
+                // ---- 预览翻页导航 ----
+                HorizontalBox {
+                    spacing: 8px;
+                    padding: 4px;
+                    Button {
+                        text: "◀ 上一页";
+                        clicked => { root.prev-page(); }
+                    }
+                    Text {
+                        text: page-text;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        color: #555;
+                    }
+                    Button {
+                        text: "下一页 ▶";
+                        clicked => { root.next-page(); }
+                    }
+                    Button {
+                        text: "预览底色";
+                        clicked => { root.toggle-preview-bg(); }
+                    }
                 }
             }
         }
@@ -212,14 +370,6 @@ export component MainWindow inherits Window {
                     vertical-alignment: center;
                     color: #555;
                 }
-            }
-            Button {
-                text: "保存预设…";
-                clicked => { root.save-preset(); }
-            }
-            Button {
-                text: "载入预设…";
-                clicked => { root.load-preset(); }
             }
             Button {
                 text: "生成预览";
