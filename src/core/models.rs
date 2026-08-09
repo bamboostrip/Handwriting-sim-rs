@@ -302,6 +302,15 @@ mod tests {
     }
 
     #[test]
+    fn miswrite_mode_parse_roundtrip() {
+        assert_eq!(MiswriteMode::parse("above").unwrap(), MiswriteMode::Above);
+        assert_eq!(MiswriteMode::Above.as_str(), "above");
+        assert_eq!(MiswriteMode::parse("rewrite").unwrap(), MiswriteMode::Rewrite);
+        assert_eq!(MiswriteMode::Rewrite.as_str(), "rewrite");
+        assert!(MiswriteMode::parse("inline").is_err());
+    }
+
+    #[test]
     fn validate_rejects_out_of_range_miswrite_rate() {
         let dir = tempfile::tempdir().unwrap();
         let font = dir.path().join("font.ttf");

@@ -1,10 +1,11 @@
 //! 引擎端到端集成测试：参数 → 渲染 → 导出全链路。
 
+use std::fs;
 use std::path::PathBuf;
 
-use handwrite_sim::core::engine::{export, render_preview, Engine};
+use handwrite_sim::core::engine::{export, render_all_pages_preview, render_preview, Engine};
 use handwrite_sim::core::engine::DefaultEngine;
-use handwrite_sim::core::models::{Align, HandwritingParams, Paragraph};
+use handwrite_sim::core::models::{Align, HandwritingParams, MiswriteMode, Paragraph};
 use image::{Rgb, RgbImage, Rgba, RgbaImage};
 
 fn system_font() -> Option<PathBuf> {
@@ -143,4 +144,48 @@ fn integration_paragraph_path_renders_and_exports() {
         first_x as f32 >= expected - 4.0,
         "首行墨迹最左 x={first_x} 应 ≥ 缩进起点 {expected}"
     );
+}
+
+#[test]
+fn miswrite_preview_matches_export_with_same_seed() {
+    let Some(font) = system_font() else {
+        eprintln!("跳过：未找到系统 CJK 字体");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let bg = dir.path().join("bg.png");
+    let mut img = RgbImage::new(500, 400);
+    for px in img.pixels_mut() {
+        *px = Rgb([255, 255, 255]);
+    }
+    img.save(&bg).unwrap();
+
+    let mut params = make_params(&font, &bg);
+    params.text = "今天天气很好，我们去公园散步，看花看草，心情舒畅。".into();
+    params.font_size = 36.0;
+    params.line_spacing = 44.0;
+    params.miswrite_rate = 0.3;
+    params.miswrite_rewrite_mode = MiswriteMode::Above;
+
+    // 同 seed：预览全部页 = 预览首页 = 导出逐像素一致
+    let pages = render_all_pages_preview(&params, 42).unwrap();
+    let preview = render_preview(&params, 42).unwrap();
+    assert_eq!(pages[0].as_raw(), preview.as_raw(), "预览首帧应与 render_preview 一致");
+    let out = dir.path().join("out");
+    let files = export(&params, &out, 42).unwrap();
+    assert_eq!(files.len(), pages.len());
+    for (path, page) in files.iter().zip(pages.iter()) {
+        let saved = image::open(path).unwrap().to_rgba8();
+        assert_eq!(saved.as_raw(), page.as_raw(), "导出应与预览逐像素一致");
+    }
+
+    // 错字效果确实生效：墨迹多于关闭时
+    let mut p0 = params.clone();
+    p0.miswrite_rate = 0.0;
+    let pages0 = render_all_pages_preview(&p0, 42).unwrap();
+    let ink = |p: &RgbaImage| -> usize { p.pixels().filter(|px| is_ink(px)).count() };
+    let sum: usize = pages.iter().map(ink).sum();
+    let sum0: usize = pages0.iter().map(ink).sum();
+    assert!(sum > sum0, "错字效果应增加墨迹：{sum} vs {sum0}");
+    fs::remove_dir_all(dir.path()).ok();
 }
