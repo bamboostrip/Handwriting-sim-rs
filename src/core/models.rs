@@ -70,6 +70,20 @@ pub enum ParamsError {
     Negative { name: &'static str },
     #[error("颜色分量必须在 0-255 之间：{value}")]
     OutOfRangeColor { value: u8 },
+    #[error("颜色格式无效：{0}（应为 #RRGGBB）")]
+    InvalidColor(String),
+}
+
+/// 解析 `#RRGGBB` 颜色字符串（兼容不带 # 前缀的写法）。
+pub fn parse_color(s: &str) -> Result<[u8; 3], ParamsError> {
+    let hex = s.trim().trim_start_matches('#');
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ParamsError::InvalidColor(s.to_string()));
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).unwrap();
+    let g = u8::from_str_radix(&hex[2..4], 16).unwrap();
+    let b = u8::from_str_radix(&hex[4..6], 16).unwrap();
+    Ok([r, g, b])
 }
 
 /// 一次手写模拟的完整参数。

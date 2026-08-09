@@ -200,6 +200,86 @@ pub fn export(params: &HandwritingParams, out_dir: &Path, seed: u64) -> Result<V
     DefaultEngine::new(seed).save_all(params, out_dir)
 }
 
+/// 便捷入口：预览全部页（与 `render_preview` 同降采样路径，供 GUI 翻页显示）。
+pub fn render_all_pages_preview(
+    params: &HandwritingParams,
+    seed: u64,
+) -> Result<Vec<RgbaImage>, EngineError> {
+    params.validate()?;
+    let font =
+        FontFace::load(Path::new(&params.font_path), params.font_size).map_err(EngineError::Font)?;
+    let (background, scaled) = DefaultEngine::load_background_for_preview(params)?;
+    let (width, height) = (background.width() as usize, background.height() as usize);
+    let mut rng = StdRng::seed_from_u64(seed);
+    let engine = DefaultEngine::new(seed);
+
+    if !params.paragraphs.is_empty() {
+        let pages = layout::layout_paragraphs(&scaled, &font, &mut rng, &params.paragraphs, width, height);
+        return pages
+            .into_iter()
+            .map(|mask| {
+                let canvas = perturb::perturb_mask(&mask, width, height, &scaled, &mut rng, background.as_raw());
+                Ok(rgba_from_rgb(&canvas, width, height))
+            })
+            .collect();
+    }
+    let mut pages = Vec::new();
+    let mut start = 0;
+    loop {
+        let (page, consumed) = engine.render_page_from(&scaled, &font, &mut rng, &params.text, start, &background)?;
+        pages.push(page);
+        if consumed >= params.text.chars().count() {
+            break;
+        }
+        start = consumed;
+    }
+    Ok(pages)
+}
+
+/// 预览专用：边界提示叠加（对齐 Python 版 `workers._bounds_overlay`）。
+///
+/// 非渲染区域（边距外）以 `color` 半透明着色（alpha 40），渲染区内侧画边距框线
+/// （alpha 230，线宽 `max(2, w/900)`）。仅预览使用，导出不叠加。
+pub fn overlay_bounds(img: &RgbaImage, params: &HandwritingParams, color: [u8; 3]) -> RgbaImage {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let left = params.left_margin.max(0.0) as usize;
+    let top = params.top_margin.max(0.0) as usize;
+    let right = (w as f32 - params.right_margin).max(0.0) as usize;
+    let bottom = (h as f32 - params.bottom_margin).max(0.0) as usize;
+    let (right, bottom) = (right.min(w), bottom.min(h));
+    if right <= left || bottom <= top {
+        return img.clone(); // 异常边距（渲染区为空）时原样返回
+    }
+    let mut out = img.clone();
+    let raw = out.as_mut();
+    let line_w = (2usize).max(w / 900);
+    // 半透明合成（对齐 PIL alpha_composite 语义，alpha 通道保持不透明）
+    let blend = |dst: &mut [u8], c: [u8; 3], a: u8| {
+        let alpha = a as u32;
+        dst[0] = ((dst[0] as u32 * (255 - alpha) + c[0] as u32 * alpha) / 255) as u8;
+        dst[1] = ((dst[1] as u32 * (255 - alpha) + c[1] as u32 * alpha) / 255) as u8;
+        dst[2] = ((dst[2] as u32 * (255 - alpha) + c[2] as u32 * alpha) / 255) as u8;
+        dst[3] = 255;
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let idx = y * w + x;
+            let px = &mut raw[idx * 4..idx * 4 + 4];
+            let in_inner = x >= left && y >= top && x < right && y < bottom;
+            if !in_inner {
+                blend(px, color, 40); // 非渲染区半透明着色
+            }
+            // 边距框线：紧贴渲染区内侧的四条边
+            let on_border = (x >= left && x < right && (y < top + line_w || y >= bottom.saturating_sub(line_w)))
+                || (y >= top && y < bottom && (x < left + line_w || x >= right.saturating_sub(line_w)));
+            if on_border {
+                blend(px, color, 230);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +459,68 @@ mod tests {
             render_preview(&params, 1),
             Err(EngineError::Params(ParamsError::NoText))
         ));
+    }
+
+    #[test]
+    fn render_all_pages_preview_first_matches_render_preview() {
+        let Some(font) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let bg = dir.path().join("bg.png");
+        let mut img = RgbImage::new(400, 200);
+        for px in img.pixels_mut() {
+            *px = Rgb([255, 255, 255]);
+        }
+        img.save(&bg).unwrap();
+
+        // 长文本：必然跨多页
+        let mut params = make_params(&font, &bg);
+        params.text = "这是第一页的内容，需要足够长才能触发换页。第二行继续。第三行再来一些。第四行补充。".into();
+        params.font_size = 36.0;
+        params.line_spacing = 40.0;
+
+        let preview = render_preview(&params, 7).unwrap();
+        let pages = render_all_pages_preview(&params, 7).unwrap();
+        assert!(pages.len() >= 2, "长文本应产生多页，实际 {}", pages.len());
+        assert_eq!(pages[0].as_raw(), preview.as_raw(), "首帧应与 render_preview 逐像素一致");
+        for p in &pages {
+            assert_eq!(p.dimensions(), preview.dimensions());
+        }
+        fs::remove_dir_all(dir.path()).ok();
+    }
+
+    #[test]
+    fn overlay_bounds_tints_outside_and_draws_border() {
+        let mut img = RgbaImage::new(120, 100);
+        for px in img.pixels_mut() {
+            *px = image::Rgba([255, 255, 255, 255]);
+        }
+        let params = HandwritingParams {
+            left_margin: 10.0,
+            top_margin: 10.0,
+            right_margin: 10.0,
+            bottom_margin: 10.0,
+            ..HandwritingParams::default()
+        };
+        let out = overlay_bounds(&img, &params, [0, 200, 0]);
+        let raw = out.as_raw();
+        let px = |x: usize, y: usize| -> [u8; 4] {
+            let i = (y * 120 + x) * 4;
+            [raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]
+        };
+        // 非渲染区（边距外）浅着色：alpha 40 → 绿色分量略升
+        let corner = px(3, 3);
+        assert!(corner[1] > 240, "边距外应被浅着色：{corner:?}");
+        // 渲染区中心保持白色
+        let center = px(60, 50);
+        assert_eq!(center, [255, 255, 255, 255], "渲染区应保持原色");
+        // 边框线强着色：alpha 230 → 更接近提示色（绿色分量明显低于浅着色区）
+        let border = px(60, 10);
+        assert!(border[1] < 220, "边框线应强着色：{border:?}");
+        assert!(corner[1] > border[1], "边框线应比边距外更接近提示色");
+        // alpha 通道保持不透明
+        assert_eq!(out.as_raw()[3], 255);
     }
 }
