@@ -352,22 +352,21 @@ pub fn layout_paragraph(
     let rows: Vec<bool> = mask.chunks(width).map(|r| r.iter().any(|&b| b)).collect();
     let bands = split_text_rows(&rows);
     let mut bi = 0usize;
-    let off_min = -0.25 * line_spacing;
     let off_max = 0.8 * line_spacing;
     let mut lines: Vec<(Option<Vec<bool>>, f32)> = Vec::new();
     for &yk in &line_ys {
         if bi < bands.len() && (bands[bi].0 as f32) < yk + line_spacing / 2.0 {
             let s0 = bands[bi].0;
-            let mut s_main = s0;
             let mut e = bands[bi].1;
             bi += 1;
             while bi < bands.len() && (bands[bi].0 as f32) < yk + line_spacing / 2.0 {
-                s_main = bands[bi].0;
                 e = bands[bi].1;
                 bi += 1;
             }
-            // 对齐基准取主行带（最后一个）起点；小字带悬浮其上，行主体仍对齐行网格
-            let off = ((s_main as f32 - yk).max(off_min)).min(off_max);
+            // 对齐基准取切片起点 s0（可能为上方悬浮小字带顶），
+            // 使所有行保持画布绝对位置；下限放宽容纳小字带
+            let off_min = (-0.25 * line_spacing).min(-0.85 * params.font_size - 0.25 * line_spacing);
+            let off = ((s0 as f32 - yk).max(off_min)).min(off_max);
             lines.push((Some(mask[s0 * width..e * width].to_vec()), off));
         } else {
             lines.push((None, 0.0));
@@ -727,5 +726,45 @@ mod tests {
         let z = layout_paragraph(&p0, &font, &mut rand::rngs::StdRng::seed_from_u64(9), &pa, 600);
         let ink_z: usize = z.iter().filter_map(|(m, _)| m.as_ref()).map(|m| m.iter().filter(|&&v| v).count()).sum();
         assert!(ink_a > ink_z, "错字效果应增加前景像素：{ink_a} vs {ink_z}");
+    }
+
+    /// 段落路径：Above 模式首行小字带悬浮于行顶上方，行带切片起点 s0 须锚定网格
+    /// （off = s0 - yk0），否则整行墨迹相对网格下移（s_main 锚点回归）。
+    #[test]
+    fn paragraph_miswrite_keeps_line_grid_position() {
+        let Some(path) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let font = FontFace::load(&path, 36.0).unwrap();
+        let mut p = params();
+        p.word_spacing_sigma = 0.0;
+        p.font_size_sigma = 0.0;
+        p.line_spacing_sigma = 0.0;
+        p.miswrite_rate = 0.8;
+        p.miswrite_rewrite_mode = MiswriteMode::Above;
+        let mut pa = para();
+        pa.text = "今天天气很好，我们去公园散步。".into();
+        let lines = layout_paragraph(&p, &font, &mut rand::rngs::StdRng::seed_from_u64(9), &pa, 600);
+        let (band, off) = &lines[0];
+        let band = band.as_ref().expect("首行应有墨迹");
+        assert!(band.iter().any(|&b| b), "首行应有墨迹");
+        assert!(*off <= 0.0, "小字带顶应在网格顶或之上：off={off}");
+        // 主行带 = 带内最后一个连续墨迹段；其页面位置 = off + 段起点
+        let band_rows: Vec<bool> = band.chunks(600).map(|r| r.iter().any(|&b| b)).collect();
+        let main_start = split_text_rows(&band_rows).last().map(|(s, _)| *s).unwrap() as f32;
+        let main_top = *off + main_start;
+        // 基线（错字率=0）：单行带，主内容顶的页面位置 = off0 + 0
+        let mut p0 = p.clone();
+        p0.miswrite_rate = 0.0;
+        let base = layout_paragraph(&p0, &font, &mut rand::rngs::StdRng::seed_from_u64(9), &pa, 600);
+        let (base_band, base_off) = &base[0];
+        let base_band = base_band.as_ref().expect("基线首行应有墨迹");
+        let base_main_top = *base_off
+            + base_band.chunks(600).position(|r| r.iter().any(|&b| b)).unwrap() as f32;
+        assert!(
+            (main_top - base_main_top).abs() < 2.0,
+            "错字不应移动行主体位置：off={off} main_top={main_top} base={base_main_top}"
+        );
     }
 }
