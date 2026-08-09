@@ -501,7 +501,7 @@ fn collect_params(
     params.left_margin = ui.get_margin_left() as f32;
     params.right_margin = ui.get_margin_right() as f32;
     // 写错字模拟
-    params.miswrite_rate = ui.get_miswrite_rate() as f32 / 100.0;
+    params.miswrite_rate = ui.get_miswrite_rate() / 100.0;
     params.miswrite_rewrite_mode = match ui.get_miswrite_mode_index() {
         1 => MiswriteMode::Rewrite,
         _ => MiswriteMode::Above,
