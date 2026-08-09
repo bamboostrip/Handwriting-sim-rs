@@ -50,20 +50,21 @@ fn draw_thick_line(
     }
 }
 
-/// 对错字字符绘制删除线与重写小字（正上方略偏右）。
-/// `y_top` 为该字符的行顶坐标（同 layout_page/placed 的 y 语义），`angle` 为删除线倾角（rad）。
+/// 对错字字符绘制删除线（与可选的上方小字重写）。
+/// `y_top` 为该字符的行顶坐标（同 layout_page/placed 的 y 语义），`angle` 为删除线倾角（rad）；
+/// `draw_small` 为 true 时在正上方略偏右补画小一号重写（Above 模式）。
 #[allow(clippy::too_many_arguments)]
-fn draw_miswrite_above(
+fn draw_miswrite(
     mask: &mut [bool],
     width: usize,
     height: usize,
     font: &FontFace,
-    _params: &HandwritingParams,
     ch: char,
     x: f32,
     y_top: f32,
     size: f32,
     angle: f32,
+    draw_small: bool,
 ) {
     let advance = font.glyph_width(ch, size);
     // 删除线：跨字形宽度的旋转粗线，位于字符竖直中线
@@ -73,11 +74,13 @@ fn draw_miswrite_above(
     let (rx, ry) = (half * ct, half * st);
     let thickness = (size / 8.0).max(2.0);
     draw_thick_line(mask, width, height, x + rx, mid - ry, x - rx, mid + ry, thickness);
-    // 小一号重写：正上方略偏右，基线不低于 0（首行避免裁掉）
-    let small = (size * 0.6).max(1.0);
-    let small_x = x + size * 0.15;
-    let small_baseline = (y_top - size * 0.85 + font.ascent(small)).max(font.ascent(small));
-    font.rasterize(ch, small, small_x, small_baseline, mask, width, height);
+    if draw_small {
+        // 小一号重写：正上方略偏右，基线不低于 0（首行避免裁掉）
+        let small = (size * 0.6).max(1.0);
+        let small_x = x + size * 0.15;
+        let small_baseline = (y_top - size * 0.85 + font.ascent(small)).max(font.ascent(small));
+        font.rasterize(ch, small, small_x, small_baseline, mask, width, height);
+    }
 }
 
 /// 排版一页文字，返回前景掩码与本页消费的字符数。
@@ -154,11 +157,17 @@ pub fn layout_page(
             // 写错字模拟：判定只影响渲染，不参与换行；rate=0 时不消耗 RNG（零回归）
             if params.miswrite_rate > 0.0 && rng.random_bool(f64::from(params.miswrite_rate)) {
                 let angle = normal_strike.sample(rng) as f32;
-                draw_miswrite_above(&mut mask, width, height, font, params, ch, char_x, yj, size, angle);
-                if params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
-                    // 后文正常重写：x 额外推进一个字形宽度，紧邻重写同一字符
-                    x += font.glyph_width(ch, size) + params.word_spacing;
-                    font.rasterize(ch, size, x, baseline_y, &mut mask, width, height);
+                match params.miswrite_rewrite_mode {
+                    MiswriteMode::Above => {
+                        // 删除线 + 正上方小字重写
+                        draw_miswrite(&mut mask, width, height, font, ch, char_x, yj, size, angle, true);
+                    }
+                    MiswriteMode::Rewrite => {
+                        // 仅删除线；后文正常位置重写（x 额外推进一个字形宽度，紧邻重写同一字符）
+                        draw_miswrite(&mut mask, width, height, font, ch, char_x, yj, size, angle, false);
+                        x += font.glyph_width(ch, size) + params.word_spacing;
+                        font.rasterize(ch, size, x.round(), baseline_y, &mut mask, width, height);
+                    }
                 }
             }
 
@@ -583,8 +592,9 @@ mod tests {
         assert!(pages[1].iter().any(|&b| b), "第二页应有墨迹");
     }
 
-    /// 错字率>0 时输出应比关闭时产生更多前景（删除线/重写墨迹），且消费 RNG 后
-    /// 同 seed 应稳定复现；错字率=0 与历史行为一致（不消费额外 RNG）。
+    /// 错字率>0 时输出应比关闭时产生更多前景（删除线/重写墨迹），
+    /// 且消费额外 RNG 后同 seed 应逐像素稳定复现。错字率=0 不消耗额外 RNG
+    /// 由 rate=0 短路 random_bool 结构性保证；本测试断言墨迹增量与确定性。
     #[test]
     fn miswrite_adds_ink_and_rate_zero_is_stable() {
         let Some(path) = system_font() else {
@@ -606,7 +616,8 @@ mod tests {
         let ink_a = a.mask.iter().filter(|&&v| v).count();
         assert!(ink_a > 0, "应存在前景");
 
-        // 错字率=0：不额外消费 RNG；0.5 的墨迹量大于 0.0 的墨迹量（删除线/重写增加前景）。
+        // 错字率=0 时 rate=0 短路 random_bool，不消耗额外 RNG（结构性保证）；
+        // 此处仅断言墨迹增量：0.5 的墨迹量大于 0.0 的墨迹量（删除线/重写增加前景）。
         let mut p0 = p.clone();
         p0.miswrite_rate = 0.0;
         let zero = layout_page(&p0, &font, &mut rand::rngs::StdRng::seed_from_u64(7), &text, 0, 600, 400);
@@ -633,6 +644,17 @@ mod tests {
         let text = "甲乙丙".to_string();
         let r = layout_page(&p, &font, &mut rand::rngs::StdRng::seed_from_u64(7), &text, 0, 600, 400);
         assert_eq!(r.consumed, 3);
+        // Rewrite 模式不画上方小字：首行行顶之上不应有墨迹（只有删除线+内联重写）
+        let top_ink_row = r.mask
+            .chunks(600)
+            .enumerate()
+            .find(|(_, row)| row.iter().any(|&b| b))
+            .map(|(i, _)| i)
+            .unwrap();
+        assert!(
+            top_ink_row >= p.first_line_y() as usize,
+            "Rewrite 不应在行顶上方画小字：首个墨迹行 {top_ink_row}"
+        );
         // 3 个错字 + 3 个重写 = 6 个字形宽度（约 36px 每字），比只排 3 字明显更宽
         let last_ink_x = r.mask.chunks(600).flat_map(|row| row.iter().rposition(|&b| b)).max().unwrap();
         let mut p0 = p.clone();
