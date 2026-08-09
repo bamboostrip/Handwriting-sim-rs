@@ -56,13 +56,17 @@ pub enum MiswriteMode {
     `miswrite: bool`（判定在阶段一消费 RNG）；阶段二绘制时对错字字符追加
     删除线 / Above 小字。`Rewrite` 模式在阶段二多画一遍字符（注意需在同一
     band 内，删除线/重写都画入该段画布，随后按行裁剪时自然归属对应行）。
-  - 段落路径的 `Rewrite` 推进只影响阶段二绘制位置，不回流到阶段一布局
-    （阶段一 x 推进保持原样；重写字画在字符 glyph 右侧 `glyph_width + word_spacing` 处）。
+  - 段落路径 `Rewrite` 模式与文本路径一致：**阶段一**对错字字符推进
+    `x += glyph_width + word_spacing`（记录 `rewrite_x`，不消耗 RNG），
+    阶段二把重写字符画在 `rewrite_x + 行平移` 处，避免被下一字符覆盖。
+  - 段落路径行带提取需合并同一行的多个行带（Above 小字悬浮在行顶上方会形成
+    独立行带），对齐基准取切片起点 `s0`（`off = clamp(s0 - yk)`），保证画布
+    绝对位置不变；居中改为按行平移（与右对齐同机制），避免小字带被独立居中。
 
 #### UI（`main_window.slint` + `main.rs`）
 
 - 新分组框「写错字」（放「笔画扰动」分组框之后）：
-  - 错字率 Slider：0~30（整数百分数，UI 存 int，引擎 ÷100 为 f32）。
+  - 错字率 Slider：0~30（0.1 步进，UI 存 float 百分数，引擎 ÷100 为 f32）。
   - 重写方式 ComboBox：["正上方重写", "后文重写"]。
 - `collect_params` / `apply_preset_to_ui` 同步新字段。
 - `validate()`：`miswrite_rate` 必须在 [0, 1]。
