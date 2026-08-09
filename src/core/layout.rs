@@ -255,9 +255,20 @@ pub fn layout_paragraph(
     let normal_line = Normal::new(0.0, f64::from(params.line_spacing_sigma)).unwrap();
     let normal_word = Normal::new(0.0, f64::from(params.word_spacing_sigma)).unwrap();
     let normal_font = Normal::new(0.0, f64::from(params.font_size_sigma)).unwrap();
+    let normal_strike = Normal::new(0.0, 0.15).unwrap();
 
     // 阶段一：纯排版（不绘制），随机数消耗顺序与纯文本路径一致
-    let mut placed: Vec<(char, f32, f32, f32, usize)> = Vec::new();
+    #[derive(Clone, Copy)]
+    struct Placed {
+        ch: char,
+        x: f32,
+        y: f32,
+        size: f32,
+        line: usize,
+        miswrite: bool,
+        angle: f32,
+    }
+    let mut placed: Vec<Placed> = Vec::new();
     let mut line_x_ends: Vec<f32> = Vec::new();
     let mut line_ys: Vec<f32> = Vec::new();
     let mut i = 0;
@@ -286,9 +297,16 @@ pub fn layout_paragraph(
             }
             let size = size.max(1.0);
             let offset = font.glyph_width(ch, size);
-            placed.push((ch, x, yj, size, line_ys.len() - 1));
+            placed.push(Placed { ch, x, y: yj, size, line: line_ys.len() - 1, miswrite: false, angle: 0.0 });
             x += params.word_spacing + offset + normal_word.sample(rng) as f32;
             i += 1;
+            // 错字判定（RNG 消费顺序与文本路径一致：字符扰动之后）；rate=0 不消耗
+            if params.miswrite_rate > 0.0 && rng.random_bool(f64::from(params.miswrite_rate)) {
+                if let Some(last) = placed.last_mut() {
+                    last.miswrite = true;
+                    last.angle = normal_strike.sample(rng) as f32;
+                }
+            }
         }
         line_x_ends.push(x);
         y += line_spacing;
@@ -309,19 +327,28 @@ pub fn layout_paragraph(
     let canvas_h = (y + params.font_size + 4.0 * params.line_spacing_sigma + 4.0).max(1.0);
     let canvas_h = canvas_h as usize;
     let mut mask = vec![false; width * canvas_h];
-    for (ch, cx, cy, size, li) in &placed {
+    for item in &placed {
         let dx = match &shifts {
-            Some(s) => cx + s[*li],
-            None => *cx,
+            Some(s) => item.x + s[item.line],
+            None => item.x,
         };
-        let baseline_y = cy + font.ascent(*size);
-        font.rasterize(*ch, *size, dx, baseline_y, &mut mask, width, canvas_h);
+        let baseline_y = item.y + font.ascent(item.size);
+        font.rasterize(item.ch, item.size, dx, baseline_y, &mut mask, width, canvas_h);
+        if item.miswrite {
+            draw_miswrite(&mut mask, width, canvas_h, font, item.ch, dx, item.y, item.size, item.angle, params.miswrite_rewrite_mode == MiswriteMode::Above);
+            if params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
+                let dx2 = dx + font.glyph_width(item.ch, item.size) + params.word_spacing;
+                font.rasterize(item.ch, item.size, dx2.round(), baseline_y, &mut mask, width, canvas_h);
+            }
+        }
     }
     if paragraph.align == Align::Center {
         center_text_lines(&mut mask, width);
     }
 
-    // 按行提取墨迹：行带分组 → 归属各行，空行补 (None, 0.0)
+    // 按行提取墨迹：行带分组 → 归属各行，空行补 (None, 0.0)。
+    // 一行可能包含多个行带（Above 模式的小字重写悬浮在行顶上方），
+    // 全部归入该行合并提取，避免多余行带被丢弃。
     let rows: Vec<bool> = mask.chunks(width).map(|r| r.iter().any(|&b| b)).collect();
     let bands = split_text_rows(&rows);
     let mut bi = 0usize;
@@ -330,10 +357,18 @@ pub fn layout_paragraph(
     let mut lines: Vec<(Option<Vec<bool>>, f32)> = Vec::new();
     for &yk in &line_ys {
         if bi < bands.len() && (bands[bi].0 as f32) < yk + line_spacing / 2.0 {
-            let (s, e) = bands[bi];
+            let s0 = bands[bi].0;
+            let mut s_main = s0;
+            let mut e = bands[bi].1;
             bi += 1;
-            let off = ((s as f32 - yk).max(off_min)).min(off_max);
-            lines.push((Some(mask[s * width..e * width].to_vec()), off));
+            while bi < bands.len() && (bands[bi].0 as f32) < yk + line_spacing / 2.0 {
+                s_main = bands[bi].0;
+                e = bands[bi].1;
+                bi += 1;
+            }
+            // 对齐基准取主行带（最后一个）起点；小字带悬浮其上，行主体仍对齐行网格
+            let off = ((s_main as f32 - yk).max(off_min)).min(off_max);
+            lines.push((Some(mask[s0 * width..e * width].to_vec()), off));
         } else {
             lines.push((None, 0.0));
         }
@@ -662,5 +697,35 @@ mod tests {
         let r0 = layout_page(&p0, &font, &mut rand::rngs::StdRng::seed_from_u64(7), &text, 0, 600, 400);
         let last_ink_x0 = r0.mask.chunks(600).flat_map(|row| row.iter().rposition(|&b| b)).max().unwrap();
         assert!(last_ink_x > last_ink_x0 + 30, "Rewrite 应把最右墨迹推到更远处：{last_ink_x} vs {last_ink_x0}");
+    }
+
+    /// 段落路径：错字率>0 增加前景；同 seed 两次渲染逐像素一致。
+    #[test]
+    fn paragraph_miswrite_adds_ink_and_is_deterministic() {
+        let Some(path) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let font = FontFace::load(&path, 36.0).unwrap();
+        let mut p = params();
+        p.word_spacing_sigma = 0.0;
+        p.font_size_sigma = 0.0;
+        p.line_spacing_sigma = 0.0;
+        p.miswrite_rate = 0.8;
+        p.miswrite_rewrite_mode = MiswriteMode::Above;
+        let mut pa = para();
+        pa.text = "今天天气很好，我们去公园散步。".into();
+        let a = layout_paragraph(&p, &font, &mut rand::rngs::StdRng::seed_from_u64(9), &pa, 600);
+        let b = layout_paragraph(&p, &font, &mut rand::rngs::StdRng::seed_from_u64(9), &pa, 600);
+        assert_eq!(a.len(), b.len());
+        for ((ma, _), (mb, _)) in a.iter().zip(b.iter()) {
+            assert_eq!(ma, mb, "同 seed 应逐像素一致");
+        }
+        let ink_a: usize = a.iter().filter_map(|(m, _)| m.as_ref()).map(|m| m.iter().filter(|&&v| v).count()).sum();
+        let mut p0 = p.clone();
+        p0.miswrite_rate = 0.0;
+        let z = layout_paragraph(&p0, &font, &mut rand::rngs::StdRng::seed_from_u64(9), &pa, 600);
+        let ink_z: usize = z.iter().filter_map(|(m, _)| m.as_ref()).map(|m| m.iter().filter(|&&v| v).count()).sum();
+        assert!(ink_a > ink_z, "错字效果应增加前景像素：{ink_a} vs {ink_z}");
     }
 }
