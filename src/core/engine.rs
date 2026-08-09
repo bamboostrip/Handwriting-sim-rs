@@ -260,9 +260,9 @@ pub fn export_pdf(
     let pages = DefaultEngine::new(seed).render_pages(params)?;
     let mut doc = printpdf::PdfDocument::new("handwrite-sim");
     let mut pdf_pages = Vec::with_capacity(pages.len());
-    for page in &pages {
+    for page in pages {
         let (w, h) = page.dimensions();
-        let raw = printpdf::RawImage::from_dynamic_image(image::DynamicImage::ImageRgba8(page.clone()))
+        let raw = printpdf::RawImage::from_dynamic_image(image::DynamicImage::ImageRgba8(page))
             .map_err(EngineError::Pdf)?;
         let id = doc.add_image(&raw);
         let ops = vec![printpdf::Op::UseXobject {
