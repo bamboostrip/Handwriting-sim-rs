@@ -20,11 +20,11 @@ use handwrite_sim::core::docx_io;
 use handwrite_sim::core::engine::{export, export_pdf, overlay_bounds, render_all_pages_preview, EngineError};
 use handwrite_sim::core::models::{parse_color, Align, HandwritingParams, MiswriteMode, Paragraph};
 use handwrite_sim::core::presets;
-use handwrite_sim::ui::{MainWindow, ParagraphItem};
+use handwrite_sim::ui::MainWindow;
 use image::RgbaImage;
 use slint::{
-    ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer,
-    TimerMode, VecModel,
+    ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode,
+    VecModel,
 };
 
 /// 预览防抖间隔（毫秒）。
@@ -66,6 +66,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let render_gen = Arc::new(AtomicU64::new(0));
     // 预览区底色循环索引
     let preview_bg_idx = Rc::new(RefCell::new(0usize));
+    // 段落格式数组：与输入文本框按 \n 分割的段落一一对应，(对齐, 首行缩进px)。
+    // 文本编辑时按段数重排（新段继承上一段格式），导出时据此生成 Paragraph 列表。
+    let para_formats = Rc::new(RefCell::new(Vec::<(u8, i32)>::new()));
     // 预设下拉：显示名模型 + 索引→路径映射（0 为占位符）
     let preset_model = Rc::new(VecModel::<SharedString>::default());
     let preset_paths = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
@@ -78,6 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let timer = Rc::clone(&timer);
         let seed = Rc::clone(&seed_counter);
         let preset_params = Rc::clone(&preset_params);
+        let para_formats = Rc::clone(&para_formats);
         let pages = Arc::clone(&preview_pages);
         let index = Arc::clone(&preview_index);
         let render_gen = Arc::clone(&render_gen);
@@ -90,10 +94,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pages = Arc::clone(&pages);
             let index = Arc::clone(&index);
             let render_gen = Arc::clone(&render_gen);
+            let para_formats_timer = Rc::clone(&para_formats);
             timer.start(TimerMode::SingleShot, Duration::from_millis(PREVIEW_DEBOUNCE_MS), move || {
                 gui_dbg!("预览渲染开始（seed={}）", seed.borrow());
                 // UI 线程：快速收集参数（不耗时，不阻塞）
-                let params = match collect_params(&ui, &preset_params) {
+                let params = match collect_params(&ui, &preset_params, &para_formats_timer) {
                     Ok(p) => p,
                     Err(e) => {
                         gui_dbg!("参数收集失败：{e}");
@@ -238,11 +243,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         let seed = Rc::clone(&seed_counter);
         let preset_params = Rc::clone(&preset_params);
+        let para_formats = Rc::clone(&para_formats);
         let render_gen = Arc::clone(&render_gen);
         ui.on_export_files(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(dir) = rfd::FileDialog::new().pick_folder() else { return };
-            let params = match collect_params(&ui, &preset_params) {
+            let params = match collect_params(&ui, &preset_params, &para_formats) {
                 Ok(p) => p,
                 Err(e) => {
                     ui.set_status_text(SharedString::from(format!("参数错误：{e}")));
@@ -277,6 +283,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         let seed = Rc::clone(&seed_counter);
         let preset_params = Rc::clone(&preset_params);
+        let para_formats = Rc::clone(&para_formats);
         let render_gen = Arc::clone(&render_gen);
         ui.on_export_pdf(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -287,7 +294,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             else {
                 return;
             };
-            let params = match collect_params(&ui, &preset_params) {
+            let params = match collect_params(&ui, &preset_params, &para_formats) {
                 Ok(p) => p,
                 Err(e) => {
                     ui.set_status_text(SharedString::from(format!("参数错误：{e}")));
@@ -316,68 +323,94 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // ---- 段落模型（VecModel 驱动列表 UI） ----
-    let paragraph_model = Rc::new(VecModel::<ParagraphItem>::default());
-    ui.set_paragraphs(ModelRc::from(paragraph_model.clone()));
+    // ---- 段落工具（单框 + 光标段按钮，对齐 Python 版交互） ----
 
-    {
-        let model = Rc::clone(&paragraph_model);
-        ui.on_add_paragraph(move || {
-            model.push(ParagraphItem {
-                text: SharedString::from(""),
-                align_index: 0,
-                indent: 0,
-            });
-        });
-    }
-    {
-        let model = Rc::clone(&paragraph_model);
-        ui.on_remove_paragraph(move |idx| {
-            let idx = idx as usize;
-            if idx < model.row_count() {
-                model.remove(idx);
-            }
-        });
-    }
-    // 段落文本编辑写回（slint for + <=> 不支持写回模型项，故用单向绑定 + 回调）
-    {
-        let model = Rc::clone(&paragraph_model);
-        ui.on_paragraph_edited(move |idx, text| {
-            let idx = idx as usize;
-            if idx < model.row_count() {
-                let mut item = model.row_data(idx).unwrap_or_default();
-                item.text = text;
-                model.set_row_data(idx, item);
-            }
-        });
-    }
-    {
-        let model = Rc::clone(&paragraph_model);
-        ui.on_paragraph_align_changed(move |idx, align| {
-            let idx = idx as usize;
-            if idx < model.row_count() {
-                let mut item = model.row_data(idx).unwrap_or_default();
-                item.align_index = align;
-                model.set_row_data(idx, item);
-            }
-        });
-    }
-    {
-        let model = Rc::clone(&paragraph_model);
-        ui.on_paragraph_indent_changed(move |idx, indent| {
-            let idx = idx as usize;
-            if idx < model.row_count() {
-                let mut item = model.row_data(idx).unwrap_or_default();
-                item.indent = indent;
-                model.set_row_data(idx, item);
-            }
-        });
+    /// 按字节偏移定位段落索引（\n 为 1 字节，UTF-8 多字节字符不含 \n，计数安全）。
+    fn para_index_at(text: &str, byte_offset: usize) -> usize {
+        let bytes = text.as_bytes();
+        bytes[..byte_offset.min(bytes.len())].iter().filter(|&&b| b == b'\n').count()
     }
 
-    // 导入 docx：解析后整体替换段落列表
+    /// 计算光标所在段的格式，写入状态提示。
+    fn update_para_status(ui: &MainWindow, fmts: &RefCell<Vec<(u8, i32)>>) {
+        let text = ui.get_input_text().to_string();
+        let idx = para_index_at(&text, ui.get_para_cursor_bytes() as usize);
+        let seg = text.split('\n').nth(idx).unwrap_or("").to_string();
+        let (align, indent) = fmts.borrow().get(idx).copied().unwrap_or((0, 0));
+        let align_name = ["左对齐", "居中", "右对齐"][(align.min(2)) as usize];
+        let indent_txt = if indent > 0 { format!("，首行缩进 {indent}px") } else { String::new() };
+        let seg_txt = if seg.trim().is_empty() { "（空段）" } else { "" };
+        ui.set_para_status_text(SharedString::from(format!(
+            "第 {} 段（{} 字）：{align_name}{indent_txt}{seg_txt}",
+            idx + 1,
+            seg.chars().count()
+        )));
+    }
+
+    // 文本编辑：按新段数重排格式数组（新段继承上一段格式，合并保留首段格式）
     {
-        let model = Rc::clone(&paragraph_model);
+        let fmts = Rc::clone(&para_formats);
+        ui.on_para_text_edited(move |text| {
+            let count = text.split('\n').count();
+            let mut fmts = fmts.borrow_mut();
+            while fmts.len() < count {
+                let inherit = *fmts.last().unwrap_or(&(0, 0));
+                fmts.push(inherit);
+            }
+            fmts.truncate(count);
+        });
+    }
+    // 光标移动：刷新当前段状态提示
+    {
         let weak = ui.as_weak();
+        let fmts = Rc::clone(&para_formats);
+        ui.on_para_cursor_moved(move |_byte_offset| {
+            let Some(ui) = weak.upgrade() else { return };
+            update_para_status(&ui, &fmts);
+        });
+    }
+    // 对齐按钮：作用于光标所在段，改完立即触发防抖预览
+    {
+        let weak = ui.as_weak();
+        let fmts = Rc::clone(&para_formats);
+        let fmts_status = Rc::clone(&para_formats);
+        ui.on_para_set_align(move |align| {
+            let Some(ui) = weak.upgrade() else { return };
+            let text = ui.get_input_text().to_string();
+            let idx = para_index_at(&text, ui.get_para_cursor_bytes() as usize);
+            let mut fmts = fmts.borrow_mut();
+            if idx < fmts.len() {
+                fmts[idx].0 = align as u8;
+            }
+            drop(fmts);
+            update_para_status(&ui, &fmts_status);
+            ui.invoke_regenerate();
+        });
+    }
+    // 缩进按钮：按两字宽缩进/取消（对齐 Python 版 setTextIndent(2*font_size)）
+    {
+        let weak = ui.as_weak();
+        let fmts = Rc::clone(&para_formats);
+        let fmts_status = Rc::clone(&para_formats);
+        ui.on_para_indent_toggle(move |do_indent| {
+            let Some(ui) = weak.upgrade() else { return };
+            let text = ui.get_input_text().to_string();
+            let idx = para_index_at(&text, ui.get_para_cursor_bytes() as usize);
+            let indent = if do_indent { 2 * ui.get_font_size() } else { 0 };
+            let mut fmts = fmts.borrow_mut();
+            if idx < fmts.len() {
+                fmts[idx].1 = indent;
+            }
+            drop(fmts);
+            update_para_status(&ui, &fmts_status);
+            ui.invoke_regenerate();
+        });
+    }
+
+    // 导入 docx：文本 + 每段格式整体写入文本框
+    {
+        let weak = ui.as_weak();
+        let fmts = Rc::clone(&para_formats);
         ui.on_import_docx(move || {
             let Some(ui) = weak.upgrade() else { return };
             if let Some(path) = rfd::FileDialog::new()
@@ -388,22 +421,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match docx_io::load_paragraphs(&path, font_size) {
                     Ok(paras) => {
                         let count = paras.len();
-                        while model.row_count() > 0 {
-                            model.remove(0);
-                        }
-                        for p in paras {
-                            model.push(ParagraphItem {
-                                text: SharedString::from(p.text),
-                                align_index: match p.align {
-                                    Align::Left => 0,
-                                    Align::Center => 1,
-                                    Align::Right => 2,
-                                },
-                                indent: p.first_line_indent.round() as i32,
-                            });
-                        }
-                        ui.set_input_mode(1);
-                        ui.set_status_text(SharedString::from(format!("已导入 {count} 个段落")));
+                        let text = paras
+                            .iter()
+                            .map(|p| p.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        ui.set_input_text(SharedString::from(text));
+                        *fmts.borrow_mut() = paras
+                            .iter()
+                            .map(|p| {
+                                (
+                                    match p.align {
+                                        Align::Left => 0,
+                                        Align::Center => 1,
+                                        Align::Right => 2,
+                                    },
+                                    p.first_line_indent.round() as i32,
+                                )
+                            })
+                            .collect();
+                        ui.set_status_text(SharedString::from(format!(
+                            "已导入 {count} 个段落，回车分段、按钮设格式"
+                        )));
                     }
                     Err(e) => ui.set_status_text(SharedString::from(format!("导入 docx 失败：{e}"))),
                 }
@@ -437,6 +476,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let preset_params = Rc::clone(&preset_params);
+        let para_formats = Rc::clone(&para_formats);
         let preset_model = Rc::clone(&preset_model);
         let preset_paths = Rc::clone(&preset_paths);
         ui.on_save_preset(move || {
@@ -449,7 +489,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .set_file_name("preset.json")
                 .save_file()
             {
-                let params = match collect_params(&ui, &preset_params) {
+                let params = match collect_params(&ui, &preset_params, &para_formats) {
                     Ok(p) => p,
                     Err(e) => {
                         ui.set_status_text(SharedString::from(format!("参数错误：{e}")));
@@ -567,33 +607,40 @@ fn apply_preset_to_ui(
 /// 收集 UI 参数为 `HandwritingParams` 并校验。
 /// 以最近载入预设为基础（`preset_params`），再用 UI 控件值覆盖对应字段，
 /// 从而保留预设中 slint 未绑定的 end_chars/start_chars 等参数。
+///
+/// 文本 → 段落规则：按 `\n` 切段并跳过空段；
+/// 多段或任一格式非默认（非左对齐/有缩进）时走段落路径，
+/// 单段无格式时走纯文本路径（与旧行为逐字一致）。
 fn collect_params(
     ui: &MainWindow,
     preset_params: &RefCell<Option<HandwritingParams>>,
+    para_formats: &RefCell<Vec<(u8, i32)>>,
 ) -> Result<HandwritingParams, EngineError> {
     let mut params = preset_params.borrow().clone().unwrap_or_default();
-    if ui.get_input_mode() == 1 {
-        let model = ui.get_paragraphs();
-        let mut paras = Vec::new();
-        for i in 0..model.row_count() {
-            let item = model.row_data(i).unwrap();
-            let text = item.text.to_string();
-            if text.trim().is_empty() {
-                continue;
-            }
-            paras.push(Paragraph {
-                text,
-                align: match item.align_index {
-                    1 => Align::Center,
-                    2 => Align::Right,
-                    _ => Align::Left,
-                },
-                first_line_indent: item.indent as f32,
-            });
+    let raw = ui.get_input_text().to_string();
+    let fmts = para_formats.borrow();
+    let mut paras = Vec::new();
+    for (i, seg) in raw.split('\n').enumerate() {
+        let seg = seg.trim();
+        if seg.is_empty() {
+            continue;
         }
+        let (align_idx, indent) = fmts.get(i).copied().unwrap_or((0, 0));
+        paras.push(Paragraph {
+            text: seg.to_string(),
+            align: match align_idx {
+                1 => Align::Center,
+                2 => Align::Right,
+                _ => Align::Left,
+            },
+            first_line_indent: indent as f32,
+        });
+    }
+    let has_format = fmts.iter().any(|&(a, i)| a != 0 || i != 0);
+    if paras.len() > 1 || has_format {
         params.paragraphs = paras;
     } else {
-        params.text = ui.get_input_text().as_str().trim().to_string();
+        params.text = raw.trim().to_string();
     }
     params.font_path = ui.get_font_path_text().as_str().trim().to_string();
     params.background_path = ui.get_background_path_text().as_str().trim().to_string();
@@ -674,3 +721,4 @@ fn show_page(
     ui.set_preview_image(Image::from_rgba8(buffer));
     ui.set_page_text(SharedString::from(format!("第 {} / {total} 页", i + 1)));
 }
+

@@ -18,7 +18,6 @@ import {
     ScrollView,
     Slider,
     SpinBox,
-    TextEdit,
 } from "std-widgets.slint";
 import {
     Theme,
@@ -29,12 +28,6 @@ import {
     FieldLabel,
 } from "theme.slint";
 
-export struct ParagraphItem {
-    text: string,
-    align-index: int,   // 0=left 1=center 2=right
-    indent: int,        // 首行缩进（像素）
-}
-
 export component MainWindow inherits Window {
     title: "手写模拟器";
     preferred-width: 1280px;
@@ -42,7 +35,7 @@ export component MainWindow inherits Window {
     background: Theme.bg;
 
     // ---- 双向绑定参数（Rust 侧 get_/set_ 访问） ----
-    in-out property <string> input-text <=> input-edit.text;
+    in-out property <string> input-text <=> input-text-input.text;
     in-out property <int> font-size <=> font-size-spin.value;
     in-out property <int> line-spacing <=> line-spacing-spin.value;
     in-out property <int> word-spacing <=> word-spacing-spin.value;
@@ -80,23 +73,25 @@ export component MainWindow inherits Window {
     // 预览区底色（对齐 Python 版 PreviewLabel 初始 #c8d0ca）
     in-out property <color> preview-bg: #c8d0ca;
 
-    // 模式：0=纯文本 1=段落
-    in-out property <int> input-mode: 0;
-    in-out property <[ParagraphItem]> paragraphs;
+    // 模式统一：单文本框 + 光标段工具按钮（对齐 Python 版交互）。
+    // 光标段定位：TextInput 内置 out 属性（字节偏移，仅可读）。
+    out property <int> para-cursor-bytes <=> input-text-input.cursor-position_byte-offset;
+    // 当前光标所在段的格式提示（Rust 侧维护）
+    in property <string> para-status-text: "光标定位到段落后可用按钮设置格式";
 
     // ---- UI → Rust 回调 ----
     callback regenerate;
     callback choose-font;
     callback choose-background;
     callback export-files;
-    callback add-paragraph;
-    callback remove-paragraph(int);
     callback import-docx;
     callback save-preset;
     callback load-preset;
-    callback paragraph-edited(int, string);
-    callback paragraph-align-changed(int, int);
-    callback paragraph-indent-changed(int, int);
+    // 段落工具：文本编辑后重排格式 / 设置光标段格式 / 光标移动刷新提示
+    callback para-text-edited(string);
+    callback para-set-align(int);
+    callback para-indent-toggle(bool);
+    callback para-cursor-moved(int);
     callback preset-selected(int);
     callback prev-page;
     callback next-page;
@@ -167,72 +162,74 @@ export component MainWindow inherits Window {
                         padding-right: 10px;
                         spacing: 8px;
 
-                        // ---- 待处理文本 ----
+                        // ---- 待处理文本（单框 + 光标段工具按钮，对齐 Python 版交互） ----
                         SectionLabel { text: "待处理文本"; }
                         HorizontalLayout {
-                            spacing: 6px;
-                            input-mode-combo := ComboBox {
-                                model: ["纯文本", "段落"];
-                                current-index <=> root.input-mode;
-                                min-width: 90px;
-                                horizontal-stretch: 0;
+                            spacing: 4px;
+                            GreenButton {
+                                text: "左对齐";
+                                clicked => { root.para-set-align(0); }
                             }
                             GreenButton {
-                                text: "添加段落";
-                                enabled: root.input-mode == 1;
-                                clicked => { root.add-paragraph(); }
+                                text: "居中";
+                                clicked => { root.para-set-align(1); }
                             }
                             GreenButton {
-                                text: "导入 docx";
-                                enabled: root.input-mode == 1;
+                                text: "右对齐";
+                                clicked => { root.para-set-align(2); }
+                            }
+                            GreenButton {
+                                text: "首行缩进";
+                                clicked => { root.para-indent-toggle(true); }
+                            }
+                            GreenButton {
+                                text: "取消缩进";
+                                clicked => { root.para-indent-toggle(false); }
+                            }
+                            GreenButton {
+                                text: "导入docx";
                                 clicked => { root.import-docx(); }
                             }
                         }
-
-                        input-edit := TextEdit {
-                            placeholder-text: "请输入文本内容，支持多行。";
-                            height: 120px;
-                            wrap: word-wrap;
-                            visible: root.input-mode == 0;
+                        Text {
+                            text: root.para-status-text;
+                            font-size: 11px;
+                            color: Theme.sub-text;
                         }
-
-                        VerticalLayout {
-                            visible: root.input-mode == 1;
-                            spacing: 4px;
-                            for item[idx] in root.paragraphs : HorizontalLayout {
-                                spacing: 4px;
-                                item-edit := TextEdit {
-                                    text: item.text;
-                                    edited(text) => { root.paragraph-edited(idx, text); }
-                                    height: 56px;
+                        para-editor := Rectangle {
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.group-border;
+                            height: 140px;
+                            clip: true;
+                            forward-focus: input-text-input;
+                            scroll-view := ScrollView {
+                                x: 4px;
+                                y: 4px;
+                                width: parent.width - 8px;
+                                height: parent.height - 8px;
+                                viewport-width: self.visible-width;
+                                viewport-height: max(self.visible-height, input-text-input.preferred-height);
+                                input-text-input := TextInput {
+                                    single-line: false;
                                     wrap: word-wrap;
-                                    horizontal-stretch: 1;
+                                    font-family: "楷体";
+                                    font-size: Theme.base-font;
+                                    color: Theme.text;
+                                    page-height: scroll-view.visible-height;
+                                    edited => { root.para-text-edited(self.text); }
+                                    cursor_position_changed(pos) => { root.para-cursor-moved(root.para-cursor-bytes); }
                                 }
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { text: "对齐"; font-size: 11px; color: Theme.sub-text; }
-                                    align-combo := ComboBox {
-                                        model: ["左对齐", "居中", "右对齐"];
-                                        current-index: item.align-index;
-                                        selected => { root.paragraph-align-changed(idx, align-combo.current-index); }
-                                        min-width: 80px;
-                                    }
-                                }
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { text: "首行缩进"; font-size: 11px; color: Theme.sub-text; }
-                                    item-indent := SpinBox {
-                                        value: item.indent;
-                                        edited(value) => { root.paragraph-indent-changed(idx, value); }
-                                        minimum: 0;
-                                        maximum: 500;
-                                        min-width: 64px;
-                                    }
-                                }
-                                GreenButton {
-                                    text: "删除";
-                                    clicked => { root.remove-paragraph(idx); }
-                                }
+                            }
+                            Text {
+                                text: "请输入文本内容，支持多行；回车分段，用上方按钮设置当前段格式。";
+                                visible: input-text-input.text == "" && !input-text-input.has-focus;
+                                x: 12px;
+                                y: 12px;
+                                width: parent.width - 24px;
+                                font-size: 12px;
+                                color: Theme.sub-text;
+                                wrap: word-wrap;
                             }
                         }
 
@@ -420,8 +417,9 @@ export component MainWindow inherits Window {
                                         horizontal-stretch: 1;
                                     }
                                     Text {
-                                        text: "${round(root.miswrite-rate * 10) / 10}%";
-                                        min-width: 56px;
+                                        // Slint 字符串插值语法为 \{...}（${...} 会被当作字面文本）
+                                        text: "\{round(root.miswrite-rate * 10) / 10}%";
+                                        width: 48px;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                         font-size: 12px;
