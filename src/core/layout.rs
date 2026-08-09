@@ -163,10 +163,10 @@ pub fn layout_page(
                         draw_miswrite(&mut mask, width, height, font, ch, char_x, yj, size, angle, true);
                     }
                     MiswriteMode::Rewrite => {
-                        // 仅删除线；后文正常位置重写（x 额外推进一个字形宽度，紧邻重写同一字符）
+                        // 仅删除线；后文正常位置重写：紧邻错字之后以正常字号重写，再推进一个字形宽度给后续字符
                         draw_miswrite(&mut mask, width, height, font, ch, char_x, yj, size, angle, false);
-                        x += font.glyph_width(ch, size) + params.word_spacing;
                         font.rasterize(ch, size, x.round(), baseline_y, &mut mask, width, height);
+                        x += font.glyph_width(ch, size) + params.word_spacing;
                     }
                 }
             }
