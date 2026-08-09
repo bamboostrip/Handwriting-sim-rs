@@ -8,7 +8,7 @@ use rand::Rng;
 use rand_distr::{Distribution, Normal};
 
 use crate::core::font::FontFace;
-use crate::core::models::{Align, HandwritingParams, Paragraph};
+use crate::core::models::{Align, HandwritingParams, MiswriteMode, Paragraph};
 
 /// 一页排版结果。
 pub struct LayoutResult {
@@ -16,6 +16,68 @@ pub struct LayoutResult {
     pub mask: Vec<bool>,
     /// 本页消费的字符数（含换行符）。
     pub consumed: usize,
+}
+
+/// 在掩码中画一条带厚度的线段（删除线用）。逐行 bool 掩码，越界自动忽略。
+#[allow(clippy::too_many_arguments)]
+fn draw_thick_line(
+    mask: &mut [bool],
+    width: usize,
+    height: usize,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    thickness: f32,
+) {
+    let r = thickness / 2.0;
+    let steps = ((x1 - x0).abs().max((y1 - y0).abs())).ceil().max(1.0) as usize;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let cx = x0 + (x1 - x0) * t;
+        let cy = y0 + (y1 - y0) * t;
+        let x_lo = (cx - r).floor() as isize;
+        let x_hi = (cx + r).ceil() as isize;
+        let y_lo = (cy - r).floor() as isize;
+        let y_hi = (cy + r).ceil() as isize;
+        for yy in y_lo..=y_hi {
+            for xx in x_lo..=x_hi {
+                if xx >= 0 && yy >= 0 && (xx as usize) < width && (yy as usize) < height {
+                    mask[(yy as usize) * width + (xx as usize)] = true;
+                }
+            }
+        }
+    }
+}
+
+/// 对错字字符绘制删除线与重写小字（正上方略偏右）。
+/// `y_top` 为该字符的行顶坐标（同 layout_page/placed 的 y 语义），`angle` 为删除线倾角（rad）。
+#[allow(clippy::too_many_arguments)]
+fn draw_miswrite_above(
+    mask: &mut [bool],
+    width: usize,
+    height: usize,
+    font: &FontFace,
+    _params: &HandwritingParams,
+    ch: char,
+    x: f32,
+    y_top: f32,
+    size: f32,
+    angle: f32,
+) {
+    let advance = font.glyph_width(ch, size);
+    // 删除线：跨字形宽度的旋转粗线，位于字符竖直中线
+    let mid = y_top + font.ascent(size) * 0.45;
+    let (ct, st) = (angle.cos(), angle.sin());
+    let half = advance * 0.45;
+    let (rx, ry) = (half * ct, half * st);
+    let thickness = (size / 8.0).max(2.0);
+    draw_thick_line(mask, width, height, x + rx, mid - ry, x - rx, mid + ry, thickness);
+    // 小一号重写：正上方略偏右，基线不低于 0（首行避免裁掉）
+    let small = (size * 0.6).max(1.0);
+    let small_x = x + size * 0.15;
+    let small_baseline = (y_top - size * 0.85 + font.ascent(small)).max(font.ascent(small));
+    font.rasterize(ch, small, small_x, small_baseline, mask, width, height);
 }
 
 /// 排版一页文字，返回前景掩码与本页消费的字符数。
@@ -43,6 +105,7 @@ pub fn layout_page(
     let normal_line = Normal::new(0.0, f64::from(params.line_spacing_sigma)).unwrap();
     let normal_word = Normal::new(0.0, f64::from(params.word_spacing_sigma)).unwrap();
     let normal_font = Normal::new(0.0, f64::from(params.font_size_sigma)).unwrap();
+    let normal_strike = Normal::new(0.0, 0.15).unwrap();
 
     let mut i = start;
     let mut y = params.first_line_y();
@@ -82,10 +145,23 @@ pub fn layout_page(
             let baseline_y = yj + font.ascent(size);
             font.rasterize(ch, size, x.round(), baseline_y, &mut mask, width, height);
 
-            // 字距推进（含字形宽度与扰动）
+            // 字距推进（含字形宽度与扰动）——先记录字符起始位置供错字效果使用
+            let char_x = x;
             x += params.word_spacing + offset + normal_word.sample(rng) as f32;
 
             i += 1;
+
+            // 写错字模拟：判定只影响渲染，不参与换行；rate=0 时不消耗 RNG（零回归）
+            if params.miswrite_rate > 0.0 && rng.random_bool(f64::from(params.miswrite_rate)) {
+                let angle = normal_strike.sample(rng) as f32;
+                draw_miswrite_above(&mut mask, width, height, font, params, ch, char_x, yj, size, angle);
+                if params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
+                    // 后文正常重写：x 额外推进一个字形宽度，紧邻重写同一字符
+                    x += font.glyph_width(ch, size) + params.word_spacing;
+                    font.rasterize(ch, size, x, baseline_y, &mut mask, width, height);
+                }
+            }
+
             if i >= text_len {
                 return LayoutResult { mask, consumed: i };
             }
@@ -314,6 +390,7 @@ pub fn layout_paragraphs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::models::MiswriteMode;
     use rand::SeedableRng;
     use std::path::PathBuf;
 
@@ -504,5 +581,64 @@ mod tests {
         assert!(pages.len() >= 2, "矮画布应产生至少两页，实际 {}", pages.len());
         assert!(pages[0].iter().any(|&b| b), "首页应有墨迹");
         assert!(pages[1].iter().any(|&b| b), "第二页应有墨迹");
+    }
+
+    /// 错字率>0 时输出应比关闭时产生更多前景（删除线/重写墨迹），且消费 RNG 后
+    /// 同 seed 应稳定复现；错字率=0 与历史行为一致（不消费额外 RNG）。
+    #[test]
+    fn miswrite_adds_ink_and_rate_zero_is_stable() {
+        let Some(path) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let font = FontFace::load(&path, 36.0).unwrap();
+        let mut p = params();
+        p.word_spacing_sigma = 0.0;
+        p.font_size_sigma = 0.0;
+        p.line_spacing_sigma = 0.0;
+        p.miswrite_rate = 0.5;
+        p.miswrite_rewrite_mode = MiswriteMode::Above;
+        let text = "今天天气很好，我们去公园散步。".to_string();
+        let a = layout_page(&p, &font, &mut rand::rngs::StdRng::seed_from_u64(7), &text, 0, 600, 400);
+        let b = layout_page(&p, &font, &mut rand::rngs::StdRng::seed_from_u64(7), &text, 0, 600, 400);
+        assert_eq!(a.consumed, b.consumed);
+        assert_eq!(a.mask, b.mask, "同 seed 应逐像素一致");
+        let ink_a = a.mask.iter().filter(|&&v| v).count();
+        assert!(ink_a > 0, "应存在前景");
+
+        // 错字率=0：不额外消费 RNG；0.5 的墨迹量大于 0.0 的墨迹量（删除线/重写增加前景）。
+        let mut p0 = p.clone();
+        p0.miswrite_rate = 0.0;
+        let zero = layout_page(&p0, &font, &mut rand::rngs::StdRng::seed_from_u64(7), &text, 0, 600, 400);
+        assert!(
+            ink_a > zero.mask.iter().filter(|&&v| v).count(),
+            "错字效果应增加前景像素"
+        );
+    }
+
+    /// Rewrite 模式：重写字符画在错字右侧（x 推进），墨迹分布明显更宽。
+    #[test]
+    fn miswrite_rewrite_mode_draws_extra_glyph() {
+        let Some(path) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let font = FontFace::load(&path, 36.0).unwrap();
+        let mut p = params();
+        p.miswrite_rate = 1.0; // 全部字符错字 → 每个字符都重写一遍
+        p.miswrite_rewrite_mode = MiswriteMode::Rewrite;
+        p.word_spacing_sigma = 0.0;
+        p.font_size_sigma = 0.0;
+        p.line_spacing_sigma = 0.0;
+        let text = "甲乙丙".to_string();
+        let r = layout_page(&p, &font, &mut rand::rngs::StdRng::seed_from_u64(7), &text, 0, 600, 400);
+        assert_eq!(r.consumed, 3);
+        // 3 个错字 + 3 个重写 = 6 个字形宽度（约 36px 每字），比只排 3 字明显更宽
+        let last_ink_x = r.mask.chunks(600).flat_map(|row| row.iter().rposition(|&b| b)).max().unwrap();
+        let mut p0 = p.clone();
+        p0.miswrite_rate = 0.0;
+        let r0 = layout_page(&p0, &font, &mut rand::rngs::StdRng::seed_from_u64(7), &text, 0, 600, 400);
+        let last_ink_x0 = r0.mask.chunks(600).flat_map(|row| row.iter().rposition(|&b| b)).max().unwrap();
+        assert!(last_ink_x > last_ink_x0 + 30, "Rewrite 应把最右墨迹推到更远处：{last_ink_x} vs {last_ink_x0}");
     }
 }
