@@ -4,7 +4,7 @@
 //! `render_preview` / `generate` / `save_all`。
 //! 支持双路径：纯文本路径（`text`）与段落路径（`paragraphs` 非空时启用，
 //! 对齐/缩进/右对齐/跨页，见 layout::layout_paragraphs）。
-//! 预览对超大背景（宽 > 4096）做降采样并等比缩放空间参数，导出始终全分辨率。
+//! 预览对超大背景（宽 > `PREVIEW_MAX_WIDTH`）做降采样并等比缩放空间参数，导出始终全分辨率。
 
 use std::path::{Path, PathBuf};
 
@@ -36,7 +36,9 @@ pub enum EngineError {
 }
 
 /// 预览降采样的最大背景宽度阈值。
-const PREVIEW_MAX_WIDTH: u32 = 4096;
+/// 2048 宽对 ~800px 的预览区已远超显示精度；比 4096 减少 4 倍渲染/内存开销
+/// （千万像素级背景逐页缓存 4096 宽时每页可达 ~95MB）。
+const PREVIEW_MAX_WIDTH: u32 = 2048;
 
 /// 调试日志：`HANDWRITE_DEBUG=1` 时输出到 stderr（带耗时毫秒），否则静默。
 /// 用于排查预览/导出卡死时的环节定位，不参与任何业务逻辑。
@@ -74,7 +76,10 @@ impl DefaultEngine {
             .map(|img| img.to_rgb8())
     }
 
-    /// 预览专用降采样加载：宽 > 4096 时 LANCZOS 降采样 + 空间参数等比缩放。
+    /// 预览专用降采样加载：宽 > `PREVIEW_MAX_WIDTH` 时重采样 + 空间参数等比缩放。
+    ///
+    /// 重采样用 `fast_image_resize`（SIMD + rayon 多线程）：实测 32MP 背景 Lanczos3
+    /// 降采样 79s → ~2s；`image::imageops::resize` 对千万像素级输入极慢（单线程朴素实现）。
     fn load_background_for_preview(
         params: &HandwritingParams,
     ) -> Result<(RgbImage, HandwritingParams), EngineError> {
@@ -86,9 +91,27 @@ impl DefaultEngine {
         }
         let scale = PREVIEW_MAX_WIDTH as f32 / bg.width() as f32;
         let new_height = (bg.height() as f32 * scale).round().max(1.0) as u32;
-        let thumb = image::imageops::resize(&bg, PREVIEW_MAX_WIDTH, new_height, image::imageops::FilterType::Lanczos3);
+        let (src_w, src_h) = (bg.width(), bg.height());
+        let src = fast_image_resize::images::Image::from_vec_u8(
+            src_w,
+            src_h,
+            bg.into_raw(),
+            fast_image_resize::PixelType::U8x3,
+        )
+        .map_err(|e| EngineError::Image(format!("构造重采样源图失败：{e}")))?;
+        let mut dst = fast_image_resize::images::Image::new(
+            PREVIEW_MAX_WIDTH,
+            new_height,
+            fast_image_resize::PixelType::U8x3,
+        );
+        let mut resizer = fast_image_resize::Resizer::new();
+        resizer
+            .resize(&src, &mut dst, &fast_image_resize::ResizeOptions::new())
+            .map_err(|e| EngineError::Image(format!("背景降采样失败：{e}")))?;
+        let thumb = RgbImage::from_raw(PREVIEW_MAX_WIDTH, new_height, dst.into_vec())
+            .ok_or_else(|| EngineError::Image("背景降采样输出尺寸异常".into()))?;
         dbg_log(
-            &format!("背景加载+Lanczos3 降采样（{}x{} → {}x{}）", bg.width(), bg.height(), thumb.width(), thumb.height()),
+            &format!("背景加载+降采样（{}x{} → {}x{}）", src_w, src_h, thumb.width(), thumb.height()),
             t0.elapsed().as_millis(),
         );
         let mut scaled = params.clone();
@@ -506,8 +529,8 @@ mod tests {
 
         let params = make_params(&font, &bg);
         let page = DefaultEngine::new(1).render_preview(&params).unwrap();
-        // 降采样后预览输出缩略背景尺寸（4096 宽），与 Python 版行为一致
-        assert_eq!(page.width(), 4096, "降采样后预览应输出缩略背景尺寸");
+        // 降采样后预览输出缩略背景尺寸（PREVIEW_MAX_WIDTH 宽）
+        assert_eq!(page.width(), PREVIEW_MAX_WIDTH, "降采样后预览应输出缩略背景尺寸");
         // 预览仍应正确渲染（有深色前景）
         let gray_min = page.as_raw().chunks_exact(4).map(|px| (px[0] as u16 + px[1] as u16 + px[2] as u16) / 3).min().unwrap();
         assert!(gray_min < 128, "降采样预览应有深色前景：{gray_min}");
@@ -521,7 +544,7 @@ mod tests {
             return;
         };
         let dir = tempfile::tempdir().unwrap();
-        // 2000px 宽背景（≤ 4096 阈值）：不应降采样，输出应与背景同尺寸
+        // 2000px 宽背景（≤ PREVIEW_MAX_WIDTH 阈值）：不应降采样，输出应与背景同尺寸
         let bg = dir.path().join("bg.png");
         let mut img = RgbImage::new(2000, 300);
         for px in img.pixels_mut() {
@@ -531,7 +554,7 @@ mod tests {
 
         let params = make_params(&font, &bg);
         let page = DefaultEngine::new(1).render_preview(&params).unwrap();
-        assert_eq!(page.width(), 2000, "≤4096 背景不应降采样");
+        assert_eq!(page.width(), 2000, "≤PREVIEW_MAX_WIDTH 背景不应降采样");
         assert_eq!(page.height(), 300);
         // 预览仍应正确渲染（有深色前景）
         let gray_min = page

@@ -12,6 +12,8 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use handwrite_sim::core::docx_io;
@@ -54,9 +56,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 最近一次载入预设的完整参数（含 slint 未绑定的 end_chars/start_chars 等），
     // 作为 collect_params 的基础，避免载入预设时这些字段被静默丢弃。
     let preset_params = Rc::new(RefCell::new(Option::<HandwritingParams>::None));
-    // 预览全部页缓存 + 当前页索引（翻页用）
-    let preview_pages = Rc::new(RefCell::new(Vec::<RgbaImage>::new()));
-    let preview_index = Rc::new(RefCell::new(0usize));
+    // 预览全部页缓存 + 当前页索引（翻页用）。
+    // 用 Arc<Mutex> 而非 Rc<RefCell>：渲染在后台线程完成，结果经
+    // `upgrade_in_event_loop`（要求 Send 闭包）切回 UI 线程后写入；
+    // 所有访问都在 UI 线程，Mutex 无竞争。
+    let preview_pages = Arc::new(Mutex::new(Vec::<RgbaImage>::new()));
+    let preview_index = Arc::new(Mutex::new(0usize));
+    // 渲染代次：后台渲染完成时只有最新一代的结果被应用到 UI（丢弃过期结果）
+    let render_gen = Arc::new(AtomicU64::new(0));
     // 预览区底色循环索引
     let preview_bg_idx = Rc::new(RefCell::new(0usize));
     // 预设下拉：显示名模型 + 索引→路径映射（0 为占位符）
@@ -65,33 +72,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_preset_list(ModelRc::from(preset_model.clone()));
     refresh_preset_combo(&preset_model, &preset_paths, &ui);
 
-    // ---- 生成预览（防抖） ----
+    // ---- 生成预览（防抖；渲染在后台线程，UI 不阻塞） ----
     {
         let weak = ui.as_weak();
         let timer = Rc::clone(&timer);
         let seed = Rc::clone(&seed_counter);
         let preset_params = Rc::clone(&preset_params);
-        let pages = Rc::clone(&preview_pages);
-        let index = Rc::clone(&preview_index);
+        let pages = Arc::clone(&preview_pages);
+        let index = Arc::clone(&preview_index);
+        let render_gen = Arc::clone(&render_gen);
         ui.on_regenerate(move || {
             let Some(ui) = weak.upgrade() else { return };
             gui_dbg!("「预览」按钮触发（300ms 防抖后开始渲染）");
             let timer = Rc::clone(&timer);
             let seed = Rc::clone(&seed);
             let preset_params = Rc::clone(&preset_params);
-            let pages = Rc::clone(&pages);
-            let index = Rc::clone(&index);
+            let pages = Arc::clone(&pages);
+            let index = Arc::clone(&index);
+            let render_gen = Arc::clone(&render_gen);
             timer.start(TimerMode::SingleShot, Duration::from_millis(PREVIEW_DEBOUNCE_MS), move || {
                 gui_dbg!("预览渲染开始（seed={}）", seed.borrow());
-                match render_and_show(&ui, &preset_params, &seed, &pages, &index) {
-                    Ok(()) => {
-                        gui_dbg!("预览渲染结束（成功）");
-                    }
+                // UI 线程：快速收集参数（不耗时，不阻塞）
+                let params = match collect_params(&ui, &preset_params) {
+                    Ok(p) => p,
                     Err(e) => {
-                        gui_dbg!("预览渲染失败：{e}");
-                        ui.set_status_text(SharedString::from(format!("渲染失败：{e}")))
+                        gui_dbg!("参数收集失败：{e}");
+                        ui.set_status_text(SharedString::from(format!("参数错误：{e}")));
+                        return;
                     }
-                }
+                };
+                let seed_val = {
+                    let mut s = seed.borrow_mut();
+                    *s += 1;
+                    *s
+                };
+                let bounds_visible = ui.get_bounds_visible();
+                let bounds_color = parse_color(ui.get_bounds_color().as_str()).unwrap_or([76, 166, 166]);
+                let t0 = std::time::Instant::now();
+                gui_dbg!(
+                    "参数收集完成：{:.0}ms（文本 {} 字 / 段落 {} 段）",
+                    t0.elapsed().as_secs_f64() * 1000.0,
+                    params.text.chars().count(),
+                    params.paragraphs.len(),
+                );
+                ui.set_status_text(SharedString::from("渲染中…"));
+                // 后台线程渲染，完成后切回 UI 线程应用结果
+                let pages_apply = Arc::clone(&pages);
+                let index_apply = Arc::clone(&index);
+                spawn_ui_work(
+                    &ui,
+                    &render_gen,
+                    move || -> Result<Vec<RgbaImage>, EngineError> {
+                        let mut pages = render_all_pages_preview(&params, seed_val)?;
+                        if bounds_visible {
+                            for page in pages.iter_mut() {
+                                *page = overlay_bounds(page, &params, bounds_color);
+                            }
+                        }
+                        let w = pages.first().map(|p| p.width()).unwrap_or(0);
+                        let h = pages.first().map(|p| p.height()).unwrap_or(0);
+                        let mb = pages.len() as u64 * w as u64 * h as u64 * 4 / 1024 / 1024;
+                        gui_dbg!(
+                            "引擎渲染完成：{:.0}ms（{} 页，{}x{}，约 {mb} MB）",
+                            t0.elapsed().as_secs_f64() * 1000.0,
+                            pages.len(),
+                            w,
+                            h,
+                        );
+                        Ok(pages)
+                    },
+                    move |ui, result| match result {
+                        Ok(rendered) => {
+                            *pages_apply.lock().unwrap() = rendered;
+                            *index_apply.lock().unwrap() = 0;
+                            show_page(ui, &pages_apply, &index_apply);
+                            let total = pages_apply.lock().unwrap().len();
+                            ui.set_status_text(SharedString::from(format!(
+                                "预览完成（seed={seed_val}），共 {total} 页"
+                            )));
+                            gui_dbg!("预览渲染结束（成功，共 {total} 页）");
+                        }
+                        Err(e) => {
+                            gui_dbg!("预览渲染失败：{e}");
+                            ui.set_status_text(SharedString::from(format!("渲染失败：{e}")));
+                        }
+                    },
+                );
             });
         });
     }
@@ -99,11 +165,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ---- 预览翻页 ----
     {
         let weak = ui.as_weak();
-        let pages = Rc::clone(&preview_pages);
-        let index = Rc::clone(&preview_index);
+        let pages = Arc::clone(&preview_pages);
+        let index = Arc::clone(&preview_index);
         ui.on_prev_page(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let mut idx = index.borrow_mut();
+            let mut idx = index.lock().unwrap();
             if *idx > 0 {
                 *idx -= 1;
             }
@@ -113,12 +179,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let weak = ui.as_weak();
-        let pages = Rc::clone(&preview_pages);
-        let index = Rc::clone(&preview_index);
+        let pages = Arc::clone(&preview_pages);
+        let index = Arc::clone(&preview_index);
         ui.on_next_page(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let mut idx = index.borrow_mut();
-            let total = pages.borrow().len();
+            let mut idx = index.lock().unwrap();
+            let total = pages.lock().unwrap().len();
             if total > 0 && *idx + 1 < total {
                 *idx += 1;
             }
@@ -167,11 +233,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // ---- 导出图片（始终全分辨率，预览降采样不影响导出） ----
+    // ---- 导出图片（始终全分辨率，预览降采样不影响导出；后台线程避免 UI 卡顿） ----
     {
         let weak = ui.as_weak();
         let seed = Rc::clone(&seed_counter);
         let preset_params = Rc::clone(&preset_params);
+        let render_gen = Arc::clone(&render_gen);
         ui.on_export_files(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(dir) = rfd::FileDialog::new().pick_folder() else { return };
@@ -183,21 +250,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             let seed_val = *seed.borrow();
-            match export(&params, &dir, seed_val) {
-                Ok(files) => {
-                    let msg = format!("已导出 {} 个文件到 {}", files.len(), dir.display());
-                    ui.set_status_text(SharedString::from(msg));
-                }
-                Err(e) => ui.set_status_text(SharedString::from(format!("导出失败：{e}"))),
-            }
+            let t0 = std::time::Instant::now();
+            ui.set_status_text(SharedString::from("导出中…"));
+            let dir_worker = dir.clone();
+            spawn_ui_work(
+                &ui,
+                &render_gen,
+                move || -> Result<Vec<PathBuf>, EngineError> {
+                    let files = export(&params, &dir_worker, seed_val)?;
+                    gui_dbg!("导出完成：{:.0}ms", t0.elapsed().as_secs_f64() * 1000.0);
+                    Ok(files)
+                },
+                move |ui, result| match result {
+                    Ok(files) => {
+                        let msg = format!("已导出 {} 个文件到 {}", files.len(), dir.display());
+                        ui.set_status_text(SharedString::from(msg));
+                    }
+                    Err(e) => ui.set_status_text(SharedString::from(format!("导出失败：{e}"))),
+                },
+            );
         });
     }
 
-    // ---- 导出 PDF（位图层，300 DPI） ----
+    // ---- 导出 PDF（位图层，300 DPI；后台线程避免 UI 卡顿） ----
     {
         let weak = ui.as_weak();
         let seed = Rc::clone(&seed_counter);
         let preset_params = Rc::clone(&preset_params);
+        let render_gen = Arc::clone(&render_gen);
         ui.on_export_pdf(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(path) = rfd::FileDialog::new()
@@ -215,10 +295,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             let seed_val = *seed.borrow();
-            match export_pdf(&params, &path, seed_val) {
-                Ok(()) => ui.set_status_text(SharedString::from(format!("PDF 已导出：{}", path.display()))),
-                Err(e) => ui.set_status_text(SharedString::from(format!("导出 PDF 失败：{e}"))),
-            }
+            let t0 = std::time::Instant::now();
+            ui.set_status_text(SharedString::from("导出中…"));
+            let path_worker = path.clone();
+            spawn_ui_work(
+                &ui,
+                &render_gen,
+                move || -> Result<(), EngineError> {
+                    export_pdf(&params, &path_worker, seed_val)?;
+                    gui_dbg!("导出 PDF 完成：{:.0}ms", t0.elapsed().as_secs_f64() * 1000.0);
+                    Ok(())
+                },
+                move |ui, result| match result {
+                    Ok(()) => {
+                        ui.set_status_text(SharedString::from(format!("PDF 已导出：{}", path.display())))
+                    }
+                    Err(e) => ui.set_status_text(SharedString::from(format!("导出 PDF 失败：{e}"))),
+                },
+            );
         });
     }
 
@@ -530,71 +624,50 @@ fn collect_params(
     Ok(params)
 }
 
-/// 渲染全部页（预览降采样路径）并显示，seed 递增保证每次刷新笔画变化。
-fn render_and_show(
+/// 在后台线程执行重活（渲染/导出），完成后切回 UI 线程应用结果。
+///
+/// - `render_gen`：代次守卫——只有最新一次提交（代次最大）的结果被应用，
+///   期间触发的新渲染会令过期结果被丢弃。
+/// - `worker` 与 `apply` 都要求 `Send`（`upgrade_in_event_loop` 的约束）；
+///   `apply` 在 UI 线程运行，可安全访问 Slint 句柄与 `Arc<Mutex>` 状态。
+fn spawn_ui_work<T, E, W, A>(
     ui: &MainWindow,
-    preset_params: &RefCell<Option<HandwritingParams>>,
-    seed_counter: &RefCell<u64>,
-    preview_pages: &RefCell<Vec<RgbaImage>>,
-    preview_index: &RefCell<usize>,
-) -> Result<(), EngineError> {
-    let t0 = std::time::Instant::now();
-    let params = collect_params(ui, preset_params)?;
-    gui_dbg!(
-        "参数收集完成：{:.0}ms（文本 {} 字 / 段落 {} 段 / 字体 {} / 背景 {}）",
-        t0.elapsed().as_secs_f64() * 1000.0,
-        params.text.chars().count(),
-        params.paragraphs.len(),
-        params.font_path,
-        params.background_path,
-    );
-    let seed = {
-        let mut s = seed_counter.borrow_mut();
-        *s += 1;
-        *s
-    };
-    let mut pages = render_all_pages_preview(&params, seed)?;
-    {
-        let w = pages.first().map(|p| p.width()).unwrap_or(0);
-        let h = pages.first().map(|p| p.height()).unwrap_or(0);
-        let mb = pages.len() as u64 * w as u64 * h as u64 * 4 / 1024 / 1024;
-        gui_dbg!(
-            "引擎渲染完成：{:.0}ms（{} 页，{}x{}，约 {mb} MB）",
-            t0.elapsed().as_secs_f64() * 1000.0,
-            pages.len(),
-            w,
-            h,
-        );
-    }
-    // 边界提示（仅预览）：非渲染区半透明着色 + 边距框线
-    if ui.get_bounds_visible() {
-        let color = parse_color(ui.get_bounds_color().as_str()).unwrap_or([76, 166, 166]);
-        for page in pages.iter_mut() {
-            *page = overlay_bounds(page, &params, color);
-        }
-        gui_dbg!("边界提示叠加完成：{:.0}ms", t0.elapsed().as_secs_f64() * 1000.0);
-    }
-    *preview_pages.borrow_mut() = pages;
-    *preview_index.borrow_mut() = 0;
-    show_page(ui, preview_pages, preview_index);
-    let total = preview_pages.borrow().len();
-    ui.set_status_text(SharedString::from(format!("预览完成（seed={seed}），共 {total} 页")));
-    Ok(())
+    render_gen: &Arc<AtomicU64>,
+    worker: W,
+    apply: A,
+) where
+    T: Send + 'static,
+    E: Send + 'static,
+    W: FnOnce() -> Result<T, E> + Send + 'static,
+    A: FnOnce(&MainWindow, Result<T, E>) + Send + 'static,
+{
+    let gen = render_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let weak = ui.as_weak();
+    let render_gen = Arc::clone(render_gen);
+    std::thread::spawn(move || {
+        let result = worker();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            if gen != render_gen.load(Ordering::SeqCst) {
+                return; // 过期结果：期间又有更新的渲染/导出提交
+            }
+            apply(&ui, result);
+        });
+    });
 }
 
 /// 把当前索引页显示到预览区并更新页码。
 fn show_page(
     ui: &MainWindow,
-    preview_pages: &RefCell<Vec<RgbaImage>>,
-    preview_index: &RefCell<usize>,
+    preview_pages: &Mutex<Vec<RgbaImage>>,
+    preview_index: &Mutex<usize>,
 ) {
-    let pages = preview_pages.borrow();
+    let pages = preview_pages.lock().unwrap();
     let total = pages.len();
     if total == 0 {
         ui.set_page_text(SharedString::from("第 1 / 1 页"));
         return;
     }
-    let i = (*preview_index.borrow()).min(total - 1);
+    let i = (*preview_index.lock().unwrap()).min(total - 1);
     let img = &pages[i];
     let (width, height) = img.dimensions();
     let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(img.as_raw(), width, height);
