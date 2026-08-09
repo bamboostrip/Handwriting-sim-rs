@@ -198,43 +198,6 @@ fn split_text_rows(rows: &[bool]) -> Vec<(usize, usize)> {
     groups
 }
 
-/// 按文本行测量非零 x 范围，逐行水平居中（对齐 Python `_center_text_lines`）。
-fn center_text_lines(mask: &mut [bool], width: usize) {
-    let rows: Vec<bool> = mask.chunks(width).map(|r| r.iter().any(|&b| b)).collect();
-    if !rows.iter().any(|&b| b) {
-        return;
-    }
-    let mut result = vec![false; mask.len()];
-    for (y0, y1) in split_text_rows(&rows) {
-        let band = &mask[y0 * width..y1 * width];
-        let mut min_x = usize::MAX;
-        let mut max_x = 0usize;
-        for (x, &b) in band.iter().enumerate() {
-            if b {
-                min_x = min_x.min(x % width);
-                max_x = max_x.max(x % width);
-            }
-        }
-        let line_w = max_x - min_x + 1;
-        if line_w >= width {
-            result[y0 * width..y1 * width].copy_from_slice(band);
-            continue;
-        }
-        let shift = (width - line_w) / 2 - min_x;
-        for (idx, &b) in band.iter().enumerate() {
-            if b {
-                let x = idx % width;
-                let y = y0 + idx / width;
-                let nx = x as isize + shift as isize;
-                if nx >= 0 && (nx as usize) < width {
-                    result[y * width + nx as usize] = true;
-                }
-            }
-        }
-    }
-    mask.copy_from_slice(&result);
-}
-
 /// 渲染单个段落，返回逐行 [(该行墨迹裁剪掩码, 相对该行绘制基线的偏移)]。
 /// 空行对应 (None, 0.0)。画布按段落自身高度创建（不受页高裁剪）。
 pub fn layout_paragraph(
@@ -267,6 +230,7 @@ pub fn layout_paragraph(
         line: usize,
         miswrite: bool,
         angle: f32,
+        rewrite_x: f32,
     }
     let mut placed: Vec<Placed> = Vec::new();
     let mut line_x_ends: Vec<f32> = Vec::new();
@@ -297,7 +261,7 @@ pub fn layout_paragraph(
             }
             let size = size.max(1.0);
             let offset = font.glyph_width(ch, size);
-            placed.push(Placed { ch, x, y: yj, size, line: line_ys.len() - 1, miswrite: false, angle: 0.0 });
+            placed.push(Placed { ch, x, y: yj, size, line: line_ys.len() - 1, miswrite: false, angle: 0.0, rewrite_x: 0.0 });
             x += params.word_spacing + offset + normal_word.sample(rng) as f32;
             i += 1;
             // 错字判定（RNG 消费顺序与文本路径一致：字符扰动之后）；rate=0 不消耗
@@ -305,6 +269,12 @@ pub fn layout_paragraph(
                 if let Some(last) = placed.last_mut() {
                     last.miswrite = true;
                     last.angle = normal_strike.sample(rng) as f32;
+                    // Rewrite：重写画在错字后紧邻一格（当前 x），并推进 x 让后续字符
+                    // 让位（与文本路径一致；纯确定性推进，不消耗 RNG）
+                    if params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
+                        last.rewrite_x = x;
+                        x += offset + params.word_spacing;
+                    }
                 }
             }
         }
@@ -323,27 +293,50 @@ pub fn layout_paragraph(
         None
     };
 
+    // 居中：按行计算中心偏移（与右对齐 shifts 同机制），
+    // 使小字带/重写与锚定字符同移，避免行带被独立居中导致漂移
+    let center_shifts: Option<Vec<f32>> = if paragraph.align == Align::Center {
+        let mut min_x = vec![f32::MAX; line_ys.len()];
+        let mut max_x = vec![f32::MIN; line_ys.len()];
+        for item in &placed {
+            let w = font.glyph_width(item.ch, item.size);
+            min_x[item.line] = min_x[item.line].min(item.x);
+            max_x[item.line] = max_x[item.line].max(item.x + w);
+        }
+        Some(
+            (0..line_ys.len())
+                .map(|li| {
+                    if min_x[li] > max_x[li] {
+                        0.0
+                    } else {
+                        (width_f - (max_x[li] - min_x[li])) / 2.0 - min_x[li]
+                    }
+                })
+                .collect(),
+        )
+    } else {
+        None
+    };
+
     // 阶段二：按段落实际高度创建画布并绘制（不被页高裁剪）
     let canvas_h = (y + params.font_size + 4.0 * params.line_spacing_sigma + 4.0).max(1.0);
     let canvas_h = canvas_h as usize;
     let mut mask = vec![false; width * canvas_h];
     for item in &placed {
-        let dx = match &shifts {
-            Some(s) => item.x + s[item.line],
-            None => item.x,
+        let shift = match (&shifts, &center_shifts) {
+            (Some(s), _) => s[item.line],
+            (None, Some(c)) => c[item.line],
+            (None, None) => 0.0,
         };
+        let dx = item.x + shift;
         let baseline_y = item.y + font.ascent(item.size);
         font.rasterize(item.ch, item.size, dx, baseline_y, &mut mask, width, canvas_h);
         if item.miswrite {
             draw_miswrite(&mut mask, width, canvas_h, font, item.ch, dx, item.y, item.size, item.angle, params.miswrite_rewrite_mode == MiswriteMode::Above);
             if params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
-                let dx2 = dx + font.glyph_width(item.ch, item.size) + params.word_spacing;
-                font.rasterize(item.ch, item.size, dx2.round(), baseline_y, &mut mask, width, canvas_h);
+                font.rasterize(item.ch, item.size, item.rewrite_x + shift, baseline_y, &mut mask, width, canvas_h);
             }
         }
-    }
-    if paragraph.align == Align::Center {
-        center_text_lines(&mut mask, width);
     }
 
     // 按行提取墨迹：行带分组 → 归属各行，空行补 (None, 0.0)。
@@ -365,7 +358,7 @@ pub fn layout_paragraph(
             }
             // 对齐基准取切片起点 s0（可能为上方悬浮小字带顶），
             // 使所有行保持画布绝对位置；下限放宽容纳小字带
-            let off_min = (-0.25 * line_spacing).min(-0.85 * params.font_size - 0.25 * line_spacing);
+            let off_min = -0.85 * params.font_size - 0.25 * line_spacing;
             let off = ((s0 as f32 - yk).max(off_min)).min(off_max);
             lines.push((Some(mask[s0 * width..e * width].to_vec()), off));
         } else {
@@ -765,6 +758,89 @@ mod tests {
         assert!(
             (main_top - base_main_top).abs() < 2.0,
             "错字不应移动行主体位置：off={off} main_top={main_top} base={base_main_top}"
+        );
+    }
+
+    /// 段落 Rewrite 模式：重写字符紧邻错字、不被下一字符覆盖，后续字符随之右移。
+    /// 旧实现只把重写画在错字后一格（被下一字符覆盖），仅最末字符的重写幸存，
+    /// 最右墨迹只比单排布局多出约一个字形槽位（w+ws≈41）；修复后三个错字各
+    /// 推进一槽，最右墨迹超出单排布局两个以上字形槽位。
+    #[test]
+    fn paragraph_miswrite_rewrite_not_covered() {
+        let Some(path) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let font = FontFace::load(&path, 36.0).unwrap();
+        let mut p = params();
+        p.word_spacing_sigma = 0.0;
+        p.font_size_sigma = 0.0;
+        p.line_spacing_sigma = 0.0;
+        p.miswrite_rate = 1.0;
+        p.miswrite_rewrite_mode = MiswriteMode::Rewrite;
+        let mut pa = para();
+        pa.text = "甲乙丙".into();
+        let lines = layout_paragraph(&p, &font, &mut rand::rngs::StdRng::seed_from_u64(7), &pa, 600);
+        let all_ink = lines.iter().filter_map(|(m, _)| m.as_ref()).collect::<Vec<_>>();
+        let last_ink_x = all_ink.iter().flat_map(|m| m.chunks(600).flat_map(|row| row.iter().rposition(|&b| b))).max().unwrap();
+        let mut p0 = p.clone();
+        p0.miswrite_rate = 0.0;
+        let base = layout_paragraph(&p0, &font, &mut rand::rngs::StdRng::seed_from_u64(7), &pa, 600);
+        let base_last_x = base.iter().filter_map(|(m, _)| m.as_ref()).flat_map(|m| m.chunks(600).flat_map(|row| row.iter().rposition(|&b| b))).max().unwrap();
+        assert!(
+            last_ink_x > base_last_x + 60,
+            "Rewrite 应把最右墨迹推到更远处：{last_ink_x} vs {base_last_x}"
+        );
+    }
+
+    /// 居中段落：上方小字带必须与锚定字符同移——与左对齐渲染相比主带整体平移 c 时，
+    /// 小字带相对主带的偏移应保持不变（独立居中会把小字带单独甩到行中心）。
+    #[test]
+    fn paragraph_center_keeps_floats_with_anchor() {
+        let Some(path) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let font = FontFace::load(&path, 36.0).unwrap();
+        let mut p = params();
+        p.word_spacing_sigma = 0.0;
+        p.font_size_sigma = 0.0;
+        p.line_spacing_sigma = 0.0;
+        p.miswrite_rate = 0.15;
+        p.miswrite_rewrite_mode = MiswriteMode::Above;
+        let mut pa = para();
+        pa.text = "今天天气很好我们去公园散步。".into();
+        pa.align = Align::Center;
+        let centered = layout_paragraph(&p, &font, &mut rand::rngs::StdRng::seed_from_u64(9), &pa, 600);
+        pa.align = Align::Left;
+        let left = layout_paragraph(&p, &font, &mut rand::rngs::StdRng::seed_from_u64(9), &pa, 600);
+        // 各渲染首行墨迹按行带分段求 x 范围（段序：小字带在上、主带在下）
+        let seg_extents = |lines: &[(Option<Vec<bool>>, f32)]| -> Vec<(usize, usize)> {
+            let band = lines[0].0.as_ref().expect("首行应有墨迹");
+            let rows: Vec<bool> = band.chunks(600).map(|r| r.iter().any(|&b| b)).collect();
+            split_text_rows(&rows)
+                .into_iter()
+                .map(|(s, e)| {
+                    let (mut min_x, mut max_x) = (usize::MAX, 0usize);
+                    for (x, &b) in band[s * 600..e * 600].iter().enumerate() {
+                        if b {
+                            min_x = min_x.min(x);
+                            max_x = max_x.max(x);
+                        }
+                    }
+                    (min_x, max_x)
+                })
+                .collect()
+        };
+        let c_segs = seg_extents(&centered);
+        let l_segs = seg_extents(&left);
+        assert_eq!(c_segs.len(), l_segs.len(), "两种对齐的行带段数应一致");
+        assert!(c_segs.len() >= 2, "应存在小字带与主带两个行带段：{}", c_segs.len());
+        let rel_c = c_segs[0].0 as isize - c_segs.last().unwrap().0 as isize;
+        let rel_l = l_segs[0].0 as isize - l_segs.last().unwrap().0 as isize;
+        assert!(
+            (rel_c - rel_l).abs() <= 2,
+            "小字带应随主带同移：rel_c={rel_c} rel_l={rel_l}"
         );
     }
 }
