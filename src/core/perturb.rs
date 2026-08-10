@@ -118,9 +118,26 @@ pub fn perturb_mask(
     rng: &mut impl Rng,
     background: &[u8],
 ) -> Vec<u8> {
-    let mut canvas = background.to_vec();
+    let mut canvas = Vec::with_capacity(background.len());
+    perturb_mask_into(mask, width, height, params, rng, background, &mut canvas);
+    canvas
+}
+
+/// `perturb_mask` 的复用画布版本：多页渲染时循环外分配一次，避免每页重复分配+拷贝。
+/// 输出与 `perturb_mask` 逐位一致。
+pub fn perturb_mask_into(
+    mask: &[bool],
+    width: usize,
+    height: usize,
+    params: &HandwritingParams,
+    rng: &mut impl Rng,
+    background: &[u8],
+    canvas: &mut Vec<u8>,
+) {
+    canvas.clear();
+    canvas.extend_from_slice(background);
     if !mask.iter().any(|&b| b) {
-        return canvas;
+        return;
     }
 
     let strokes = label_strokes(mask, width, height);
@@ -152,7 +169,6 @@ pub fn perturb_mask(
             }
         }
     }
-    canvas
 }
 
 #[cfg(test)]

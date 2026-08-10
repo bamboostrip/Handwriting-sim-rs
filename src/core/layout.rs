@@ -393,11 +393,14 @@ pub fn layout_paragraphs(
 
     let mut pages: Vec<Vec<bool>> = Vec::new();
     let mut page_canvas = vec![false; width * height];
+    let mut page_has_ink = false;
     let mut draw_y = params.top_margin + lead;
     for (band, off) in all_lines {
-        if draw_y > limit && page_canvas.iter().any(|&b| b) {
+        // 用 dirty 标志替代整页 any() 扫描（原实现每行 O(WxH)，文档级二次方）
+        if draw_y > limit && page_has_ink {
             pages.push(std::mem::take(&mut page_canvas));
             page_canvas = vec![false; width * height];
+            page_has_ink = false;
             draw_y = params.top_margin + lead;
         }
         if let Some(band) = band {
@@ -411,13 +414,14 @@ pub fn layout_paragraphs(
                 for (x, &b) in row.iter().enumerate() {
                     if b {
                         dst[x] = true;
+                        page_has_ink = true;
                     }
                 }
             }
         }
         draw_y += line_spacing;
     }
-    if page_canvas.iter().any(|&b| b) || pages.is_empty() {
+    if page_has_ink || pages.is_empty() {
         pages.push(page_canvas);
     }
     pages
