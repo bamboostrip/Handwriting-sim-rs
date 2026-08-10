@@ -5,14 +5,31 @@
 //! 与 PIL 的关键差异在于坐标约定：本模块统一以**基线原点**放置字形，
 //! 排版本层负责把"顶部坐标"换算为"基线坐标"。
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 
-use ab_glyph::{point, Font, FontArc, Glyph, PxScale, ScaleFont};
+use ab_glyph::{point, Font, FontArc, Glyph, Outline, OutlinedGlyph, PxScale, PxScaleFactor, ScaleFont};
+
+/// 字形轮廓缓存：同 (char, size) 在跨页/重复字符中反复出现，
+/// 避免每次从字体表转换曲线（对齐 Python 版 PIL FreeType 的内部字形缓存）。
+/// 条目超限时整体清空（与背景缓存同策略），限制内存占用。
+const GLYPH_CACHE_LIMIT: usize = 4096;
+
+/// 一个已转换字形的缓存项：unscaled 曲线 + 缩放因子（均与 position 无关）。
+/// `px_bounds` 与光栅化仍用真实 position 现算，与原实现 `outline_glyph` 的
+/// 调用序列完全一致（px_bounds 内部有 fract/trunc 亚像素分解，不能平移复用）。
+#[derive(Clone)]
+struct CachedGlyph {
+    outline: Outline,
+    scale_factor: PxScaleFactor,
+}
 
 /// 已加载的字体及其基准字号。
 pub struct FontFace {
     font: FontArc,
     size: f32,
+    glyph_cache: RefCell<HashMap<(char, u32), Option<CachedGlyph>>>,
 }
 
 impl FontFace {
@@ -21,7 +38,7 @@ impl FontFace {
         let bytes = std::fs::read(path).map_err(|e| format!("读取字体 {path:?} 失败：{e}"))?;
         let font =
             FontArc::try_from_vec(bytes).map_err(|e| format!("解析字体 {path:?} 失败：{e}"))?;
-        Ok(Self { font, size })
+        Ok(Self { font, size, glyph_cache: RefCell::new(HashMap::new()) })
     }
 
     /// 字体颜色（用于日志/调试）。
@@ -44,6 +61,29 @@ impl FontFace {
         self.scaled(size.max(1.0)).ascent()
     }
 
+    /// 取 (ch, size) 的缓存轮廓（None 表示缺字），未命中时生成并缓存。
+    fn cached_glyph(&self, ch: char, size: f32) -> Option<CachedGlyph> {
+        let key = (ch, size.to_bits());
+        if let Some(entry) = self.glyph_cache.borrow().get(&key) {
+            return entry.clone();
+        }
+        // outline 与 scale_factor 均与 glyph position 无关，可安全复用
+        let id = self.font.glyph_id(ch);
+        let scale = PxScale::from(size.max(1.0));
+        let Some(outline) = self.font.outline(id) else {
+            self.glyph_cache.borrow_mut().insert(key, None);
+            return None; // 缺字（tofu）时跳过
+        };
+        let scale_factor = self.font.as_scaled(scale).scale_factor();
+        let entry = CachedGlyph { outline, scale_factor };
+        let mut cache = self.glyph_cache.borrow_mut();
+        if cache.len() >= GLYPH_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(key, Some(entry.clone()));
+        Some(entry)
+    }
+
     /// 把字符光栅化到前景掩码。
     ///
     /// - `origin_x` / `origin_y`：**基线**起点。
@@ -60,18 +100,20 @@ impl FontFace {
         width: usize,
         height: usize,
     ) {
+        let Some(cached) = self.cached_glyph(ch, size) else {
+            return;
+        };
         let glyph = Glyph {
             id: self.font.glyph_id(ch),
             scale: PxScale::from(size.max(1.0)),
             position: point(origin_x, origin_y),
         };
-        let Some(outline) = self.font.outline_glyph(glyph) else {
-            return; // 缺字（tofu）时跳过
-        };
-        let bounds = outline.px_bounds();
+        // 与原实现 outline_glyph(glyph) 相同的构造序列，px_bounds 含真实 position
+        let outlined = OutlinedGlyph::new(glyph, cached.outline, cached.scale_factor);
+        let bounds = outlined.px_bounds();
         let min_x = bounds.min.x;
         let min_y = bounds.min.y;
-        outline.draw(|gx, gy, coverage| {
+        outlined.draw(|gx, gy, coverage| {
             if coverage <= 0.5 {
                 return;
             }

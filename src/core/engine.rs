@@ -255,19 +255,18 @@ impl Engine for DefaultEngine {
                 background.width() as usize, background.height() as usize,
             );
             dbg_log(&format!("段落排版完成（{} 页，等待逐页扰动）", pages.len()), t0.elapsed().as_millis());
-            return pages
-                .into_iter()
-                .enumerate()
-                .map(|(index, mask)| {
-                    let t1 = std::time::Instant::now();
-                    let canvas = perturb::perturb_mask(
-                        &mask, background.width() as usize, background.height() as usize,
-                        params, &mut rng, background.as_raw(),
-                    );
-                    dbg_log(&format!("第 {} 页扰动完成", index + 1), t1.elapsed().as_millis());
-                    Ok(rgba_from_rgb(&canvas, background.width() as usize, background.height() as usize))
-                })
-                .collect();
+            let mut out = Vec::with_capacity(pages.len());
+            let mut canvas = Vec::with_capacity(background.as_raw().len());
+            for (index, mask) in pages.into_iter().enumerate() {
+                let t1 = std::time::Instant::now();
+                perturb::perturb_mask_into(
+                    &mask, background.width() as usize, background.height() as usize,
+                    params, &mut rng, background.as_raw(), &mut canvas,
+                );
+                dbg_log(&format!("第 {} 页扰动完成", index + 1), t1.elapsed().as_millis());
+                out.push(rgba_from_rgb(&canvas, background.width() as usize, background.height() as usize));
+            }
+            return Ok(out);
         }
         let mut pages = Vec::new();
         let mut start = 0;
@@ -294,13 +293,45 @@ impl Engine for DefaultEngine {
     fn save_all(&self, params: &HandwritingParams, out_dir: &Path) -> Result<Vec<PathBuf>, EngineError> {
         std::fs::create_dir_all(out_dir)?;
         let pages = self.render_pages(params)?;
-        let mut files = Vec::new();
-        for (index, page) in pages.into_iter().enumerate() {
-            let path = out_dir.join(format!("{index}.png"));
-            page.save(&path)
-                .map_err(|e| EngineError::Image(format!("保存 {path:?} 失败：{e}")))?;
-            files.push(path);
+        // 按页并行编码 PNG（各页独立 buffer，保存顺序仍按 index 保证文件名稳定）
+        let mut files: Vec<Option<PathBuf>> = vec![None; pages.len()];
+        let out_dir = out_dir.to_path_buf();
+        let mut first_err: Option<EngineError> = None;
+        std::thread::scope(|s| {
+            let handles: Vec<_> = pages
+                .into_iter()
+                .enumerate()
+                .map(|(index, page)| {
+                    let out_dir = &out_dir;
+                    s.spawn(move || {
+                        let path = out_dir.join(format!("{index}.png"));
+                        page.save(&path)
+                            .map_err(|e| EngineError::Image(format!("保存 {path:?} 失败：{e}")))?;
+                        Ok::<PathBuf, EngineError>(path)
+                    })
+                })
+                .collect();
+            for (index, handle) in handles.into_iter().enumerate() {
+                let result = match handle.join() {
+                    Ok(result) => result,
+                    Err(_) => {
+                        Err(EngineError::Image(format!("保存 {index}.png 失败：线程异常")))
+                    }
+                };
+                match result {
+                    Ok(path) => files[index] = Some(path),
+                    Err(e) => {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
+                }
+            }
+        });
+        if let Some(e) = first_err {
+            return Err(e);
         }
+        let files = files.into_iter().map(|p| p.unwrap()).collect::<Vec<_>>();
         if files.is_empty() {
             return Err(EngineError::Image("未生成任何图片".into()));
         }
@@ -349,9 +380,10 @@ pub fn render_all_pages_preview(
         let pages = layout::layout_paragraphs(&scaled, &font, &mut rng, &scaled.paragraphs, width, height);
         dbg_log(&format!("段落排版完成（{} 页，等待逐页扰动）", pages.len()), t0.elapsed().as_millis());
         let mut out = Vec::with_capacity(pages.len());
+        let mut canvas = Vec::with_capacity(background.as_raw().len());
         for (index, mask) in pages.into_iter().enumerate() {
             let t1 = std::time::Instant::now();
-            let canvas = perturb::perturb_mask(&mask, width, height, &scaled, &mut rng, background.as_raw());
+            perturb::perturb_mask_into(&mask, width, height, &scaled, &mut rng, background.as_raw(), &mut canvas);
             dbg_log(&format!("第 {} 页扰动完成", index + 1), t1.elapsed().as_millis());
             out.push(rgba_from_rgb(&canvas, width, height));
         }
