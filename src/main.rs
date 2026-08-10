@@ -9,7 +9,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,11 +20,11 @@ use handwrite_sim::core::docx_io;
 use handwrite_sim::core::engine::{export, export_pdf, overlay_bounds, render_all_pages_preview, EngineError};
 use handwrite_sim::core::models::{parse_color, Align, HandwritingParams, MiswriteMode, Paragraph};
 use handwrite_sim::core::presets;
-use handwrite_sim::ui::MainWindow;
+use handwrite_sim::ui::{MainWindow, ParaRow};
 use image::RgbaImage;
 use slint::{
-    ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode,
-    VecModel,
+    ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer,
+    TimerMode, VecModel,
 };
 
 /// 预览防抖间隔（毫秒）。
@@ -66,9 +66,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let render_gen = Arc::new(AtomicU64::new(0));
     // 预览区底色循环索引
     let preview_bg_idx = Rc::new(RefCell::new(0usize));
-    // 段落格式数组：与输入文本框按 \n 分割的段落一一对应，(对齐, 首行缩进px)。
-    // 文本编辑时按段数重排（新段继承上一段格式），导出时据此生成 Paragraph 列表。
-    let para_formats = Rc::new(RefCell::new(Vec::<(u8, i32)>::new()));
+    // 段落模型：逐段编辑器数据源（每段 = 文本 + 对齐 + 首行缩进字符数）。
+    // 缩进以「字符数」（em）存储，渲染时 × 当前字号换算像素，保证恒为 2 字宽。
+    let para_model = Rc::new(VecModel::<ParaRow>::default());
+    para_model.push(ParaRow { text: SharedString::default(), align: 0, indent_em: 0.0, est_lines: 1, trailing_space_em: 0.0 });
+    ui.set_paragraphs(ModelRc::from(para_model.clone()));
+    // 当前光标/焦点所在段（对齐/缩进按钮的作用目标）
+    let current_row = Rc::new(Cell::new(0usize));
     // 预设下拉：显示名模型 + 索引→路径映射（0 为占位符）
     let preset_model = Rc::new(VecModel::<SharedString>::default());
     let preset_paths = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
@@ -81,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let timer = Rc::clone(&timer);
         let seed = Rc::clone(&seed_counter);
         let preset_params = Rc::clone(&preset_params);
-        let para_formats = Rc::clone(&para_formats);
+        let para_model = Rc::clone(&para_model);
         let pages = Arc::clone(&preview_pages);
         let index = Arc::clone(&preview_index);
         let render_gen = Arc::clone(&render_gen);
@@ -94,11 +98,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pages = Arc::clone(&pages);
             let index = Arc::clone(&index);
             let render_gen = Arc::clone(&render_gen);
-            let para_formats_timer = Rc::clone(&para_formats);
+            let para_model_timer = Rc::clone(&para_model);
             timer.start(TimerMode::SingleShot, Duration::from_millis(PREVIEW_DEBOUNCE_MS), move || {
                 gui_dbg!("预览渲染开始（seed={}）", seed.borrow());
                 // UI 线程：快速收集参数（不耗时，不阻塞）
-                let params = match collect_params(&ui, &preset_params, &para_formats_timer) {
+                let params = match collect_params(&ui, &preset_params, &para_model_timer) {
                     Ok(p) => p,
                     Err(e) => {
                         gui_dbg!("参数收集失败：{e}");
@@ -243,12 +247,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         let seed = Rc::clone(&seed_counter);
         let preset_params = Rc::clone(&preset_params);
-        let para_formats = Rc::clone(&para_formats);
+        let para_model = Rc::clone(&para_model);
         let render_gen = Arc::clone(&render_gen);
         ui.on_export_files(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(dir) = rfd::FileDialog::new().pick_folder() else { return };
-            let params = match collect_params(&ui, &preset_params, &para_formats) {
+            let params = match collect_params(&ui, &preset_params, &para_model) {
                 Ok(p) => p,
                 Err(e) => {
                     ui.set_status_text(SharedString::from(format!("参数错误：{e}")));
@@ -283,7 +287,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         let seed = Rc::clone(&seed_counter);
         let preset_params = Rc::clone(&preset_params);
-        let para_formats = Rc::clone(&para_formats);
+        let para_model = Rc::clone(&para_model);
         let render_gen = Arc::clone(&render_gen);
         ui.on_export_pdf(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -294,7 +298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             else {
                 return;
             };
-            let params = match collect_params(&ui, &preset_params, &para_formats) {
+            let params = match collect_params(&ui, &preset_params, &para_model) {
                 Ok(p) => p,
                 Err(e) => {
                     ui.set_status_text(SharedString::from(format!("参数错误：{e}")));
@@ -323,94 +327,242 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // ---- 段落工具（单框 + 光标段按钮，对齐 Python 版交互） ----
+    // ---- 段落工具（逐段编辑器 + 当前段按钮，对齐 Python 版 QTextEdit 交互） ----
 
-    /// 按字节偏移定位段落索引（\n 为 1 字节，UTF-8 多字节字符不含 \n，计数安全）。
-    fn para_index_at(text: &str, byte_offset: usize) -> usize {
-        let bytes = text.as_bytes();
-        bytes[..byte_offset.min(bytes.len())].iter().filter(|&&b| b == b'\n').count()
+    /// 请求编辑器聚焦指定段（focus-row + focus-nonce 自增触发 delegate 内 focus()）。
+    fn request_focus(ui: &MainWindow, row: usize) {
+        ui.set_focus_row(row as i32);
+        ui.set_focus_nonce(ui.get_focus_nonce() + 1);
     }
 
-    /// 计算光标所在段的格式，写入状态提示。
-    fn update_para_status(ui: &MainWindow, fmts: &RefCell<Vec<(u8, i32)>>) {
-        let text = ui.get_input_text().to_string();
-        let idx = para_index_at(&text, ui.get_para_cursor_bytes() as usize);
-        let seg = text.split('\n').nth(idx).unwrap_or("").to_string();
-        let (align, indent) = fmts.borrow().get(idx).copied().unwrap_or((0, 0));
-        let align_name = ["左对齐", "居中", "右对齐"][(align.min(2)) as usize];
-        let indent_txt = if indent > 0 { format!("，首行缩进 {indent}px") } else { String::new() };
-        let seg_txt = if seg.trim().is_empty() { "（空段）" } else { "" };
+    /// 当前段格式提示（状态栏）：对齐方式 + 首行缩进（字符数与换算像素）。
+    fn update_para_status(ui: &MainWindow, model: &VecModel<ParaRow>, current: &Cell<usize>) {
+        let len = model.row_count();
+        if len == 0 {
+            ui.set_para_status_text(SharedString::from("光标定位到段落后可用按钮设置格式"));
+            return;
+        }
+        let idx = current.get().min(len - 1);
+        let Some(row) = model.row_data(idx) else { return };
+        let align_name = ["左对齐", "居中", "右对齐"][(row.align.clamp(0, 2)) as usize];
+        let indent_txt = if row.indent_em > 0.0 {
+            let em = row.indent_em;
+            let px = (em * ui.get_font_size() as f32).round() as i32;
+            // 字符数取整显示（2.0 → "2"；docx 导入可能为非整数）
+            let em_txt = if (em - em.round()).abs() < 0.01 {
+                format!("{}", em.round() as i32)
+            } else {
+                format!("{em:.1}")
+            };
+            format!("，首行缩进 {em_txt} 字（{px}px）")
+        } else {
+            String::new()
+        };
+        let clean_text = row.text.replace('\u{2060}', "").replace('\u{00a0}', " ").replace('\u{ffa0}', " ");
+        let text = clean_text.as_str();
+        let seg_txt = if text.trim().is_empty() { "（空段）" } else { "" };
         ui.set_para_status_text(SharedString::from(format!(
             "第 {} 段（{} 字）：{align_name}{indent_txt}{seg_txt}",
             idx + 1,
-            seg.chars().count()
+            text.chars().count()
         )));
     }
 
-    // 文本编辑：按新段数重排格式数组（新段继承上一段格式，合并保留首段格式）
+    // 段文本编辑：写回模型；粘贴多行时按 \n 拆分为多段（新段继承当前段格式，
+    // 焦点落到粘贴内容的最后一段）
     {
-        let fmts = Rc::clone(&para_formats);
-        ui.on_para_text_edited(move |text| {
-            let count = text.split('\n').count();
-            let mut fmts = fmts.borrow_mut();
-            while fmts.len() < count {
-                let inherit = *fmts.last().unwrap_or(&(0, 0));
-                fmts.push(inherit);
+        let weak = ui.as_weak();
+        let model = Rc::clone(&para_model);
+        let current = Rc::clone(&current_row);
+        ui.on_para_text_edited(move |idx, text| {
+            let len = model.row_count();
+            if len == 0 {
+                return;
             }
-            fmts.truncate(count);
+            let idx = (idx as usize).min(len - 1);
+            let Some(mut row) = model.row_data(idx) else { return };
+            if text.contains('\n') {
+                let parts: Vec<&str> = text.split('\n').collect();
+                let first_part = to_ui_spaces(parts[0]);
+                row.text = SharedString::from(&first_part);
+                row.est_lines = estimate_lines(&first_part, row.indent_em);
+                row.trailing_space_em = calc_trailing_space_em(&first_part);
+                model.set_row_data(idx, row.clone());
+                let mut last = idx;
+                for (k, part) in parts[1..].iter().enumerate() {
+                    let mut new_row = row.clone();
+                    let part_k = to_ui_spaces(*part);
+                    new_row.text = SharedString::from(&part_k);
+                    new_row.est_lines = estimate_lines(&part_k, new_row.indent_em);
+                    new_row.trailing_space_em = calc_trailing_space_em(&part_k);
+                    model.insert(idx + 1 + k, new_row);
+                    last = idx + 1 + k;
+                }
+                current.set(last);
+                if let Some(ui) = weak.upgrade() {
+                    request_focus(&ui, last);
+                    scroll_to_row(&ui, &model, last);
+                }
+            } else {
+                let text_ui = to_ui_spaces(&text);
+                row.text = SharedString::from(&text_ui);
+                row.est_lines = estimate_lines(&text_ui, row.indent_em);
+                row.trailing_space_em = calc_trailing_space_em(&text_ui);
+                model.set_row_data(idx, row);
+                current.set(idx);
+                if let Some(ui) = weak.upgrade() {
+                    scroll_to_row(&ui, &model, idx);
+                }
+            }
         });
     }
-    // 光标移动：刷新当前段状态提示
+    // 光标移动/段获得焦点：记录当前段并刷新状态提示，自动滚动段落入视野
     {
         let weak = ui.as_weak();
-        let fmts = Rc::clone(&para_formats);
-        ui.on_para_cursor_moved(move |_byte_offset| {
+        let model = Rc::clone(&para_model);
+        let current = Rc::clone(&current_row);
+        ui.on_para_cursor_moved(move |idx| {
             let Some(ui) = weak.upgrade() else { return };
-            update_para_status(&ui, &fmts);
+            if model.row_count() > 0 {
+                let r = (idx as usize).min(model.row_count() - 1);
+                current.set(r);
+                scroll_to_row(&ui, &model, r);
+            }
+            update_para_status(&ui, &model, &current);
         });
     }
-    // 对齐按钮：作用于光标所在段，改完立即触发防抖预览
+    // 对齐按钮：作用于当前段，编辑器内即刻可见，并触发防抖预览
     {
         let weak = ui.as_weak();
-        let fmts = Rc::clone(&para_formats);
-        let fmts_status = Rc::clone(&para_formats);
+        let model = Rc::clone(&para_model);
+        let current = Rc::clone(&current_row);
         ui.on_para_set_align(move |align| {
             let Some(ui) = weak.upgrade() else { return };
-            let text = ui.get_input_text().to_string();
-            let idx = para_index_at(&text, ui.get_para_cursor_bytes() as usize);
-            let mut fmts = fmts.borrow_mut();
-            if idx < fmts.len() {
-                fmts[idx].0 = align as u8;
+            let len = model.row_count();
+            if len == 0 {
+                return;
             }
-            drop(fmts);
-            update_para_status(&ui, &fmts_status);
+            let idx = current.get().min(len - 1);
+            if let Some(mut row) = model.row_data(idx) {
+                row.align = align;
+                model.set_row_data(idx, row);
+            }
+            update_para_status(&ui, &model, &current);
             ui.invoke_regenerate();
         });
     }
-    // 缩进按钮：按两字宽缩进/取消（对齐 Python 版 setTextIndent(2*font_size)）
+    // 缩进按钮：2 字符首行缩进/取消。以字符数（em）存储，渲染时 × 当前字号，
+    // 改字号后仍恒为两字宽（对齐 Python 版 setTextIndent(2*font_size) 的意图）
     {
         let weak = ui.as_weak();
-        let fmts = Rc::clone(&para_formats);
-        let fmts_status = Rc::clone(&para_formats);
+        let model = Rc::clone(&para_model);
+        let current = Rc::clone(&current_row);
         ui.on_para_indent_toggle(move |do_indent| {
             let Some(ui) = weak.upgrade() else { return };
-            let text = ui.get_input_text().to_string();
-            let idx = para_index_at(&text, ui.get_para_cursor_bytes() as usize);
-            let indent = if do_indent { 2 * ui.get_font_size() } else { 0 };
-            let mut fmts = fmts.borrow_mut();
-            if idx < fmts.len() {
-                fmts[idx].1 = indent;
+            let len = model.row_count();
+            if len == 0 {
+                return;
             }
-            drop(fmts);
-            update_para_status(&ui, &fmts_status);
+            let idx = current.get().min(len - 1);
+            if let Some(mut row) = model.row_data(idx) {
+                row.indent_em = if do_indent { 2.0 } else { 0.0 };
+                row.est_lines = estimate_lines(&row.text, row.indent_em);
+                model.set_row_data(idx, row);
+                scroll_to_row(&ui, &model, idx);
+            }
+            update_para_status(&ui, &model, &current);
             ui.invoke_regenerate();
+        });
+    }
+    // 回车分段：光标处拆分，后半段继承对齐与缩进格式，重新估算两段高度，聚焦并滚入新段
+    {
+        let weak = ui.as_weak();
+        let model = Rc::clone(&para_model);
+        let current = Rc::clone(&current_row);
+        ui.on_para_split(move |idx, byte_pos| {
+            let Some(ui) = weak.upgrade() else { return };
+            let len = model.row_count();
+            if len == 0 {
+                return;
+            }
+            let idx = (idx as usize).min(len - 1);
+            let Some(mut row) = model.row_data(idx) else { return };
+            let text = row.text.to_string();
+            // 防御：字节偏移夹取并对齐到字符边界
+            let mut pos = (byte_pos as usize).min(text.len());
+            while pos > 0 && !text.is_char_boundary(pos) {
+                pos -= 1;
+            }
+            let after = text[pos..].to_string();
+            let before = text[..pos].to_string();
+            
+            let before_ui = to_ui_spaces(&before);
+            row.text = SharedString::from(&before_ui);
+            row.est_lines = estimate_lines(&before_ui, row.indent_em);
+            row.trailing_space_em = calc_trailing_space_em(&before_ui);
+            model.set_row_data(idx, row.clone());
+            
+            let after_ui = to_ui_spaces(&after);
+            row.text = SharedString::from(&after_ui);
+            row.est_lines = estimate_lines(&after_ui, row.indent_em);
+            row.trailing_space_em = calc_trailing_space_em(&after_ui);
+            model.insert(idx + 1, row);
+            
+            current.set(idx + 1);
+            update_para_status(&ui, &model, &current);
+            request_focus(&ui, idx + 1);
+            scroll_to_row(&ui, &model, idx + 1);
+        });
+    }
+    // 段首退格：并入上一段（文本拼接，格式保留上一段），重新计算行数并自动滚入上一段
+    {
+        let weak = ui.as_weak();
+        let model = Rc::clone(&para_model);
+        let current = Rc::clone(&current_row);
+        ui.on_para_merge_prev(move |idx| {
+            let Some(ui) = weak.upgrade() else { return };
+            let idx = idx as usize;
+            if idx == 0 || idx >= model.row_count() {
+                return;
+            }
+            let Some(cur) = model.row_data(idx) else { return };
+            let Some(mut prev) = model.row_data(idx - 1) else { return };
+            let combined = format!("{}{}", prev.text, cur.text);
+            let combined_ui = to_ui_spaces(&combined);
+            prev.text = SharedString::from(&combined_ui);
+            prev.est_lines = estimate_lines(&combined_ui, prev.indent_em);
+            prev.trailing_space_em = calc_trailing_space_em(&combined_ui);
+            model.set_row_data(idx - 1, prev);
+            model.remove(idx);
+            current.set(idx - 1);
+            update_para_status(&ui, &model, &current);
+            request_focus(&ui, idx - 1);
+            scroll_to_row(&ui, &model, idx - 1);
+        });
+    }
+    // 底部空白区点击：聚焦最后一段，自动滚入视野
+    {
+        let weak = ui.as_weak();
+        let model = Rc::clone(&para_model);
+        let current = Rc::clone(&current_row);
+        ui.on_para_focus_last(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let len = model.row_count();
+            if len == 0 {
+                return;
+            }
+            current.set(len - 1);
+            update_para_status(&ui, &model, &current);
+            request_focus(&ui, len - 1);
+            scroll_to_row(&ui, &model, len - 1);
         });
     }
 
-    // 导入 docx：文本 + 每段格式整体写入文本框
+    // 导入 docx：文本 + 每段格式整体写入逐段编辑器
     {
         let weak = ui.as_weak();
-        let fmts = Rc::clone(&para_formats);
+        let model = Rc::clone(&para_model);
+        let current = Rc::clone(&current_row);
         ui.on_import_docx(move || {
             let Some(ui) = weak.upgrade() else { return };
             if let Some(path) = rfd::FileDialog::new()
@@ -421,25 +573,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match docx_io::load_paragraphs(&path, font_size) {
                     Ok(paras) => {
                         let count = paras.len();
-                        let text = paras
-                            .iter()
-                            .map(|p| p.text.as_str())
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        ui.set_input_text(SharedString::from(text));
-                        *fmts.borrow_mut() = paras
-                            .iter()
-                            .map(|p| {
-                                (
-                                    match p.align {
-                                        Align::Left => 0,
-                                        Align::Center => 1,
-                                        Align::Right => 2,
-                                    },
-                                    p.first_line_indent.round() as i32,
-                                )
-                            })
-                            .collect();
+                        model.set_vec(
+                            paras
+                                .iter()
+                                .map(|p| {
+                                    let indent_em = if font_size > 0.0 {
+                                        p.first_line_indent / font_size
+                                    } else {
+                                        0.0
+                                    };
+                                    let text_ui = to_ui_spaces(&p.text);
+                                    let est_lines = estimate_lines(&text_ui, indent_em);
+                                    ParaRow {
+                                        text: SharedString::from(text_ui.as_str()),
+                                        align: match p.align {
+                                            Align::Left => 0,
+                                            Align::Center => 1,
+                                            Align::Right => 2,
+                                        },
+                                        indent_em,
+                                        est_lines,
+                                        trailing_space_em: calc_trailing_space_em(&text_ui),
+                                    }
+                                })
+                                .collect::<Vec<_>>(),
+                        );
+                        if model.row_count() == 0 {
+                            model.push(ParaRow {
+                                text: SharedString::default(),
+                                align: 0,
+                                indent_em: 0.0,
+                                est_lines: 1,
+                                trailing_space_em: 0.0,
+                            });
+                        }
+                        current.set(0);
+                        update_para_status(&ui, &model, &current);
+                        request_focus(&ui, 0);
                         ui.set_status_text(SharedString::from(format!(
                             "已导入 {count} 个段落，回车分段、按钮设格式"
                         )));
@@ -476,7 +646,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let preset_params = Rc::clone(&preset_params);
-        let para_formats = Rc::clone(&para_formats);
+        let para_model = Rc::clone(&para_model);
         let preset_model = Rc::clone(&preset_model);
         let preset_paths = Rc::clone(&preset_paths);
         ui.on_save_preset(move || {
@@ -489,7 +659,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .set_file_name("preset.json")
                 .save_file()
             {
-                let params = match collect_params(&ui, &preset_params, &para_formats) {
+                let params = match collect_params(&ui, &preset_params, &para_model) {
                     Ok(p) => p,
                     Err(e) => {
                         ui.set_status_text(SharedString::from(format!("参数错误：{e}")));
@@ -536,6 +706,111 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ui.run()?;
     Ok(())
+}
+
+/// 清理 UI 存储的特殊字符（NBSP/FFA0/WJ），还原为普通空格，防止外来文本污染。
+fn to_ui_spaces(s: &str) -> String {
+    s.replace('\u{2060}', "").replace('\u{00a0}', " ").replace('\u{ffa0}', " ")
+}
+
+/// 计算文本末尾连续空格对应的 em 宽度（右对齐占位用）。
+/// 空格宽度 ≈ 0.55 × 字号（与 estimate_lines 中 ASCII 字符宽度因子保持一致）。
+fn calc_trailing_space_em(text: &str) -> f32 {
+    let trailing = text.chars().rev().take_while(|c| *c == ' ').count();
+    trailing as f32 * 0.55
+}
+
+/// 估算段落在编辑器中的显示行数（≥1）。
+/// 楷体汉字宽约 13px，ASCII 字符约 7px (0.55 * 13px)。
+/// 编辑器可见宽度约 400px，首行缩进占对应宽度。
+fn estimate_lines(text: &str, indent_em: f32) -> i32 {
+    let clean = text.replace('\u{2060}', "").replace('\u{00a0}', " ").replace('\u{ffa0}', " ");
+    if clean.is_empty() {
+        return 1;
+    }
+    let font_size = 13.0f32; // Theme.base-font
+    let editor_width = 400.0f32;
+    let indent_px = indent_em * font_size;
+    let available_width = (editor_width - indent_px - 25.0).max(100.0);
+
+    let mut current_line_width = 0.0f32;
+    let mut lines = 1;
+
+    for c in clean.chars() {
+        let char_w = if c.is_ascii() {
+            0.55 * font_size
+        } else {
+            font_size
+        };
+
+        if current_line_width + char_w > available_width {
+            lines += 1;
+            current_line_width = char_w;
+        } else {
+            current_line_width += char_w;
+        }
+    }
+
+    lines
+}
+
+/// 根据当前焦点段落的位置计算滚动位置，自动将焦点段滚入视野
+fn scroll_to_row(ui: &MainWindow, model: &VecModel<ParaRow>, row_idx: usize) {
+    let len = model.row_count();
+    if len == 0 || row_idx >= len {
+        return;
+    }
+
+    let font_size = 13.0f32; // Theme.base-font
+    let line_height = font_size * 1.5;
+    let separator_height = 1.0f32;
+    let layout_spacing = 2.0f32;
+    let block_spacing = separator_height + layout_spacing; // 3px total spacing between text inputs
+
+    // 计算目标段落的顶部和底部 Y 坐标
+    let mut y_top = 0.0f32;
+    for i in 0..row_idx {
+        if let Some(row) = model.row_data(i) {
+            y_top += (row.est_lines as f32) * line_height + block_spacing;
+        }
+    }
+
+    let target_est_lines = match model.row_data(row_idx) {
+        Some(row) => row.est_lines,
+        None => 1,
+    };
+    let y_bottom = y_top + (target_est_lines as f32) * line_height + separator_height;
+
+    // 视口可见高度 182px (Rectangle 190 - 上下 8px padding)
+    let visible_height = 182.0f32;
+
+    // 获取当前滚动条位置 (Slint 内部是负数)
+    let current_viewport_y = ui.get_para_viewport_y();
+
+    let mut new_viewport_y = current_viewport_y;
+
+    if y_top < -current_viewport_y {
+        new_viewport_y = -y_top;
+    } else if y_bottom > -current_viewport_y + visible_height {
+        new_viewport_y = -(y_bottom - visible_height);
+    }
+
+    // 计算内容总高度，防止过度滚动
+    let total_height = {
+        let mut h = 0.0f32;
+        for i in 0..len {
+            if let Some(row) = model.row_data(i) {
+                h += (row.est_lines as f32) * line_height + block_spacing;
+            }
+        }
+        h += 30.0f32; // 底部 spacer
+        h
+    };
+
+    let min_viewport_y = -(total_height - visible_height).max(0.0f32);
+    new_viewport_y = new_viewport_y.clamp(min_viewport_y, 0.0f32);
+
+    ui.set_para_viewport_y(new_viewport_y);
 }
 
 /// 把 `#RRGGBB` 解析为 slint 颜色（解析失败回退默认底色）。
@@ -588,7 +863,7 @@ fn apply_preset_to_ui(
     ui.set_font_size_sigma(p.font_size_sigma as i32);
     ui.set_perturb_x(p.perturb_x_sigma as i32);
     ui.set_perturb_y(p.perturb_y_sigma as i32);
-    ui.set_perturb_theta(p.perturb_theta_sigma);
+    ui.set_perturb_theta_text(SharedString::from(format!("{}", p.perturb_theta_sigma)));
     ui.set_miswrite_rate(p.miswrite_rate * 100.0);
     ui.set_miswrite_mode_index(match p.miswrite_rewrite_mode {
         MiswriteMode::Above => 0,
@@ -608,39 +883,46 @@ fn apply_preset_to_ui(
 /// 以最近载入预设为基础（`preset_params`），再用 UI 控件值覆盖对应字段，
 /// 从而保留预设中 slint 未绑定的 end_chars/start_chars 等参数。
 ///
-/// 文本 → 段落规则：按 `\n` 切段并跳过空段；
+/// 段落来源：逐段编辑器模型（ParaRow）。段文本**保留首尾空格**——
+/// 空格参与排版占宽（右对齐时行尾空格把文字顶向左，编辑器所见即所得）；
+/// 全空白段跳过（对齐旧版空段忽略行为）。
+/// 首行缩进以字符数（em）存储，此处 × 当前字号换算为像素。
 /// 多段或任一格式非默认（非左对齐/有缩进）时走段落路径，
 /// 单段无格式时走纯文本路径（与旧行为逐字一致）。
 fn collect_params(
     ui: &MainWindow,
     preset_params: &RefCell<Option<HandwritingParams>>,
-    para_formats: &RefCell<Vec<(u8, i32)>>,
+    para_model: &VecModel<ParaRow>,
 ) -> Result<HandwritingParams, EngineError> {
     let mut params = preset_params.borrow().clone().unwrap_or_default();
-    let raw = ui.get_input_text().to_string();
-    let fmts = para_formats.borrow();
+    let font_size = ui.get_font_size() as f32;
     let mut paras = Vec::new();
-    for (i, seg) in raw.split('\n').enumerate() {
-        let seg = seg.trim();
-        if seg.is_empty() {
+    let mut has_format = false;
+    for i in 0..para_model.row_count() {
+        let Some(row) = para_model.row_data(i) else { continue };
+        if row.align != 0 || row.indent_em != 0.0 {
+            has_format = true;
+        }
+        if row.text.trim().is_empty() {
             continue;
         }
-        let (align_idx, indent) = fmts.get(i).copied().unwrap_or((0, 0));
         paras.push(Paragraph {
-            text: seg.to_string(),
-            align: match align_idx {
+            text: row.text.replace('\u{2060}', "").replace('\u{00a0}', " ").replace('\u{ffa0}', " "),
+            align: match row.align {
                 1 => Align::Center,
                 2 => Align::Right,
                 _ => Align::Left,
             },
-            first_line_indent: indent as f32,
+            first_line_indent: row.indent_em * font_size,
         });
     }
-    let has_format = fmts.iter().any(|&(a, i)| a != 0 || i != 0);
     if paras.len() > 1 || has_format {
         params.paragraphs = paras;
     } else {
-        params.text = raw.trim().to_string();
+        params.text = paras
+            .first()
+            .map(|p| p.text.trim().to_string())
+            .unwrap_or_default();
     }
     params.font_path = ui.get_font_path_text().as_str().trim().to_string();
     params.background_path = ui.get_background_path_text().as_str().trim().to_string();
@@ -653,7 +935,12 @@ fn collect_params(
     params.font_size_sigma = ui.get_font_size_sigma() as f32;
     params.perturb_x_sigma = ui.get_perturb_x() as f32;
     params.perturb_y_sigma = ui.get_perturb_y() as f32;
-    params.perturb_theta_sigma = ui.get_perturb_theta();
+    // 笔画旋转：文本输入浮点数（对齐 Python 版 _float_of 失败回退默认值）
+    params.perturb_theta_sigma = ui
+        .get_perturb_theta_text()
+        .trim()
+        .parse::<f32>()
+        .unwrap_or(HandwritingParams::default().perturb_theta_sigma);
     // 边距
     params.top_margin = ui.get_margin_top() as f32;
     params.bottom_margin = ui.get_margin_bottom() as f32;
