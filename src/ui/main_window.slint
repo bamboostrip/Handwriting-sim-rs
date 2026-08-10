@@ -28,6 +28,18 @@ import {
     FieldLabel,
 } from "theme.slint";
 
+// 段落数据：逐段编辑器的一行（对齐 Python 版 QTextEdit 逐段块格式）。
+// indent-em 为首行缩进的字符数倍数（2 = 缩进两字符，渲染时 × 当前字号换算像素）。
+// est-lines 为 Rust 侧估算的编辑器内显示行数（Slint TextInput 在嵌套布局下
+// 行高不随换行自适应，需要按估算行数给足 min-height，宁可多留白也不裁剪）。
+export struct ParaRow {
+    text: string,
+    align: int,          // 0 左对齐 / 1 居中 / 2 右对齐
+    indent-em: float,    // 首行缩进（字符数；0 = 不缩进）
+    est-lines: int,      // 编辑器内估算显示行数（≥1）
+    trailing-space-em: float, // 末尾空格宽度（em 数）；右对齐占位用
+}
+
 export component MainWindow inherits Window {
     title: "手写模拟器";
     preferred-width: 1280px;
@@ -35,7 +47,11 @@ export component MainWindow inherits Window {
     background: Theme.bg;
 
     // ---- 双向绑定参数（Rust 侧 get_/set_ 访问） ----
-    in-out property <string> input-text <=> input-text-input.text;
+    // 待处理文本：逐段编辑器（ParaRow 模型，Rust 侧 VecModel 驱动）
+    in-out property <[ParaRow]> paragraphs: [];
+    // 分段/合并后请求聚焦的段落索引 + 变更令牌（自增触发 delegate 内 focus()）
+    in property <int> focus-row: -1;
+    in property <int> focus-nonce: 0;
     in-out property <int> font-size <=> font-size-spin.value;
     in-out property <int> line-spacing <=> line-spacing-spin.value;
     in-out property <int> word-spacing <=> word-spacing-spin.value;
@@ -45,7 +61,8 @@ export component MainWindow inherits Window {
     in-out property <int> font-size-sigma <=> font-size-sigma-spin.value;
     in-out property <int> perturb-x <=> perturb-x-spin.value;
     in-out property <int> perturb-y <=> perturb-y-spin.value;
-    in-out property <float> perturb-theta <=> perturb-theta-slider.value;
+    // 笔画旋转：浮点数直接输入（对齐 Python 版 QDoubleSpinBox）
+    in-out property <string> perturb-theta-text <=> perturb-theta-edit.text;
     // 写错字模拟：错字率（0~30%）+ 重写方式
     in-out property <float> miswrite-rate <=> miswrite-rate-slider.value;
     in-out property <int> miswrite-mode-index <=> miswrite-mode-combo.current-index;
@@ -61,6 +78,7 @@ export component MainWindow inherits Window {
     // 边界提示（仅预览）：开关 + 提示颜色
     in-out property <bool> bounds-visible <=> bounds-check.checked;
     in-out property <string> bounds-color <=> bounds-color-edit.text;
+    in-out property <length> para-viewport-y: 0px;
 
     // ---- 预设下拉框（Rust 侧 VecModel<String> 驱动） ----
     in-out property <[string]> preset-list;
@@ -73,9 +91,7 @@ export component MainWindow inherits Window {
     // 预览区底色（对齐 Python 版 PreviewLabel 初始 #c8d0ca）
     in-out property <color> preview-bg: #c8d0ca;
 
-    // 模式统一：单文本框 + 光标段工具按钮（对齐 Python 版交互）。
-    // 光标段定位：TextInput 内置 out 属性（字节偏移，仅可读）。
-    out property <int> para-cursor-bytes <=> input-text-input.cursor-position_byte-offset;
+    // 模式统一：逐段编辑器 + 段工具按钮（对齐 Python 版 QTextEdit 交互）。
     // 当前光标所在段的格式提示（Rust 侧维护）
     in property <string> para-status-text: "光标定位到段落后可用按钮设置格式";
 
@@ -87,11 +103,15 @@ export component MainWindow inherits Window {
     callback import-docx;
     callback save-preset;
     callback load-preset;
-    // 段落工具：文本编辑后重排格式 / 设置光标段格式 / 光标移动刷新提示
-    callback para-text-edited(string);
+    // 段落工具：编辑段文本 / 设置当前段对齐 / 首行缩进开关 / 光标所在段变更
+    callback para-text-edited(int, string);
     callback para-set-align(int);
     callback para-indent-toggle(bool);
     callback para-cursor-moved(int);
+    // 段落结构：回车在光标处分段 / 段首退格并入上一段 / 聚焦最后一段（空白区点击）
+    callback para-split(int, int);
+    callback para-merge-prev(int);
+    callback para-focus-last();
     callback preset-selected(int);
     callback prev-page;
     callback next-page;
@@ -200,30 +220,126 @@ export component MainWindow inherits Window {
                             border-radius: 6px;
                             border-width: 1px;
                             border-color: Theme.group-border;
-                            height: 140px;
+                            background: #ffffff;
+                            // 编辑区加高（对齐 Python 版 QTextEdit min 120 / max 200），
+                            // 长段落换行后可见行数更多
+                            height: 190px;
                             clip: true;
-                            forward-focus: input-text-input;
                             scroll-view := ScrollView {
                                 x: 4px;
                                 y: 4px;
                                 width: parent.width - 8px;
                                 height: parent.height - 8px;
                                 viewport-width: self.visible-width;
-                                viewport-height: max(self.visible-height, input-text-input.preferred-height);
-                                input-text-input := TextInput {
-                                    single-line: false;
-                                    wrap: word-wrap;
-                                    font-family: "楷体";
-                                    font-size: Theme.base-font;
-                                    color: Theme.text;
-                                    page-height: scroll-view.visible-height;
-                                    edited => { root.para-text-edited(self.text); }
-                                    cursor_position_changed(pos) => { root.para-cursor-moved(root.para-cursor-bytes); }
+                                viewport-height: max(self.visible-height, para-column.preferred-height);
+                                viewport-y <=> root.para-viewport-y;
+                                para-column := VerticalLayout {
+                                    width: scroll-view.visible-width;
+                                    spacing: 2px;
+                                    // 为叠加式滚动条预留空间：滚动条悬浮出现时不占布局宽度，
+                                    // 加 padding-right 防止右侧文字（尤其右对齐段落）被滚动条遮挡。
+                                    padding-right: 18px;
+
+                                    // 逐段编辑器：每段独立 TextInput，
+                                    // 对齐方式直接绑定段格式（居中/右对齐即刻可见），
+                                    // 首行缩进以前置留白条可视化（仅编辑区示意，预览为准）。
+                                    for row[idx] in root.paragraphs: VerticalLayout {
+                                        spacing: 0px;
+                                        vertical-stretch: 0;
+
+                                        HorizontalLayout {
+                                            spacing: 0px;
+                                            vertical-stretch: 0;
+
+                                            // 首行缩进留白：宽度 = 缩进字符数 × 编辑器字号
+                                            Rectangle {
+                                                width: max(0, row.indent-em) * Theme.base-font;
+                                                animate width { duration: 120ms; }
+                                            }
+                                            row-input := TextInput {
+                                                property <int> focus-ticket: root.focus-nonce;
+                                                // 两种时机都尝试聚焦：
+                                                // init 覆盖「delegate 晚于令牌变更创建」的情形，
+                                                // changed 覆盖「delegate 已存在」的情形
+                                                init => {
+                                                    if (root.focus-row == idx) {
+                                                        self.focus();
+                                                    }
+                                                }
+                                                changed focus-ticket => {
+                                                    if (root.focus-row == idx) {
+                                                        self.focus();
+                                                    }
+                                                }
+                                                changed has-focus => {
+                                                    if (self.has-focus) {
+                                                        root.para-cursor-moved(idx);
+                                                    }
+                                                }
+                                                text: row.text;
+                                                single-line: false;
+                                                wrap: word-wrap;
+                                                font-family: "楷体";
+                                                font-size: Theme.base-font;
+                                                color: Theme.text;
+                                                horizontal-stretch: 1;
+                                                // 依靠 Rust 侧估算行数并绑定高度，避免嵌套布局自适应高度失效裁剪内容
+                                                height: max(Theme.base-font * 1.5, row.est-lines * Theme.base-font * 1.5);
+                                                horizontal-alignment:
+                                                    row.align == 1 ? TextHorizontalAlignment.center :
+                                                    row.align == 2 ? TextHorizontalAlignment.right :
+                                                    TextHorizontalAlignment.left;
+                                                page-height: scroll-view.visible-height;
+                                                edited => { root.para-text-edited(idx, self.text); }
+                                                cursor_position_changed(pos) => { root.para-cursor-moved(idx); }
+                                                key-pressed(event) => {
+                                                    if (event.text == "\n"
+                                                        && !event.modifiers.control && !event.modifiers.alt
+                                                        && self.anchor-position-byte-offset == self.cursor-position-byte-offset) {
+                                                        root.para-split(idx, self.cursor-position-byte-offset);
+                                                        accept
+                                                    } else if (event.text == "\u{8}"
+                                                        && self.cursor-position-byte-offset == 0
+                                                        && self.anchor-position-byte-offset == 0) {
+                                                        root.para-merge-prev(idx);
+                                                        accept
+                                                    } else {
+                                                        reject
+                                                    }
+                                                }
+                                            }
+                                            // 末尾空格占位块（仅右对齐生效）：
+                                            // 宽度 = 末尾空格数 × 空格宽度（≈ 0.55 × 字号），
+                                            // 将 TextInput 可用宽度向左收窄，令右对齐文字随尾部空格同步左移。
+                                            Rectangle {
+                                                width: row.align == 2
+                                                    ? row.trailing-space-em * Theme.base-font
+                                                    : 0;
+                                            }
+                                        }
+
+                                        // 段落分隔线：让每段的边界清晰可见
+                                        Rectangle {
+                                            height: 1px;
+                                            vertical-stretch: 0;
+                                            background: #eef2ee;
+                                        }
+                                    }
+
+                                    // 底部空白区：点击聚焦最后一段（模拟整框编辑手感）
+                                    Rectangle {
+                                        vertical-stretch: 1;
+                                        min-height: 30px;
+                                        TouchArea {
+                                            clicked => { root.para-focus-last(); }
+                                        }
+                                    }
                                 }
                             }
                             Text {
-                                text: "请输入文本内容，支持多行；回车分段，用上方按钮设置当前段格式。";
-                                visible: input-text-input.text == "" && !input-text-input.has-focus;
+                                text: "请输入文本内容，支持多段；回车分段，用上方按钮设置当前段格式。";
+                                visible: root.paragraphs.length == 0
+                                    || (root.paragraphs.length == 1 && root.paragraphs[0].text == "");
                                 x: 12px;
                                 y: 12px;
                                 width: parent.width - 24px;
@@ -390,9 +506,11 @@ export component MainWindow inherits Window {
                                 }
                                 Row {
                                     FieldLabel { text: "笔画旋转"; }
-                                    perturb-theta-slider := Slider {
-                                        value: 0.05; minimum: 0; maximum: 1;
+                                    perturb-theta-edit := LineEdit {
+                                        text: "0.05";
+                                        placeholder-text: "0.05";
                                         horizontal-stretch: 1;
+                                        horizontal-alignment: center;
                                     }
                                 }
                             }
@@ -451,14 +569,14 @@ export component MainWindow inherits Window {
                                 spacing: 6px;
                                 Row {
                                     Rectangle { }
-                                    margin-top-spin := SpinBox {
-                                        value: 30; minimum: 0; maximum: 500;
+                                margin-top-spin := SpinBox {
+                                        value: 30; minimum: 0; maximum: 3000;
                                         horizontal-alignment: center;
                                     }
                                     Rectangle { }
                                 }
                                 Row {
-                                    margin-left-spin := SpinBox { value: 30; minimum: 0; maximum: 500; }
+                                    margin-left-spin := SpinBox { value: 30; minimum: 0; maximum: 3000; }
                                     Text {
                                         text: "边距";
                                         horizontal-alignment: center;
@@ -467,12 +585,12 @@ export component MainWindow inherits Window {
                                         font-weight: 700;
                                         color: #4ca6a6;
                                     }
-                                    margin-right-spin := SpinBox { value: 30; minimum: 0; maximum: 500; }
+                                    margin-right-spin := SpinBox { value: 30; minimum: 0; maximum: 3000; }
                                 }
                                 Row {
                                     Rectangle { }
                                     margin-bottom-spin := SpinBox {
-                                        value: 30; minimum: 0; maximum: 500;
+                                        value: 30; minimum: 0; maximum: 3000;
                                         horizontal-alignment: center;
                                     }
                                     Rectangle { }

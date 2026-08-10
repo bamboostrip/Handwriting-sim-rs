@@ -39,7 +39,7 @@ pub enum EngineError {
 /// 预览降采样的最大背景宽度阈值。
 /// 2048 宽对 ~800px 的预览区已远超显示精度；比 4096 减少 4 倍渲染/内存开销
 /// （千万像素级背景逐页缓存 4096 宽时每页可达 ~95MB）。
-const PREVIEW_MAX_WIDTH: u32 = 2048;
+const PREVIEW_MAX_WIDTH: u32 = 4096;
 
 /// 预览背景缓存（路径+修改时间 → (原始宽度, 缩略图)）。
 ///
@@ -78,6 +78,11 @@ fn scaled_params_for(params: &HandwritingParams, src_w: u32) -> HandwritingParam
         *f *= scale;
     }
     scaled.font_size = scaled.font_size.max(1.0);
+    // 段落首行缩进同为空间参数，必须随预览降采样等比缩放，
+    // 否则大背景预览中缩进相对字号偏大（如 2 字宽缩进显示为 4 字宽）
+    for p in scaled.paragraphs.iter_mut() {
+        p.first_line_indent *= scale;
+    }
     scaled
 }
 
@@ -221,9 +226,9 @@ impl Engine for DefaultEngine {
             FontFace::load(Path::new(&params.font_path), params.font_size).map_err(EngineError::Font)?;
         let (background, scaled) = Self::load_background_for_preview(params)?;
         let mut rng = StdRng::seed_from_u64(self.seed);
-        if !params.paragraphs.is_empty() {
+        if !scaled.paragraphs.is_empty() {
             let pages = layout::layout_paragraphs(
-                &scaled, &font, &mut rng, &params.paragraphs,
+                &scaled, &font, &mut rng, &scaled.paragraphs,
                 background.width() as usize, background.height() as usize,
             );
             let canvas = perturb::perturb_mask(
@@ -340,8 +345,8 @@ pub fn render_all_pages_preview(
     let mut rng = StdRng::seed_from_u64(seed);
     let engine = DefaultEngine::new(seed);
 
-    if !params.paragraphs.is_empty() {
-        let pages = layout::layout_paragraphs(&scaled, &font, &mut rng, &params.paragraphs, width, height);
+    if !scaled.paragraphs.is_empty() {
+        let pages = layout::layout_paragraphs(&scaled, &font, &mut rng, &scaled.paragraphs, width, height);
         dbg_log(&format!("段落排版完成（{} 页，等待逐页扰动）", pages.len()), t0.elapsed().as_millis());
         let mut out = Vec::with_capacity(pages.len());
         for (index, mask) in pages.into_iter().enumerate() {
@@ -419,10 +424,21 @@ pub fn export_pdf(
 /// （alpha 230，线宽 `max(2, w/900)`）。仅预览使用，导出不叠加。
 pub fn overlay_bounds(img: &RgbaImage, params: &HandwritingParams, color: [u8; 3]) -> RgbaImage {
     let (w, h) = (img.width() as usize, img.height() as usize);
-    let left = params.left_margin.max(0.0) as usize;
-    let top = params.top_margin.max(0.0) as usize;
-    let right = (w as f32 - params.right_margin).max(0.0) as usize;
-    let bottom = (h as f32 - params.bottom_margin).max(0.0) as usize;
+    let key = bg_cache_key(&params.background_path);
+    let src_w = if let Some(entry) = PREVIEW_BG_CACHE
+        .get()
+        .and_then(|m| m.lock().ok())
+        .and_then(|g| g.get(&key).cloned())
+    {
+        entry.0
+    } else {
+        img.width()
+    };
+    let scaled = scaled_params_for(params, src_w);
+    let left = scaled.left_margin.max(0.0) as usize;
+    let top = scaled.top_margin.max(0.0) as usize;
+    let right = (w as f32 - scaled.right_margin).max(0.0) as usize;
+    let bottom = (h as f32 - scaled.bottom_margin).max(0.0) as usize;
     let (right, bottom) = (right.min(w), bottom.min(h));
     if right <= left || bottom <= top {
         return img.clone(); // 异常边距（渲染区为空）时原样返回
@@ -718,6 +734,32 @@ mod tests {
             ..HandwritingParams::default()
         };
         assert!(matches!(p.validate(), Err(ParamsError::NoLineSpacing)));
+    }
+
+    /// 预览降采样必须等比缩放段落首行缩进：
+    /// 未缩放时大背景预览中「2 字宽」缩进会显示为约 4 字宽（缩进像素值不随字号缩小）。
+    #[test]
+    fn scaled_params_scales_paragraph_first_line_indent() {
+        let mut params = HandwritingParams {
+            text: "你好".into(),
+            font_size: 140.0,
+            ..HandwritingParams::default()
+        };
+        params.paragraphs = vec![Paragraph {
+            text: "第一段".into(),
+            align: Align::Left,
+            first_line_indent: 280.0, // 2 字宽（2 × font_size 140）
+        }];
+        // 背景宽 8192（> PREVIEW_MAX_WIDTH 4096）→ scale = 0.5
+        let scaled = scaled_params_for(&params, 8192);
+        assert_eq!(scaled.font_size, 70.0);
+        assert_eq!(
+            scaled.paragraphs[0].first_line_indent, 140.0,
+            "缩进应随字号等比缩放，保持 2 字宽"
+        );
+        // 未超阈值：不缩放
+        let unscaled = scaled_params_for(&params, 1024);
+        assert_eq!(unscaled.paragraphs[0].first_line_indent, 280.0);
     }
 
     #[test]
