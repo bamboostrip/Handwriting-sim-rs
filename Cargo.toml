@@ -33,6 +33,7 @@ zip = "8"
 quick-xml = "0.41"
 # PDF 导出：位图层方案（MIT；禁用默认 html feature 避开 azul 依赖树）
 printpdf = { version = "0.12", default-features = false, features = ["images"] }
+lopdf = "0.44.0"
 # 预览降采样：SIMD 加速重采样（image::imageops::resize 对千万像素级输入极慢，
 # 32MP 背景 Lanczos3 实测 80s；本库同滤镜毫秒级）。rayon 开启多线程。
 fast_image_resize = { version = "6", features = ["rayon"] }
