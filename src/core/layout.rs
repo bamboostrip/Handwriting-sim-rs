@@ -50,6 +50,86 @@ fn draw_thick_line(
     }
 }
 
+const COMMON_CHINESE_CHARS: &[char] = &[
+    '的', '一', '是', '在', '了', '不', '和', '有', '大', '这', '主', '中', '人', '国', '为', '以', '我', '分', '们', '行',
+    '产', '作', '本', '经', '发', '社', '工', '己', '等', '均', '部', '样', '出', '门', '家', '理', '学', '对', '里', '后',
+    '小', '多', '下', '心', '然', '事', '资', '力', '么', '得', '之', '都', '平', '因', '起', '只', '没', '生', '量', '建',
+    '长', '现', '前', '性', '那', '系', '各', '进', '最', '及', '外', '治', '与', '公', '向', '情', '老', '正', '路', '解',
+    '问', '反', '政', '化', '无', '其', '期', '高', '强', '使', '教', '定', '重', '社', '特', '立', '体', '政', '代', '通',
+    '度', '意', '见', '指', '表', '命', '战', '民', '保', '机', '关', '各', '党', '建', '议', '写', '论', '设', '合', '名',
+    '同', '由', '接', '收', '改', '新', '想', '打', '放', '儿', '加', '用', '及', '那', '此', '实', '决', '求', '美', '品',
+    '书', '样', '要', '治', '法', '务', '制', '度', '清', '楚', '确', '认', '真', '实', '各', '部', '委', '局', '厅', '所'
+];
+
+pub(crate) fn get_wrong_char(ch: char, rng: &mut impl Rng) -> char {
+    if ch.is_ascii_uppercase() {
+        let mut wrong_ch = ch;
+        while wrong_ch == ch {
+            wrong_ch = (b'A' + rng.random_range(0..26)) as char;
+        }
+        wrong_ch
+    } else if ch.is_ascii_lowercase() {
+        let mut wrong_ch = ch;
+        while wrong_ch == ch {
+            wrong_ch = (b'a' + rng.random_range(0..26)) as char;
+        }
+        wrong_ch
+    } else if ch.is_ascii_digit() {
+        let mut wrong_ch = ch;
+        while wrong_ch == ch {
+            wrong_ch = (b'0' + rng.random_range(0..10)) as char;
+        }
+        wrong_ch
+    } else if ch >= '\u{4e00}' && ch <= '\u{9fa5}' {
+        let mut wrong_ch = ch;
+        while wrong_ch == ch {
+            let idx = rng.random_range(0..COMMON_CHINESE_CHARS.len());
+            wrong_ch = COMMON_CHINESE_CHARS[idx];
+        }
+        wrong_ch
+    } else {
+        ch
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_bezier_line(
+    mask: &mut [bool],
+    width: usize,
+    height: usize,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    thickness: f32,
+    waviness: f32,
+    rng: &mut impl Rng,
+) {
+    let mx = (x0 + x1) / 2.0;
+    let my = (y0 + y1) / 2.0;
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+    let nx = -dy / len;
+    let ny = dx / len;
+
+    let offset = rng.random_range(-waviness..=waviness);
+    let cx = mx + nx * offset;
+    let cy = my + ny * offset;
+
+    let mut prev_x = x0;
+    let mut prev_y = y0;
+    for step in 1..=5 {
+        let t = step as f32 / 5.0;
+        let mt = 1.0 - t;
+        let curr_x = mt * mt * x0 + 2.0 * mt * t * cx + t * t * x1;
+        let curr_y = mt * mt * y0 + 2.0 * mt * t * cy + t * t * y1;
+        draw_thick_line(mask, width, height, prev_x, prev_y, curr_x, curr_y, thickness);
+        prev_x = curr_x;
+        prev_y = curr_y;
+    }
+}
+
 /// 对错字字符绘制删除线（与可选的上方小字重写）。
 /// `y_top` 为该字符的行顶坐标（同 layout_page/placed 的 y 语义），`angle` 为删除线倾角（rad）；
 /// `draw_small` 为 true 时在正上方略偏右补画小一号重写（Above 模式）。
@@ -846,5 +926,27 @@ mod tests {
             (rel_c - rel_l).abs() <= 2,
             "小字带应随主带同移：rel_c={rel_c} rel_l={rel_l}"
         );
+    }
+
+    #[test]
+    fn test_wrong_character_generation() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let ch = '中';
+        let wrong = get_wrong_char(ch, &mut rng);
+        assert_ne!(ch, wrong);
+        assert!(wrong >= '\u{4e00}' && wrong <= '\u{9fa5}');
+
+        let ch_eng = 'A';
+        let wrong_eng = get_wrong_char(ch_eng, &mut rng);
+        assert_ne!(ch_eng, wrong_eng);
+        assert!(wrong_eng.is_ascii_uppercase());
+    }
+
+    #[test]
+    fn test_draw_bezier_line() {
+        let mut mask = vec![false; 100 * 100];
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        draw_bezier_line(&mut mask, 100, 100, 10.0, 10.0, 90.0, 90.0, 2.0, 5.0, &mut rng);
+        assert!(mask.iter().any(|&b| b), "draw_bezier_line should modify mask");
     }
 }
