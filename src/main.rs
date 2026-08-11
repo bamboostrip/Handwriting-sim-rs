@@ -1032,6 +1032,9 @@ mod tests {
 
     #[test]
     fn test_ui_strikeout_style_mapping() {
+        // CI 无显示环境（Linux 无 DISPLAY / macOS headless runner）：
+        // 强制 Slint 使用 testing backend，避免 winit 初始化失败
+        std::env::set_var("SLINT_BACKEND", "testing");
         let ui = MainWindow::new().unwrap();
         let preset_params = RefCell::new(None);
         let para_model = VecModel::default();
