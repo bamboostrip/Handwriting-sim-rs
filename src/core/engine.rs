@@ -39,7 +39,7 @@ pub enum EngineError {
 /// 预览降采样的最大背景宽度阈值。
 /// 2048 宽对 ~800px 的预览区已远超显示精度；比 4096 减少 4 倍渲染/内存开销
 /// （千万像素级背景逐页缓存 4096 宽时每页可达 ~95MB）。
-const PREVIEW_MAX_WIDTH: u32 = 4096;
+const PREVIEW_MAX_WIDTH: u32 = 1280;
 
 /// 预览背景缓存（路径+修改时间 → (原始宽度, 缩略图)）。
 ///
@@ -445,8 +445,37 @@ pub fn export_pdf(
     }
     doc.with_pages(pdf_pages);
     let mut warnings = Vec::new();
-    let bytes = doc.save(&printpdf::PdfSaveOptions::default(), &mut warnings);
-    std::fs::write(out_path, bytes)?;
+
+    // 配置 PDF 保存选项：
+    // 1. 禁用图片最大尺寸限制（默认 2MB），防止大图被 printpdf 内部的最近邻算法强行降采样导致画质严重受损（产生大量锯齿）
+    // 2. 强制使用 Flate 无损压缩，既保证画质 100% 不受损，又能有效压缩 PDF 体积
+    let mut image_opt = printpdf::ImageOptimizationOptions::default();
+    image_opt.max_image_size = None;
+    image_opt.auto_optimize = Some(false);
+    image_opt.format = Some(printpdf::ImageCompression::Flate);
+
+    let mut save_options = printpdf::PdfSaveOptions::default();
+    save_options.image_optimization = Some(image_opt);
+
+    let bytes = doc.save(&save_options, &mut warnings);
+
+    // 启用 PDF 图像插值滤波（抗锯齿），防止 PDF 阅读器中出现严重的像素锯齿
+    let mut lopdf_doc = lopdf::Document::load_mem(&bytes)
+        .map_err(|e| EngineError::Pdf(format!("解析 PDF 字节失败：{e}")))?;
+
+    for (_, object) in lopdf_doc.objects.iter_mut() {
+        if let lopdf::Object::Stream(ref mut stream) = object {
+            if let Ok(subtype) = stream.dict.get(b"Subtype") {
+                if subtype == &lopdf::Object::Name(b"Image".to_vec()) {
+                    stream.dict.set("Interpolate", lopdf::Object::Boolean(true));
+                }
+            }
+        }
+    }
+
+    lopdf_doc.save(out_path)
+        .map_err(|e| EngineError::Pdf(format!("写入 PDF 文件失败：{e}")))?;
+
     Ok(())
 }
 
@@ -654,9 +683,9 @@ mod tests {
             return;
         };
         let dir = tempfile::tempdir().unwrap();
-        // 2000px 宽背景（≤ PREVIEW_MAX_WIDTH 阈值）：不应降采样，输出应与背景同尺寸
+        // 1000px 宽背景（≤ PREVIEW_MAX_WIDTH 阈值）：不应降采样，输出应与背景同尺寸
         let bg = dir.path().join("bg.png");
-        let mut img = RgbImage::new(2000, 300);
+        let mut img = RgbImage::new(1000, 300);
         for px in img.pixels_mut() {
             *px = Rgb([255, 255, 255]);
         }
@@ -664,7 +693,7 @@ mod tests {
 
         let params = make_params(&font, &bg);
         let page = DefaultEngine::new(1).render_preview(&params).unwrap();
-        assert_eq!(page.width(), 2000, "≤PREVIEW_MAX_WIDTH 背景不应降采样");
+        assert_eq!(page.width(), 1000, "≤PREVIEW_MAX_WIDTH 背景不应降采样");
         assert_eq!(page.height(), 300);
         // 预览仍应正确渲染（有深色前景）
         let gray_min = page
@@ -782,8 +811,8 @@ mod tests {
             align: Align::Left,
             first_line_indent: 280.0, // 2 字宽（2 × font_size 140）
         }];
-        // 背景宽 8192（> PREVIEW_MAX_WIDTH 4096）→ scale = 0.5
-        let scaled = scaled_params_for(&params, 8192);
+        // 背景宽 2560（> PREVIEW_MAX_WIDTH 1280）→ scale = 0.5
+        let scaled = scaled_params_for(&params, 2560);
         assert_eq!(scaled.font_size, 70.0);
         assert_eq!(
             scaled.paragraphs[0].first_line_indent, 140.0,
@@ -860,6 +889,29 @@ mod tests {
         let doc = printpdf::PdfDocument::parse(&bytes, &printpdf::PdfParseOptions::default(), &mut warnings)
             .unwrap_or_else(|e| panic!("PDF 解析失败：{e}"));
         assert_eq!(doc.page_count(), pages.len(), "PDF 页数应与 render_pages 一致");
+
+        // 验证生成的 PDF 中所有 image 对象的 Interpolate 都被设为 true，且尺寸未被压缩降采样
+        let lopdf_doc = lopdf::Document::load_mem(&bytes).unwrap();
+        let mut image_count = 0;
+        let (w, h) = pages[0].dimensions();
+        for (_, object) in lopdf_doc.objects.iter() {
+            if let lopdf::Object::Stream(ref stream) = object {
+                if let Ok(subtype) = stream.dict.get(b"Subtype") {
+                    if subtype == &lopdf::Object::Name(b"Image".to_vec()) {
+                        image_count += 1;
+                        let interpolate = stream.dict.get(b"Interpolate").unwrap();
+                        assert_eq!(interpolate, &lopdf::Object::Boolean(true), "图像的 Interpolate 标志应为 true");
+                        
+                        let width = stream.dict.get(b"Width").unwrap().as_i64().unwrap();
+                        let height = stream.dict.get(b"Height").unwrap().as_i64().unwrap();
+                        assert_eq!(width, w as i64, "图像宽度应与原始页面宽度一致");
+                        assert_eq!(height, h as i64, "图像高度应与原始页面高度一致");
+                    }
+                }
+            }
+        }
+        assert!(image_count > 0, "PDF 应包含至少一个图像对象");
+
         // 页物理尺寸 ≈ 像素 @ 300 DPI。printpdf 0.12 的 PdfPage 无 width/height
         // 字段，页尺寸在 media_box: Rect 中，单位 Pt（1/72 英寸）
         let (w, h) = pages[0].dimensions();
