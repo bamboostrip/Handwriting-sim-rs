@@ -80,7 +80,7 @@ pub(crate) fn get_wrong_char(ch: char, rng: &mut impl Rng) -> char {
             wrong_ch = (b'0' + rng.random_range(0..10)) as char;
         }
         wrong_ch
-    } else if ch >= '\u{4e00}' && ch <= '\u{9fa5}' {
+    } else if ('\u{4e00}'..='\u{9fa5}').contains(&ch) {
         let mut wrong_ch = ch;
         while wrong_ch == ch {
             let idx = rng.random_range(0..COMMON_CHINESE_CHARS.len());
