@@ -46,8 +46,11 @@ const PREVIEW_MAX_WIDTH: u32 = 1280;
 /// 32MP 级背景解码+降采样需数秒；每次预览（换 seed 重画笔画）都重新处理
 /// 是最大的重复开销，缓存后只有首次预览慢，后续亚秒级。最多保留 2 份，
 /// 超限清空（预览场景通常只有一个背景）。
-static PREVIEW_BG_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(String, u64), Arc<(u32, RgbImage)>>>> =
-    std::sync::OnceLock::new();
+type PreviewBgEntry = Arc<(u32, RgbImage)>;
+type PreviewBgMap = std::collections::HashMap<(String, u64), PreviewBgEntry>;
+type PreviewBgCache = std::sync::OnceLock<std::sync::Mutex<PreviewBgMap>>;
+
+static PREVIEW_BG_CACHE: PreviewBgCache = std::sync::OnceLock::new();
 
 /// 背景缓存键：路径 + 文件修改时间（秒），文件被替换时自动失效。
 fn bg_cache_key(path: &str) -> (String, u64) {
@@ -449,13 +452,16 @@ pub fn export_pdf(
     // 配置 PDF 保存选项：
     // 1. 禁用图片最大尺寸限制（默认 2MB），防止大图被 printpdf 内部的最近邻算法强行降采样导致画质严重受损（产生大量锯齿）
     // 2. 强制使用 Flate 无损压缩，既保证画质 100% 不受损，又能有效压缩 PDF 体积
-    let mut image_opt = printpdf::ImageOptimizationOptions::default();
-    image_opt.max_image_size = None;
-    image_opt.auto_optimize = Some(false);
-    image_opt.format = Some(printpdf::ImageCompression::Flate);
-
-    let mut save_options = printpdf::PdfSaveOptions::default();
-    save_options.image_optimization = Some(image_opt);
+    let image_opt = printpdf::ImageOptimizationOptions {
+        max_image_size: None,
+        auto_optimize: Some(false),
+        format: Some(printpdf::ImageCompression::Flate),
+        ..Default::default()
+    };
+    let save_options = printpdf::PdfSaveOptions {
+        image_optimization: Some(image_opt),
+        ..Default::default()
+    };
 
     let bytes = doc.save(&save_options, &mut warnings);
 

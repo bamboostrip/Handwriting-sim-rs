@@ -1027,7 +1027,6 @@ fn show_page(
 mod tests {
     use super::*;
     use handwrite_sim::core::models::StrikeoutStyle;
-    use slint::ComponentHandle;
     use std::cell::RefCell;
 
     #[test]
@@ -1037,6 +1036,7 @@ mod tests {
         let para_model = VecModel::default();
 
         let mut params = HandwritingParams::default();
+        params.text = "测试文本".to_string();
         params.miswrite_strikeout_style = StrikeoutStyle::Cross;
         params.miswrite_rewrite_mode = MiswriteMode::Rewrite;
 

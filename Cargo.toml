@@ -41,6 +41,8 @@ fast_image_resize = { version = "6", features = ["rayon"] }
 [build-dependencies]
 # 编译 .slint 界面描述（与 slint 同版本）
 slint-build = "1"
+# Windows exe 资源嵌入（窗口图标，仅 win32 生效）
+winresource = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
