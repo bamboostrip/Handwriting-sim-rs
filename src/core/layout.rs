@@ -877,4 +877,26 @@ mod tests {
             "小字带应随主带同移：rel_c={rel_c} rel_l={rel_l}"
         );
     }
+
+    #[test]
+    fn test_wrong_character_generation() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let ch = '中';
+        let wrong = get_wrong_char(ch, &mut rng);
+        assert_ne!(ch, wrong);
+        assert!(wrong >= '\u{4e00}' && wrong <= '\u{9fa5}');
+
+        let ch_eng = 'A';
+        let wrong_eng = get_wrong_char(ch_eng, &mut rng);
+        assert_ne!(ch_eng, wrong_eng);
+        assert!(wrong_eng.is_ascii_uppercase());
+    }
+
+    #[test]
+    fn test_draw_bezier_line() {
+        let mut mask = vec![false; 100 * 100];
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        draw_bezier_line(&mut mask, 100, 100, 10.0, 10.0, 90.0, 90.0, 2.0, 5.0, &mut rng);
+        assert!(mask.iter().any(|&b| b), "draw_bezier_line should modify mask");
+    }
 }
