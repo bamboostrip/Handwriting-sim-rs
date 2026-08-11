@@ -8,7 +8,7 @@ use rand::Rng;
 use rand_distr::{Distribution, Normal};
 
 use crate::core::font::FontFace;
-use crate::core::models::{Align, HandwritingParams, MiswriteMode, Paragraph};
+use crate::core::models::{Align, HandwritingParams, MiswriteMode, Paragraph, StrikeoutStyle};
 
 /// 一页排版结果。
 pub struct LayoutResult {
@@ -139,27 +139,75 @@ fn draw_miswrite(
     width: usize,
     height: usize,
     font: &FontFace,
-    ch: char,
+    wrong_ch: char,
+    correct_ch: char,
     x: f32,
     y_top: f32,
     size: f32,
     angle: f32,
     draw_small: bool,
+    style: StrikeoutStyle,
+    rng: &mut impl Rng,
 ) {
-    let advance = font.glyph_width(ch, size);
-    // 删除线：跨字形宽度的旋转粗线，位于字符竖直中线
-    let mid = y_top + font.ascent(size) * 0.45;
+    let wrong_advance = font.glyph_width(wrong_ch, size);
+    let mid_x = x + wrong_advance / 2.0; // Centered on typo character
+    let mid_y = y_top + font.ascent(size) * 0.45;
+    
     let (ct, st) = (angle.cos(), angle.sin());
-    let half = advance * 0.45;
-    let (rx, ry) = (half * ct, half * st);
+    let half_w = wrong_advance * 0.55;
+    let half_h = size * 0.4;
     let thickness = (size / 8.0).max(2.0);
-    draw_thick_line(mask, width, height, x + rx, mid - ry, x - rx, mid + ry, thickness);
+    let waviness = size * 0.08;
+
+    match style {
+        StrikeoutStyle::Line => {
+            let rx = half_w * ct;
+            let ry = half_w * st;
+            draw_bezier_line(mask, width, height, mid_x - rx, mid_y - ry, mid_x + rx, mid_y + ry, thickness, waviness, rng);
+        }
+        StrikeoutStyle::DoubleLine => {
+            let rx = half_w * ct;
+            let ry = half_w * st;
+            
+            // Draw top parallel line
+            let offset_y = size * 0.1;
+            draw_bezier_line(mask, width, height, mid_x - rx, mid_y - ry - offset_y, mid_x + rx, mid_y + ry - offset_y, thickness, waviness, rng);
+            // Draw bottom parallel line
+            draw_bezier_line(mask, width, height, mid_x - rx, mid_y - ry + offset_y, mid_x + rx, mid_y + ry + offset_y, thickness, waviness, rng);
+        }
+        StrikeoutStyle::Slash => {
+            // Draw single diagonal slash
+            let x0 = mid_x + half_w * 0.7;
+            let y0 = mid_y - half_h;
+            let x1 = mid_x - half_w * 0.7;
+            let y1 = mid_y + half_h;
+            draw_bezier_line(mask, width, height, x0, y0, x1, y1, thickness, waviness, rng);
+        }
+        StrikeoutStyle::Cross => {
+            // Diagonal line 1
+            let x0_1 = mid_x - half_w * 0.7;
+            let y0_1 = mid_y - half_h;
+            let x1_1 = mid_x + half_w * 0.7;
+            let y1_1 = mid_y + half_h;
+            draw_bezier_line(mask, width, height, x0_1, y0_1, x1_1, y1_1, thickness, waviness, rng);
+            
+            // Diagonal line 2
+            let x0_2 = mid_x + half_w * 0.7;
+            let y0_2 = mid_y - half_h;
+            let x1_2 = mid_x - half_w * 0.7;
+            let y1_2 = mid_y + half_h;
+            draw_bezier_line(mask, width, height, x0_2, y0_2, x1_2, y1_2, thickness, waviness, rng);
+        }
+    }
+
     if draw_small {
-        // 小一号重写：正上方略偏右，基线不低于 0（首行避免裁掉）
+        // Rewrite height adjusted closer to y_top with slight random perturbation
         let small = (size * 0.6).max(1.0);
-        let small_x = x + size * 0.15;
-        let small_baseline = (y_top - size * 0.85 + font.ascent(small)).max(font.ascent(small));
-        font.rasterize(ch, small, small_x, small_baseline, mask, width, height);
+        let rx_offset = rng.random_range(-size * 0.03..=size * 0.03);
+        let ry_offset = rng.random_range(-size * 0.03..=size * 0.03);
+        let small_x = x + wrong_advance * 0.45 + rx_offset;
+        let small_baseline = (y_top + size * 0.05 + font.ascent(small) + ry_offset).max(font.ascent(small));
+        font.rasterize(correct_ch, small, small_x, small_baseline, mask, width, height);
     }
 }
 
