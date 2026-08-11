@@ -113,7 +113,7 @@ pub(crate) fn draw_bezier_line(
     let nx = -dy / len;
     let ny = dx / len;
 
-    let offset = rng.random_range(-waviness..=waviness);
+    let offset = if waviness <= 0.0 { 0.0 } else { rng.random_range(-waviness..=waviness) };
     let cx = mx + nx * offset;
     let cy = my + ny * offset;
 
@@ -149,6 +149,11 @@ fn draw_miswrite(
     style: StrikeoutStyle,
     rng: &mut impl Rng,
 ) {
+    use rand::SeedableRng;
+    let seed = rng.random::<u64>();
+    let mut local_rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let rng = &mut local_rng;
+
     let wrong_advance = font.glyph_width(wrong_ch, size);
     let mid_x = x + wrong_advance / 2.0; // Centered on typo character
     let mid_y = y_top + font.ascent(size) * 0.45;
