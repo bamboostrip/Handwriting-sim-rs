@@ -1045,6 +1045,7 @@ mod tests {
 
         let mut params = HandwritingParams::default();
         params.text = "测试文本".to_string();
+        params.font_path = "dummy.ttf".to_string();
         params.miswrite_strikeout_style = StrikeoutStyle::Cross;
         params.miswrite_rewrite_mode = MiswriteMode::Rewrite;
 
