@@ -206,7 +206,7 @@ fn draw_miswrite(
         let rx_offset = rng.random_range(-size * 0.03..=size * 0.03);
         let ry_offset = rng.random_range(-size * 0.03..=size * 0.03);
         let small_x = x + wrong_advance * 0.45 + rx_offset;
-        let small_baseline = (y_top + size * 0.05 + font.ascent(small) + ry_offset).max(font.ascent(small));
+        let small_baseline = (y_top - size * 0.45 + font.ascent(small) + ry_offset).max(font.ascent(small));
         font.rasterize(correct_ch, small, small_x, small_baseline, mask, width, height);
     }
 }
@@ -272,27 +272,34 @@ pub fn layout_page(
             }
             let size = size.max(1.0);
 
-            let offset = font.glyph_width(ch, size);
-            let baseline_y = yj + font.ascent(size);
-            font.rasterize(ch, size, x.round(), baseline_y, &mut mask, width, height);
+            let word_noise = normal_word.sample(rng) as f32;
 
-            // 字距推进（含字形宽度与扰动）——先记录字符起始位置供错字效果使用
+            // 写错字模拟：判定只影响渲染，不参与换行；rate=0 时不消耗 RNG（零回归）
+            let mut is_miswrite = false;
+            let mut wrong_ch = ch;
+            let mut angle = 0.0;
+            if params.miswrite_rate > 0.0 && rng.random_bool(f64::from(params.miswrite_rate)) {
+                is_miswrite = true;
+                wrong_ch = get_wrong_char(ch, rng);
+                angle = normal_strike.sample(rng) as f32;
+            }
+
+            let offset = font.glyph_width(wrong_ch, size);
+            let baseline_y = yj + font.ascent(size);
+            font.rasterize(wrong_ch, size, x.round(), baseline_y, &mut mask, width, height);
+
             let char_x = x;
-            x += params.word_spacing + offset + normal_word.sample(rng) as f32;
+            x += params.word_spacing + offset + word_noise;
 
             i += 1;
 
-            // 写错字模拟：判定只影响渲染，不参与换行；rate=0 时不消耗 RNG（零回归）
-            if params.miswrite_rate > 0.0 && rng.random_bool(f64::from(params.miswrite_rate)) {
-                let angle = normal_strike.sample(rng) as f32;
+            if is_miswrite {
                 match params.miswrite_rewrite_mode {
                     MiswriteMode::Above => {
-                        // 删除线 + 正上方小字重写
-                        draw_miswrite(&mut mask, width, height, font, ch, char_x, yj, size, angle, true);
+                        draw_miswrite(&mut mask, width, height, font, wrong_ch, ch, char_x, yj, size, angle, true, params.miswrite_strikeout_style, rng);
                     }
                     MiswriteMode::Rewrite => {
-                        // 仅删除线；后文正常位置重写：紧邻错字之后以正常字号重写，再推进一个字形宽度给后续字符
-                        draw_miswrite(&mut mask, width, height, font, ch, char_x, yj, size, angle, false);
+                        draw_miswrite(&mut mask, width, height, font, wrong_ch, ch, char_x, yj, size, angle, false, params.miswrite_strikeout_style, rng);
                         font.rasterize(ch, size, x.round(), baseline_y, &mut mask, width, height);
                         x += font.glyph_width(ch, size) + params.word_spacing;
                     }
@@ -351,7 +358,8 @@ pub fn layout_paragraph(
     // 阶段一：纯排版（不绘制），随机数消耗顺序与纯文本路径一致
     #[derive(Clone, Copy)]
     struct Placed {
-        ch: char,
+        ch: char,          // The character actually drawn (could be wrong_ch)
+        correct_ch: char,  // The original correct character
         x: f32,
         y: f32,
         size: f32,
@@ -388,22 +396,43 @@ pub fn layout_paragraph(
                 size = (params.font_size + normal_font.sample(rng) as f32).round().max(0.0);
             }
             let size = size.max(1.0);
-            let offset = font.glyph_width(ch, size);
-            placed.push(Placed { ch, x, y: yj, size, line: line_ys.len() - 1, miswrite: false, angle: 0.0, rewrite_x: 0.0 });
-            x += params.word_spacing + offset + normal_word.sample(rng) as f32;
-            i += 1;
-            // 错字判定（RNG 消费顺序与文本路径一致：字符扰动之后）；rate=0 不消耗
+
+            let word_noise = normal_word.sample(rng) as f32;
+
+            let mut is_miswrite = false;
+            let mut wrong_ch = ch;
+            let mut angle = 0.0;
             if params.miswrite_rate > 0.0 && rng.random_bool(f64::from(params.miswrite_rate)) {
-                if let Some(last) = placed.last_mut() {
-                    last.miswrite = true;
-                    last.angle = normal_strike.sample(rng) as f32;
-                    // Rewrite：重写画在错字后紧邻一格（当前 x），并推进 x 让后续字符
-                    // 让位（与文本路径一致；纯确定性推进，不消耗 RNG）
-                    if params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
-                        last.rewrite_x = x;
-                        x += offset + params.word_spacing;
-                    }
-                }
+                is_miswrite = true;
+                wrong_ch = get_wrong_char(ch, rng);
+                angle = normal_strike.sample(rng) as f32;
+            }
+
+            let offset = font.glyph_width(wrong_ch, size);
+            let mut rewrite_x = 0.0;
+            let x_next = x + params.word_spacing + offset + word_noise;
+            
+            if is_miswrite && params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
+                rewrite_x = x_next;
+            }
+
+            placed.push(Placed {
+                ch: wrong_ch,
+                correct_ch: ch,
+                x,
+                y: yj,
+                size,
+                line: line_ys.len() - 1,
+                miswrite: is_miswrite,
+                angle,
+                rewrite_x,
+            });
+            
+            x = x_next;
+            i += 1;
+            
+            if is_miswrite && params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
+                x += font.glyph_width(ch, size) + params.word_spacing;
             }
         }
         line_x_ends.push(x);
@@ -429,7 +458,12 @@ pub fn layout_paragraph(
         for item in &placed {
             let w = font.glyph_width(item.ch, item.size);
             min_x[item.line] = min_x[item.line].min(item.x);
-            max_x[item.line] = max_x[item.line].max(item.x + w);
+            let mut right_w = item.x + w;
+            if item.miswrite && params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
+                let rw = font.glyph_width(item.correct_ch, item.size);
+                right_w = right_w.max(item.rewrite_x + rw);
+            }
+            max_x[item.line] = max_x[item.line].max(right_w);
         }
         Some(
             (0..line_ys.len())
@@ -460,9 +494,23 @@ pub fn layout_paragraph(
         let baseline_y = item.y + font.ascent(item.size);
         font.rasterize(item.ch, item.size, dx, baseline_y, &mut mask, width, canvas_h);
         if item.miswrite {
-            draw_miswrite(&mut mask, width, canvas_h, font, item.ch, dx, item.y, item.size, item.angle, params.miswrite_rewrite_mode == MiswriteMode::Above);
+            draw_miswrite(
+                &mut mask,
+                width,
+                canvas_h,
+                font,
+                item.ch,
+                item.correct_ch,
+                dx,
+                item.y,
+                item.size,
+                item.angle,
+                params.miswrite_rewrite_mode == MiswriteMode::Above,
+                params.miswrite_strikeout_style,
+                rng,
+            );
             if params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
-                font.rasterize(item.ch, item.size, item.rewrite_x + shift, baseline_y, &mut mask, width, canvas_h);
+                font.rasterize(item.correct_ch, item.size, item.rewrite_x + shift, baseline_y, &mut mask, width, canvas_h);
             }
         }
     }
@@ -956,8 +1004,8 @@ mod tests {
                     let (mut min_x, mut max_x) = (usize::MAX, 0usize);
                     for (x, &b) in band[s * 600..e * 600].iter().enumerate() {
                         if b {
-                            min_x = min_x.min(x);
-                            max_x = max_x.max(x);
+                            min_x = min_x.min(x % 600);
+                            max_x = max_x.max(x % 600);
                         }
                     }
                     (min_x, max_x)
