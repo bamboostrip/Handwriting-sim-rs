@@ -18,7 +18,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use handwrite_sim::core::docx_io;
 use handwrite_sim::core::engine::{export, export_pdf, overlay_bounds, render_all_pages_preview, EngineError};
-use handwrite_sim::core::models::{parse_color, Align, HandwritingParams, MiswriteMode, Paragraph};
+use handwrite_sim::core::models::{
+    parse_color, Align, HandwritingParams, MiswriteMode, Paragraph, StrikeoutStyle,
+};
 use handwrite_sim::core::presets;
 use handwrite_sim::ui::{MainWindow, ParaRow};
 use image::RgbaImage;
@@ -358,7 +360,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             String::new()
         };
-        let clean_text = row.text.replace('\u{2060}', "").replace('\u{00a0}', " ").replace('\u{ffa0}', " ");
+        let clean_text = row.text.replace('\u{2060}', "").replace(['\u{00a0}', '\u{ffa0}'], " ");
         let text = clean_text.as_str();
         let seg_txt = if text.trim().is_empty() { "（空段）" } else { "" };
         ui.set_para_status_text(SharedString::from(format!(
@@ -391,7 +393,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut last = idx;
                 for (k, part) in parts[1..].iter().enumerate() {
                     let mut new_row = row.clone();
-                    let part_k = to_ui_spaces(*part);
+                    let part_k = to_ui_spaces(part);
                     new_row.text = SharedString::from(&part_k);
                     new_row.est_lines = estimate_lines(&part_k, new_row.indent_em);
                     new_row.trailing_space_em = calc_trailing_space_em(&part_k);
@@ -710,7 +712,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// 清理 UI 存储的特殊字符（NBSP/FFA0/WJ），还原为普通空格，防止外来文本污染。
 fn to_ui_spaces(s: &str) -> String {
-    s.replace('\u{2060}', "").replace('\u{00a0}', " ").replace('\u{ffa0}', " ")
+    s.replace('\u{2060}', "").replace(['\u{00a0}', '\u{ffa0}'], " ")
 }
 
 /// 计算文本末尾连续空格对应的 em 宽度（右对齐占位用）。
@@ -724,7 +726,7 @@ fn calc_trailing_space_em(text: &str) -> f32 {
 /// 楷体汉字宽约 13px，ASCII 字符约 7px (0.55 * 13px)。
 /// 编辑器可见宽度约 400px，首行缩进占对应宽度。
 fn estimate_lines(text: &str, indent_em: f32) -> i32 {
-    let clean = text.replace('\u{2060}', "").replace('\u{00a0}', " ").replace('\u{ffa0}', " ");
+    let clean = text.replace('\u{2060}', "").replace(['\u{00a0}', '\u{ffa0}'], " ");
     if clean.is_empty() {
         return 1;
     }
@@ -869,6 +871,12 @@ fn apply_preset_to_ui(
         MiswriteMode::Above => 0,
         MiswriteMode::Rewrite => 1,
     });
+    ui.set_miswrite_strikeout_style_index(match p.miswrite_strikeout_style {
+        StrikeoutStyle::Line => 0,
+        StrikeoutStyle::DoubleLine => 1,
+        StrikeoutStyle::Slash => 2,
+        StrikeoutStyle::Cross => 3,
+    });
     ui.set_font_color(SharedString::from(format!(
         "#{:02x}{:02x}{:02x}",
         p.fill[0], p.fill[1], p.fill[2]
@@ -907,7 +915,7 @@ fn collect_params(
             continue;
         }
         paras.push(Paragraph {
-            text: row.text.replace('\u{2060}', "").replace('\u{00a0}', " ").replace('\u{ffa0}', " "),
+            text: row.text.replace('\u{2060}', "").replace(['\u{00a0}', '\u{ffa0}'], " "),
             align: match row.align {
                 1 => Align::Center,
                 2 => Align::Right,
@@ -951,6 +959,12 @@ fn collect_params(
     params.miswrite_rewrite_mode = match ui.get_miswrite_mode_index() {
         1 => MiswriteMode::Rewrite,
         _ => MiswriteMode::Above,
+    };
+    params.miswrite_strikeout_style = match ui.get_miswrite_strikeout_style_index() {
+        1 => StrikeoutStyle::DoubleLine,
+        2 => StrikeoutStyle::Slash,
+        3 => StrikeoutStyle::Cross,
+        _ => StrikeoutStyle::Line,
     };
     // 文字颜色
     params.fill = parse_color(ui.get_font_color().as_str()).map_err(EngineError::Params)?;
@@ -1008,4 +1022,32 @@ fn show_page(
     ui.set_preview_image(Image::from_rgba8(buffer));
     ui.set_page_text(SharedString::from(format!("第 {} / {total} 页", i + 1)));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use handwrite_sim::core::models::StrikeoutStyle;
+    use slint::ComponentHandle;
+    use std::cell::RefCell;
+
+    #[test]
+    fn test_ui_strikeout_style_mapping() {
+        let ui = MainWindow::new().unwrap();
+        let preset_params = RefCell::new(None);
+        let para_model = VecModel::default();
+
+        let mut params = HandwritingParams::default();
+        params.miswrite_strikeout_style = StrikeoutStyle::Cross;
+        params.miswrite_rewrite_mode = MiswriteMode::Rewrite;
+
+        apply_preset_to_ui(&ui, &preset_params, &params);
+        assert_eq!(ui.get_miswrite_strikeout_style_index(), 3);
+        assert_eq!(ui.get_miswrite_mode_index(), 1);
+
+        let collected = collect_params(&ui, &preset_params, &para_model).unwrap();
+        assert_eq!(collected.miswrite_strikeout_style, StrikeoutStyle::Cross);
+        assert_eq!(collected.miswrite_rewrite_mode, MiswriteMode::Rewrite);
+    }
+}
+
 

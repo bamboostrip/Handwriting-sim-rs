@@ -42,6 +42,7 @@ export struct ParaRow {
 
 export component MainWindow inherits Window {
     title: "手写模拟器";
+    icon: @image-url("app-icon.png");
     preferred-width: 1280px;
     preferred-height: 840px;
     background: Theme.bg;
@@ -63,9 +64,10 @@ export component MainWindow inherits Window {
     in-out property <int> perturb-y <=> perturb-y-spin.value;
     // 笔画旋转：浮点数直接输入（对齐 Python 版 QDoubleSpinBox）
     in-out property <string> perturb-theta-text <=> perturb-theta-edit.text;
-    // 写错字模拟：错字率（0~30%）+ 重写方式
+    // 写错字模拟：错字率（0~30%）+ 重写方式 + 涂改方式
     in-out property <float> miswrite-rate <=> miswrite-rate-slider.value;
     in-out property <int> miswrite-mode-index <=> miswrite-mode-combo.current-index;
+    in-out property <int> miswrite-strikeout-style-index <=> miswrite-strikeout-combo.current-index;
     in-out property <string> font-path-text <=> font-path-edit.text;
     in-out property <string> background-path-text <=> background-path-edit.text;
     // 文字颜色（#RRGGBB）
@@ -547,7 +549,15 @@ export component MainWindow inherits Window {
                                 Row {
                                     FieldLabel { text: "重写方式"; }
                                     miswrite-mode-combo := ComboBox {
-                                        model: ["正上方重写", "后文重写"];
+                                        model: ["右上方重写", "后文重写"];
+                                        current-index: 0;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                                Row {
+                                    FieldLabel { text: "涂改方式"; }
+                                    miswrite-strikeout-combo := ComboBox {
+                                        model: ["单横线", "双横线", "斜线", "叉号"];
                                         current-index: 0;
                                         horizontal-stretch: 1;
                                     }
