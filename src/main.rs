@@ -1045,10 +1045,13 @@ mod tests {
 
         let dummy_font = tempfile::NamedTempFile::new().unwrap();
         let font_path = dummy_font.path().to_string_lossy().to_string();
+        let dummy_bg = tempfile::NamedTempFile::new().unwrap();
+        let bg_path = dummy_bg.path().to_string_lossy().to_string();
 
         let mut params = HandwritingParams::default();
         params.text = "测试文本".to_string();
         params.font_path = font_path;
+        params.background_path = bg_path;
         params.miswrite_strikeout_style = StrikeoutStyle::Cross;
         params.miswrite_rewrite_mode = MiswriteMode::Rewrite;
 
