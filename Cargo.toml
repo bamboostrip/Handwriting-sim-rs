@@ -17,7 +17,7 @@ repository = "https://github.com/bamboostrip/handwrite-sim"
 # - rfd: 原生文件对话框（选字体/背景/导出目录）
 # ---------------------------------------------------------------------------
 [dependencies]
-slint = "1"
+slint = { version = "1", features = ["system-testing"] }
 ab_glyph = "0.2"
 image = "0.25"
 rand = "0.9"
