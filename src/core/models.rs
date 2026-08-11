@@ -59,6 +59,37 @@ impl MiswriteMode {
     }
 }
 
+/// 错字涂改方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum StrikeoutStyle {
+    #[default]
+    Line,       // 单横线
+    DoubleLine, // 双横线
+    Slash,      // 斜线
+    Cross,      // 叉号
+}
+
+impl StrikeoutStyle {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StrikeoutStyle::Line => "line",
+            StrikeoutStyle::DoubleLine => "double_line",
+            StrikeoutStyle::Slash => "slash",
+            StrikeoutStyle::Cross => "cross",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<StrikeoutStyle, String> {
+        match s {
+            "line" => Ok(StrikeoutStyle::Line),
+            "double_line" => Ok(StrikeoutStyle::DoubleLine),
+            "slash" => Ok(StrikeoutStyle::Slash),
+            "cross" => Ok(StrikeoutStyle::Cross),
+            other => Err(format!("未知涂改方式：{other:?}，可选 line/double_line/slash/cross")),
+        }
+    }
+}
+
 /// 单个段落的排版信息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Paragraph {
@@ -156,6 +187,9 @@ pub struct HandwritingParams {
     /// 错字重写方式。
     #[serde(default)]
     pub miswrite_rewrite_mode: MiswriteMode,
+    /// 错字涂改方式。
+    #[serde(default)]
+    pub miswrite_strikeout_style: StrikeoutStyle,
 
     // ---- 排版细节 ----
     pub end_chars: String,
@@ -186,6 +220,7 @@ impl Default for HandwritingParams {
             perturb_theta_sigma: 0.05,
             miswrite_rate: 0.0,
             miswrite_rewrite_mode: MiswriteMode::Above,
+            miswrite_strikeout_style: StrikeoutStyle::Line,
             end_chars: "，。".to_string(),
             start_chars: String::new(),
         }
@@ -331,5 +366,14 @@ mod tests {
         assert!(matches!(p.validate(), Err(ParamsError::MiswriteRate { .. })));
         let p = HandwritingParams { miswrite_rate: 1.01, ..base };
         assert!(matches!(p.validate(), Err(ParamsError::MiswriteRate { .. })));
+    }
+
+    #[test]
+    fn test_strikeout_style_parsing() {
+        assert_eq!(StrikeoutStyle::parse("line").unwrap(), StrikeoutStyle::Line);
+        assert_eq!(StrikeoutStyle::parse("double_line").unwrap(), StrikeoutStyle::DoubleLine);
+        assert_eq!(StrikeoutStyle::parse("slash").unwrap(), StrikeoutStyle::Slash);
+        assert_eq!(StrikeoutStyle::parse("cross").unwrap(), StrikeoutStyle::Cross);
+        assert!(StrikeoutStyle::parse("invalid").is_err());
     }
 }

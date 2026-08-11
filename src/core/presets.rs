@@ -80,6 +80,7 @@ fn to_preset_map(params: &HandwritingParams) -> Map<String, Value> {
     m.insert("perturb_theta_sigma".into(), json!(params.perturb_theta_sigma));
     m.insert("miswrite_rate".into(), json!(params.miswrite_rate));
     m.insert("miswrite_rewrite_mode".into(), json!(params.miswrite_rewrite_mode.as_str()));
+    m.insert("miswrite_strikeout_style".into(), json!(params.miswrite_strikeout_style.as_str()));
     m.insert("end_chars".into(), json!(params.end_chars));
     m.insert("start_chars".into(), json!(params.start_chars));
     m.insert("color".into(), json!(format!("#{:02x}{:02x}{:02x}", params.fill[0], params.fill[1], params.fill[2])));
@@ -115,6 +116,12 @@ fn from_preset_map(data: &Map<String, Value>) -> Result<HandwritingParams, Prese
         match crate::core::models::MiswriteMode::parse(&v) {
             Ok(m) => p.miswrite_rewrite_mode = m,
             Err(_) => return Err(PresetError::Format(format!("miswrite_rewrite_mode 未知：{v:?}"))),
+        }
+    }
+    if let Some(v) = str_("miswrite_strikeout_style") {
+        match crate::core::models::StrikeoutStyle::parse(&v) {
+            Ok(s) => p.miswrite_strikeout_style = s,
+            Err(_) => return Err(PresetError::Format(format!("miswrite_strikeout_style 未知：{v:?}"))),
         }
     }
     if let Some(v) = str_("font_path") { p.font_path = from_portable_path(&v); }
@@ -308,5 +315,17 @@ mod tests {
         );
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.font_path, font_in_assets.to_string_lossy());
+    }
+
+    #[test]
+    fn test_presets_includes_strikeout_style() {
+        use crate::core::models::StrikeoutStyle;
+        let mut p = HandwritingParams::default();
+        p.miswrite_strikeout_style = StrikeoutStyle::Cross;
+        let map = to_preset_map(&p);
+        assert_eq!(map.get("miswrite_strikeout_style").unwrap().as_str().unwrap(), "cross");
+        
+        let loaded = from_preset_map(&map).unwrap();
+        assert_eq!(loaded.miswrite_strikeout_style, StrikeoutStyle::Cross);
     }
 }
