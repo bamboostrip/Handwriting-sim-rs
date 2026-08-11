@@ -161,7 +161,7 @@ fn draw_miswrite(
     let (ct, st) = (angle.cos(), angle.sin());
     let half_w = wrong_advance * 0.55;
     let half_h = size * 0.4;
-    let thickness = (size / 8.0).max(2.0);
+    let thickness = (size * 0.035).max(1.5);
     let waviness = size * 0.08;
 
     match style {
