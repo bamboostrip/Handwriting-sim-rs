@@ -9,8 +9,7 @@ repository = "https://github.com/bamboostrip/handwrite-sim"
 
 # ---------------------------------------------------------------------------
 # 依赖说明
-# - slint: 桌面 GUI（crates.io 默认 GPLv3；若未来闭源商业化，切换为 git 依赖
-#   并使用 Royalty-free 许可，见 docs/03-licensing.md）
+# - slint: 桌面 GUI（crates.io 默认 GPLv3；本项目开源，程序整体按 GPLv3 分发）
 # - ab_glyph: 字体光栅化（替代 Python 版 PIL FreeType 黑盒）
 # - image: 图像加载/保存（PNG/webp 背景、导出）
 # - rand/rand_distr: 笔画扰动随机数（正态分布）
