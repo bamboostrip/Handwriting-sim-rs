@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "params": {
+    "font_path": "fonts/汉呈吴红生钢笔楷书.ttf",
+    "background_path": "backgrounds/红作文格子.webp",
+    "font_size": 150,
+    "word_spacing": 28,
+    "line_spacing": 141,
+    "left_margin": 336,
+    "right_margin": 230,
+    "top_margin": -5,
+    "bottom_margin": 20,
+    "word_spacing_sigma": 0,
+    "line_spacing_sigma": 0,
+    "font_size_sigma": 0,
+    "perturb_x_sigma": 4,
+    "perturb_y_sigma": 4,
+    "perturb_theta_sigma": 0.05,
+    "end_chars": "，。",
+    "start_chars": "",
+    "color": "#000000"
+  }
+}
