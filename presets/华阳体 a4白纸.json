@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "params": {
+    "font_path": "fonts/华阳手写体.ttf",
+    "background_path": "backgrounds/A4纯白.webp",
+    "font_size": 100,
+    "word_spacing": 0,
+    "line_spacing": 50,
+    "left_margin": 250,
+    "right_margin": 20,
+    "top_margin": 200,
+    "bottom_margin": 500,
+    "word_spacing_sigma": 0,
+    "line_spacing_sigma": 0,
+    "font_size_sigma": 0,
+    "perturb_x_sigma": 4,
+    "perturb_y_sigma": 4,
+    "perturb_theta_sigma": 0.05,
+    "end_chars": "，。",
+    "start_chars": "",
+    "color": "#000000"
+  }
+}

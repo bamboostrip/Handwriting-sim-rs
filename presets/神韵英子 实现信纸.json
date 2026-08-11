@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "params": {
+    "font_path": "fonts/神韵英子楷书.ttf",
+    "background_path": "backgrounds/实线信纸.webp",
+    "font_size": 140,
+    "word_spacing": 0,
+    "line_spacing": 97,
+    "left_margin": 350,
+    "right_margin": 350,
+    "top_margin": 720,
+    "bottom_margin": 600,
+    "word_spacing_sigma": 1,
+    "line_spacing_sigma": 3,
+    "font_size_sigma": 2,
+    "perturb_x_sigma": 6,
+    "perturb_y_sigma": 6,
+    "perturb_theta_sigma": 0.09,
+    "end_chars": "，。",
+    "start_chars": "",
+    "color": "#000000"
+  }
+}

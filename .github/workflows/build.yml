@@ -1,0 +1,135 @@
+name: Build and Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: handwrite-sim-windows-x86_64
+            exe_name: handwrite-sim.exe
+          - os: ubuntu-latest
+            artifact: handwrite-sim-linux-x86_64
+            exe_name: handwrite-sim
+          - os: macos-latest
+            artifact: handwrite-sim-macos-arm64
+            exe_name: handwrite-sim
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      # Slint 的 winit-x11 后端在 Linux 需要 xcb/xkbcommon/fontconfig 开发库
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libfontconfig-dev
+
+      - name: Run tests
+        run: cargo test --release
+
+      - name: Build (release)
+        run: cargo build --release
+
+      # macOS 可执行文件需 ad-hoc 签名，否则 Gatekeeper 会拦截
+      - name: Ad-hoc sign (macOS)
+        if: runner.os == 'macOS'
+        run: codesign --force --deep -s - "target/release/${{ matrix.exe_name }}"
+
+      # 组装便携包：exe + 预设 + 背景 + 空 fonts 目录（用户自备字体）
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "staging/fonts", "staging/backgrounds", "staging/presets" | Out-Null
+          Copy-Item -Recurse "backgrounds/*" "staging/backgrounds/"
+          Copy-Item -Recurse "presets/*" "staging/presets/"
+          Copy-Item "target/release/${{ matrix.exe_name }}" "staging/"
+          Copy-Item "packaging/fonts-README.txt" "staging/fonts/README.txt"
+          Compress-Archive -Path "staging/*" -DestinationPath "${{ matrix.artifact }}.zip" -Force
+
+      - name: Package (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -e
+          mkdir -p staging/fonts staging/backgrounds staging/presets
+          cp -r backgrounds/. staging/backgrounds/
+          cp -r presets/. staging/presets/
+          cp "target/release/${{ matrix.exe_name }}" staging/
+          cp packaging/fonts-README.txt staging/fonts/README.txt
+          cd staging
+          zip -r "../${{ matrix.artifact }}.zip" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.zip
+          body: |
+            ## 下载说明
+
+            每个平台提供一个**便携 zip**（内含可执行程序 + 预设 + 背景）：
+            - `handwrite-sim-windows-x86_64.zip`：Windows 版（内含 `handwrite-sim.exe`）
+            - `handwrite-sim-linux-x86_64.zip`：Linux 版
+            - `handwrite-sim-macos-arm64.zip`：macOS（Apple Silicon）版
+
+            解压后即可使用（无需安装）：可执行文件 + `presets/` 预设 + `backgrounds/` 背景 + `fonts/` 字体目录。
+            把 exe 放进任意目录，同目录下的资源目录即为便携根目录，整个文件夹可随意拷贝移动。
+
+            ### 为什么没有字体？
+
+            手写体字体多为商业版权字体（如汉呈、华阳、云江等字库），开源分发需要授权，
+            因此本仓库与发布包均**不包含字体文件**。
+
+            请自备字体放入 `fonts/` 目录，或从开源 / 免费可商用字体中下载：
+            - 霞鹜文楷（LXGW WenKai）：OFL 1.1 协议，可商用，最接近手写体观感
+            - 沐瑶随心手写体 / 站酷小薇 / 站酷快乐体：免费可商用
+
+            预设中的字体路径（如 `fonts/云烟体.ttf`）为占位名称，
+            放入对应字体文件后即可直接使用，也可以改用其他字体。
+
+            ### 新功能（相对 Python 版）
+
+            - **PDF 导出**：300 DPI 位图层 PDF
+            - **错字率**：0~30% 错字 + 划掉重写（单线/双线/斜线/叉号四种涂改样式）
+
+            ### Linux 运行依赖
+
+            Slint 界面需要 xcb/xkbcommon/fontconfig 运行时库（主流发行版默认已装）：
+            ```bash
+            sudo apt install libxcb-shape0 libxcb-xfixes0 libxkbcommon0 libfontconfig1
+            ```
