@@ -1027,6 +1027,7 @@ fn show_page(
 mod tests {
     use super::*;
     use handwrite_sim::core::models::StrikeoutStyle;
+    use slint::SharedString;
     use std::cell::RefCell;
 
     #[test]
@@ -1034,6 +1035,13 @@ mod tests {
         let ui = MainWindow::new().unwrap();
         let preset_params = RefCell::new(None);
         let para_model = VecModel::default();
+        para_model.push(ParaRow {
+            text: SharedString::from("测试文本"),
+            align: 0,
+            indent_em: 0.0,
+            est_lines: 1,
+            trailing_space_em: 0.0,
+        });
 
         let mut params = HandwritingParams::default();
         params.text = "测试文本".to_string();
