@@ -176,9 +176,12 @@ mod tests {
     use crate::core::models::HandwritingParams;
 
     fn sample_params() -> HandwritingParams {
+        // 用系统临时目录构造绝对路径：Windows 的 `C:\...` 在 Linux/macOS 上
+        // 不是绝对路径，会被便携路径解析 join 到 exe 目录，导致 roundtrip 断言失败
+        let tmp = std::env::temp_dir();
         HandwritingParams {
-            font_path: r"C:\Windows\Fonts\msyh.ttc".into(),
-            background_path: r"C:\Users\me\bg.png".into(),
+            font_path: tmp.join("fonts").join("msyh.ttc").to_string_lossy().into_owned(),
+            background_path: tmp.join("bg.png").to_string_lossy().into_owned(),
             text: "不应被保存".into(),
             font_size: 40.0,
             fill: [12, 34, 56],
