@@ -185,8 +185,7 @@ cargo build --release
 ## 许可
 
 - 应用代码：MIT（见 [LICENSE](LICENSE)）
-- Slint：crates.io 默认 **GPLv3**，程序整体按 GPLv3 分发；未来闭源商业化切换
-  Royalty-free 许可的完整说明见 [docs/03-licensing.md](docs/03-licensing.md)
+- Slint：crates.io 默认 **GPLv3**（本项目开源，程序整体按 GPLv3 分发）
 
 ## 相关文档
 
