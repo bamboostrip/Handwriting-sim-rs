@@ -2,14 +2,16 @@
 name = "handwrite-sim"
 version = "0.1.0"
 edition = "2021"
-description = "手写模拟器（Rust 版）- 基于 Slint + 自研笔画扰动引擎的手写体生成工具"
+description = "手写模拟器（Rust 版）- 基于 egui + 自研笔画扰动引擎的手写体生成工具"
 license = "MIT"
 authors = ["bamboostrip"]
 repository = "https://github.com/bamboostrip/handwrite-sim"
 
 # ---------------------------------------------------------------------------
 # 依赖说明
-# - slint: 桌面 GUI（crates.io 默认 GPLv3；本项目开源，程序整体按 GPLv3 分发）
+# - eframe/egui: 即时模式 GUI（MIT/Apache-2.0；glow OpenGL 后端兼容性最好，
+#                Windows 走 WARP 软件 GL、Linux 走 llvmpipe；无 GPU 老机器/
+#                虚拟机可跑；段落编辑器每行真对齐由 epaint halign_and_justify_row 实现）
 # - ab_glyph: 字体光栅化（替代 Python 版 PIL FreeType 黑盒）
 # - image: 图像加载/保存（PNG/webp 背景、导出）
 # - rand/rand_distr: 笔画扰动随机数（正态分布）
@@ -17,7 +19,16 @@ repository = "https://github.com/bamboostrip/handwrite-sim"
 # - rfd: 原生文件对话框（选字体/背景/导出目录）
 # ---------------------------------------------------------------------------
 [dependencies]
-slint = "1"
+# egui/eframe: 即时模式 GUI（MIT/Apache-2.0）。
+# - glow: OpenGL 后端（老机器/虚拟机兼容性最好，Windows 走 WARP 软件 GL、Linux 走 llvmpipe）
+# - default_fonts: 保留默认字体（CJK 需启动时手动加载，见 app.rs）
+# - wayland/x11: Linux 原生窗口
+eframe = { version = "0.36", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "wayland",
+    "x11",
+] }
 ab_glyph = "0.2"
 image = "0.25"
 rand = "0.9"
@@ -38,16 +49,11 @@ lopdf = "0.44.0"
 fast_image_resize = { version = "6", features = ["rayon"] }
 
 [build-dependencies]
-# 编译 .slint 界面描述（与 slint 同版本）
-slint-build = "1"
 # Windows exe 资源嵌入（窗口图标，仅 win32 生效）
 winresource = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
-# Slint testing backend（headless）：CI 无显示环境（Linux 无 DISPLAY / macOS headless
-# runner）下创建 MainWindow 时避免 winit 初始化失败。版本需与 slint 严格一致。
-i-slint-backend-testing = "=1.17.1"
 
 [profile.release]
 # 越小越快的分发体积（与 Python 版 PyInstaller 产物对比）
