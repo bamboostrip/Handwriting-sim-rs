@@ -36,6 +36,16 @@ enum WorkerMsg {
     RenderDone(Result<Vec<RgbaImage>, String>),
 }
 
+/// 编辑器在一帧内收集的动作（帧末统一应用，避免渲染迭代中改 vec 的借用冲突）。
+enum ParaAction {
+    /// 段内出现换行（回车/粘贴）→ 拆成多段。
+    SplitNewlines(usize),
+    /// 段首退格 → 并入上一段。
+    MergePrev(usize),
+    /// 编辑器底部空白点击 → 聚焦最后一段。
+    FocusLast,
+}
+
 /// 主应用状态。
 #[allow(dead_code)] // 字段随实现阶段逐步接线，Phase 4 移除
 pub struct AppState {
@@ -199,7 +209,42 @@ impl eframe::App for AppState {
                     // ---- 右侧：参数面板（460）----
                     ui.vertical(|ui| {
                         ui.set_width(PANEL_WIDTH);
-                        ui.label("（参数面板 - 阶段 2 实现）");
+                        egui::ScrollArea::vertical()
+                            .id_salt("param_scroll")
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                crate::ui::controls::section_label(ui, "待处理文本");
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.add(theme::green_button("左对齐")).clicked() {
+                                        self.editor.set_align(0);
+                                        self.mark_changed();
+                                        self.refresh_para_status();
+                                    }
+                                    if ui.add(theme::green_button("居中")).clicked() {
+                                        self.editor.set_align(1);
+                                        self.mark_changed();
+                                        self.refresh_para_status();
+                                    }
+                                    if ui.add(theme::green_button("右对齐")).clicked() {
+                                        self.editor.set_align(2);
+                                        self.mark_changed();
+                                        self.refresh_para_status();
+                                    }
+                                    if ui.add(theme::green_button("首行缩进")).clicked() {
+                                        self.editor.toggle_indent(true);
+                                        self.mark_changed();
+                                        self.refresh_para_status();
+                                    }
+                                    if ui.add(theme::green_button("取消缩进")).clicked() {
+                                        self.editor.toggle_indent(false);
+                                        self.mark_changed();
+                                        self.refresh_para_status();
+                                    }
+                                });
+                                crate::ui::controls::hint_label(ui, self.para_status.as_str());
+                                self.editor_view(ui);
+                                ui.label("（字体/背景/参数 - 阶段 2/3 实现）");
+                            });
                     });
                 });
                 ui.add_space(4.0);
@@ -227,6 +272,126 @@ impl AppState {
             egui::Stroke::new(1.0, theme::GROUP_BORDER),
             egui::StrokeKind::Inside,
         );
+    }
+
+    /// 段落编辑器：白底圆角框内，每段一个 `TextEdit::multiline`。
+    /// `horizontal_align` + `desired_width(INFINITY)` → wrap 换行后每行真对齐
+    /// （epaint `halign_and_justify_row`），无估宽 hack。
+    /// 交互（回车/段首退格/粘贴）在本帧收集为动作，帧末统一应用，避免渲染迭代中
+    /// 改 vec 触发借用冲突。
+    fn editor_view(&mut self, ui: &mut egui::Ui) {
+        let n = self.editor.paras.len();
+        let backspace_pressed = ui.ctx().input(|i| i.key_pressed(egui::Key::Backspace));
+        let mut pending_focus = self.pending_focus.take();
+        let mut actions: Vec<ParaAction> = Vec::new();
+        let mut changed_para: Option<usize> = None;
+        let mut focus_changed_para: Option<usize> = None;
+
+        egui::Frame::group(ui.style())
+            .fill(theme::EDITOR_BG)
+            .stroke(egui::Stroke::new(1.0, theme::GROUP_BORDER))
+            .corner_radius(6.0)
+            .inner_margin(6.0)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                for i in 0..n {
+                    let (align, indent_em) = {
+                        let p = &self.editor.paras[i];
+                        (p.format.align, p.format.indent_em)
+                    };
+                    ui.horizontal(|ui| {
+                        if indent_em > 0.0 {
+                            ui.add_space(indent_em * EDITOR_FONT_SIZE);
+                        }
+                        let halign = match align {
+                            1 => egui::Align::Center,
+                            2 => egui::Align::RIGHT,
+                            _ => egui::Align::LEFT,
+                        };
+                        let want_focus = pending_focus == Some(i);
+                        // TextEdit 借用 &mut para.text；放进内层块让借用在 .show 后立即释放，
+                        // 之后再读取 para.text 判定换行就不会冲突。
+                        let output = {
+                            let text: &mut String = &mut self.editor.paras[i].text;
+                            egui::TextEdit::multiline(text)
+                                .id(egui::Id::new(format!("para-{i}")))
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(1)
+                                .horizontal_align(halign)
+                                .hint_text("请输入文本内容…")
+                                .show(ui)
+                        };
+                        if want_focus {
+                            output.response.request_focus();
+                            pending_focus = None;
+                        }
+                        if output.response.changed() {
+                            if self.editor.paras[i].text.contains('\n') {
+                                actions.push(ParaAction::SplitNewlines(i));
+                            } else {
+                                changed_para = Some(i);
+                            }
+                        } else if output.response.has_focus() {
+                            focus_changed_para = Some(i);
+                        }
+                        // 段首退格：光标在段首（无选区）+ 本帧 Backspace → 并入上一段
+                        if backspace_pressed && output.response.has_focus() && i > 0 {
+                            if let Some(cr) = &output.cursor_range {
+                                if cr.primary.index.0 == 0 && cr.secondary.index.0 == 0 {
+                                    actions.push(ParaAction::MergePrev(i));
+                                }
+                            }
+                        }
+                    });
+                }
+                // 底部空白：点击聚焦最后一段（模拟整框编辑手感）
+                let (_rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 30.0),
+                    egui::Sense::click(),
+                );
+                if resp.clicked() {
+                    actions.push(ParaAction::FocusLast);
+                }
+            });
+
+        // 帧末统一应用动作（render 闭包借用已释放）
+        let mut status_dirty = false;
+        for a in actions {
+            match a {
+                ParaAction::SplitNewlines(i) => {
+                    if let Some(last) = self.editor.split_para_at_newlines(i) {
+                        self.pending_focus = Some(last);
+                        self.mark_changed();
+                        status_dirty = true;
+                    }
+                }
+                ParaAction::MergePrev(i) => {
+                    if let Some(t) = self.editor.merge_prev(i) {
+                        self.pending_focus = Some(t);
+                        self.mark_changed();
+                        status_dirty = true;
+                    }
+                }
+                ParaAction::FocusLast => {
+                    let last = self.editor.paras.len().saturating_sub(1);
+                    self.editor.current = last;
+                    self.pending_focus = Some(last);
+                    status_dirty = true;
+                }
+            }
+        }
+        if let Some(i) = changed_para {
+            self.editor.current = i;
+            self.mark_changed();
+            status_dirty = true;
+        }
+        if let Some(i) = focus_changed_para {
+            self.editor.current = i;
+            status_dirty = true;
+        }
+        if status_dirty {
+            self.refresh_para_status();
+        }
     }
 
     /// 扫描 exe 旁 presets/ 目录，刷新预设下拉（0 为占位符）。
