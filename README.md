@@ -19,7 +19,7 @@
 | | Python 版 | Rust 版 |
 | --- | --- | --- |
 | 渲染引擎 | numpy + scipy（FastEngine） | 纯 Rust：ab_glyph + 自研笔画扰动引擎 |
-| 界面 | PyQt6 | Slint（原生渲染，winit + femtovg，软件渲染兜底） |
+| 界面 | PyQt6 | egui（即时模式，glow/OpenGL 渲染，软件渲染兜底） |
 | PDF 导出 | ✅（同步对齐） | ✅ **300 DPI 位图层 PDF**（printpdf + lopdf） |
 | 错字率模拟 | ✅（同步对齐） | ✅ **错字率 + 划掉重写**（单线/双线/斜线/叉号四种涂改样式） |
 | docx 导入 | python-docx | zip + quick-xml 自研解析（对齐/首行缩进） |
@@ -32,8 +32,8 @@
 
 | 类别 | 选型 |
 | --- | --- |
-| 语言 | Rust（edition 2021，MSRV 1.92+） |
-| 界面 | Slint 1.x（winit + femtovg，软件渲染兜底） |
+| 语言 | Rust（edition 2021，MSRV 1.95+） |
+| 界面 | egui 0.36 + eframe 0.36（即时模式；glow/OpenGL 后端，软件渲染兜底，段落编辑器每行真对齐） |
 | 渲染引擎 | ab_glyph（字体光栅化）+ 自研笔画扰动（连通域 + 旋转平移） |
 | 图像处理 | image（PNG/webp/bmp 背景与导出） |
 | 文件对话框 | rfd（原生对话框，Linux 走 xdg-portal） |
@@ -61,7 +61,9 @@ cargo build --release
 
 ## 功能特性
 
-- **富文本输入**：多段文本、空行，所见即所得；回车分段、段首退格合并，自动滚入视野
+- **多行文本输入**：每段一个多行编辑器（对齐 Python 版 QTextEdit 块格式），
+  原生自动换行/滚动/选区/中文输入法；**对齐/缩进在编辑器内可视化显示**
+  （居中/右对齐段换行后**每一行都真对齐**，无需估宽）；回车分段、段首退格合并、粘贴多行自动拆段
 - **段落排版工具**：左对齐 / 居中 / 右对齐 / 首行缩进（2 字符，按当前字号换算），支持整段应用
 - **导入 docx**：自动解析段落对齐方式与首行缩进（沿样式链继承）
 - **字体 / 背景选择**：字体支持 `.ttf` `.ttc` `.otf`；背景支持 `.png` `.jpg` `.jpeg` `.webp` `.bmp`
@@ -72,7 +74,8 @@ cargo build --release
 - **边界提示（仅预览）**：开关 + 自定义颜色，直观看清实际渲染边界（默认关闭）
 - **写错字模拟**：错字率 0~30%，随机错字划掉后在正上方小一号重写（或后文正常位置重写），
   涂改样式可选单线 / 双线 / 斜线 / 叉号
-- **实时自动预览**：停止输入 300ms 后自动渲染，后台线程不卡界面；预览按比例降采样，导出始终全分辨率
+- **实时自动预览**：文本/参数停止变化 300ms 后自动渲染，后台线程不卡界面；
+  预览按比例降采样，导出始终全分辨率
 - **多页预览**：上一页 / 下一页 / 页码指示，自动分页
 - **预览底色切换**：浅灰绿 / 深灰两档
 - **预设系统**：`presets/` 目录内预设下拉一键切换，也支持保存 / 载入任意位置（JSON v2，兼容 Python 版）
@@ -83,7 +86,7 @@ cargo build --release
 
 ```
 src/
-├── main.rs            # 桌面入口（Slint GUI + 后台线程渲染调度）
+├── main.rs            # 桌面入口（转发给 ui::app::run → AppState）
 ├── lib.rs             # 库入口
 ├── core/              # 渲染引擎（纯 Rust，无 GUI 依赖）
 │   ├── models.rs      # 参数模型 + 校验（对齐 Python 版默认值）
@@ -93,7 +96,12 @@ src/
 │   ├── engine.rs      # 引擎接口 + 预览/导出/PDF 全链路
 │   ├── presets.rs     # 预设读写（JSON v2 + 便携相对路径）
 │   └── docx_io.rs     # docx 解析（zip + quick-xml）
-├── ui/                # Slint 界面（main_window.slint + theme.slint）
+├── ui/                # egui 界面
+│   ├── app.rs         # AppState + eframe::App（状态/帧循环/后台调度）
+│   ├── editor.rs      # 段落编辑器（每段一个 TextEdit，纯 String 模型 + 拆分/合并纯函数可测）
+│   ├── params.rs      # UI 参数收集/回填纯函数（可测）
+│   ├── controls.rs    # 自定义控件（DragValue 数值输入、分组框）
+│   └── theme.rs       # 配色与视觉样式
 backgrounds/           # 内置背景素材（原创，随仓库分发）
 presets/               # 内置预设示例（JSON v2，相对路径引用资源）
 packaging/             # 打包辅助（fonts-README.txt）
@@ -106,7 +114,8 @@ docs/                  # 架构 / 迁移计划 / 许可策略
 
 - `core/` 不依赖任何 GUI 模块；GUI 只做控件映射与任务调度
 - 数据流：GUI → `HandwritingParams`（校验）→ 引擎 → 图片
-- 渲染/导出在后台线程执行，`upgrade_in_event_loop` 切回 UI 线程应用结果
+- 渲染/导出在后台线程执行（`std::thread::spawn` + `mpsc` channel），结果以消息回到 UI 线程，
+  完成时 `request_repaint` 唤醒即时模式 UI
 
 ## 预设文件格式
 
@@ -192,7 +201,8 @@ cargo build --release
 ## 许可
 
 - 应用代码：MIT（见 [LICENSE](LICENSE)）
-- Slint：crates.io 默认 **GPLv3**（本项目开源，程序整体按 GPLv3 分发）
+- 全部依赖为宽松许可（MIT / Apache-2.0 / MIT OR Apache-2.0），无 GPL 传染，
+  程序整体可按 MIT 分发（详见 [许可策略](docs/03-licensing.md)）
 
 ## 相关文档
 

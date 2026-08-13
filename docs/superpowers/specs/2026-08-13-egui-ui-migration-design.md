@@ -1,8 +1,16 @@
 # 设计：egui UI 迁移（2026-08-13）
 
-状态：待实施（由迁移者按本文档执行）
-目标分支：`feat/egui-ui`（从 `feat/iced-ui` 或 `master` 切出）
-上游现状：`master` 为 Slint 版；`feat/iced-ui` 为 iced 0.14 版（本次迁移的起点）
+状态：已实施（`feat/egui-ui` 分支，2026-08-13）
+目标分支：`feat/egui-ui`（从 `feat/iced-ui` 切出）
+上游现状：`master` 为 Slint 版；`feat/iced-ui` 为 iced 0.14 版；`feat/egui-ui` 为 egui 0.36 版（本次迁移完成）
+
+> 实施差异备注（egui 0.36 实际 API 与本文档设计稿的偏差）：
+> - eframe 0.36 的 `App` trait 主方法由 `update(ctx)` 改为 `logic(ctx)` + `ui(&mut Ui)`
+>   两个方法（状态层 / 渲染层分离），已按此实现。
+> - `Rounding` → `CornerRadius`；`Frame::none`/`Button::rounding` 等 API 改名
+>   （`Frame::canvas`/`corner_radius`）；`ctx.style_mut` → `style_mut_of` + `set_visuals`。
+> - 后台任务改用**单一持久 mpsc channel**（所有 worker 共用 `worker_tx`/`worker_rx`），
+>   而非设计稿的「每任务一个 channel」，以正确处理并发 worker 不丢消息。
 
 ---
 

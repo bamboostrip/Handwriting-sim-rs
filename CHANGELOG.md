@@ -10,6 +10,23 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **UI 框架迁移到 egui 0.36 / eframe 0.36**（MIT/Apache-2.0，即时模式 GUI）
+  - 段落编辑器实现**编辑器内可视化对齐的完整方案**：居中/右对齐段在自动
+    换行后**每一行都真对齐**（epaint `halign_and_justify_row`），无估宽 hack、
+    无超长段回退——彻底解决此前 Slint/iced 版的文本框痛点
+  - 编辑器逻辑层改为纯 `String` 模型（不再依赖框架的 TextEditor Content），
+    消除 iced `Content::move_to` 的非 ASCII 光标 bug；回车分段、段首退格
+    合并、粘贴多行拆段、程序化聚焦均保留
+  - 渲染后端：glow（OpenGL 2.0+），软件渲染兜底（Windows WARP / Linux
+    llvmpipe），保留「无 GPU 老机器/虚拟机可跑」目标
+  - 后台渲染/文件对话框改用 `std::thread::spawn` + `mpsc` channel（去掉
+    async runtime 依赖）；预览图用 `TextureHandle` 缓存，翻页/新结果才重建
+  - 移除 iced / tokio 依赖；`core/` 引擎与 `ui/params.rs` 零改动复用
+  - 测试：`cargo test` 82 例全绿（core 引擎 + editor 段落纯函数 + params
+    收集/回填 + 4 集成测试）、`cargo clippy --all-targets -- -D warnings` 零警告
+
 ## [0.1.0] - 2026-08-11
 
 ### Added
