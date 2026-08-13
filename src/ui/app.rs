@@ -534,84 +534,92 @@ impl eframe::App for AppState {
             .fill(theme::BG)
             .inner_margin(8.0)
             .show(ui, |ui| {
-                ui.horizontal_top(|ui| {
+                let total_w = ui.available_width();
+                let total_h = ui.available_height();
+                let status_h = 20.0;
+                let main_h = (total_h - status_h - 4.0).max(120.0);
+                let left_w = (total_w - PANEL_WIDTH - 8.0).max(120.0);
+                ui.horizontal(|ui| {
                     // ---- 左侧：预览区（弹性）+ 翻页 ----
-                    ui.vertical(|ui| {
-                        ui.set_min_width(ui.available_width() - PANEL_WIDTH - 8.0);
-                        self.preview_area(ui);
-                        ui.horizontal(|ui| {
-                            if ui.add(theme::green_button("◀ 上一页")).clicked()
-                                && self.preview_index > 0
-                            {
-                                self.preview_index -= 1;
-                                self.show_page();
-                            }
-                            ui.label(self.page_text.as_str());
-                            if ui.add(theme::green_button("下一页 ▶")).clicked()
-                                && self.preview_index + 1 < self.preview_pages.len()
-                            {
-                                self.preview_index += 1;
-                                self.show_page();
-                            }
-                            if ui.add(theme::green_button("预览底色")).clicked() {
-                                self.preview_bg_idx =
-                                    (self.preview_bg_idx + 1) % PREVIEW_BG_COLORS.len();
-                            }
+                    ui.allocate_ui(egui::vec2(left_w, main_h), |ui| {
+                        let paging_h = 28.0;
+                        ui.vertical(|ui| {
+                            self.preview_area(ui, main_h - paging_h);
+                            ui.horizontal(|ui| {
+                                if ui.add(theme::green_button("◀ 上一页")).clicked()
+                                    && self.preview_index > 0
+                                {
+                                    self.preview_index -= 1;
+                                    self.show_page();
+                                }
+                                ui.label(self.page_text.as_str());
+                                if ui.add(theme::green_button("下一页 ▶")).clicked()
+                                    && self.preview_index + 1 < self.preview_pages.len()
+                                {
+                                    self.preview_index += 1;
+                                    self.show_page();
+                                }
+                                if ui.add(theme::green_button("预览底色")).clicked() {
+                                    self.preview_bg_idx =
+                                        (self.preview_bg_idx + 1) % PREVIEW_BG_COLORS.len();
+                                }
+                            });
                         });
                     });
                     // ---- 右侧：参数面板（460）----
-                    ui.vertical(|ui| {
-                        ui.set_width(PANEL_WIDTH);
-                        egui::ScrollArea::vertical()
-                            .id_salt("param_scroll")
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
-                                crate::ui::controls::section_label(ui, "待处理文本");
-                                ui.horizontal_wrapped(|ui| {
-                                    if ui.add(theme::green_button("左对齐")).clicked() {
-                                        self.editor.set_align(0);
-                                        self.mark_changed();
-                                        self.refresh_para_status();
-                                    }
-                                    if ui.add(theme::green_button("居中")).clicked() {
-                                        self.editor.set_align(1);
-                                        self.mark_changed();
-                                        self.refresh_para_status();
-                                    }
-                                    if ui.add(theme::green_button("右对齐")).clicked() {
-                                        self.editor.set_align(2);
-                                        self.mark_changed();
-                                        self.refresh_para_status();
-                                    }
-                                    if ui.add(theme::green_button("首行缩进")).clicked() {
-                                        self.editor.toggle_indent(true);
-                                        self.mark_changed();
-                                        self.refresh_para_status();
-                                    }
-                                    if ui.add(theme::green_button("取消缩进")).clicked() {
-                                        self.editor.toggle_indent(false);
-                                        self.mark_changed();
-                                        self.refresh_para_status();
-                                    }
-                                    if ui.add(theme::green_button("导入docx")).clicked() {
-                                        self.pick_docx(ui.ctx());
-                                    }
+                    ui.allocate_ui(egui::vec2(PANEL_WIDTH, main_h), |ui| {
+                        ui.vertical(|ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("param_scroll")
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    crate::ui::controls::section_label(ui, "待处理文本");
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui.add(theme::green_button("左对齐")).clicked() {
+                                            self.editor.set_align(0);
+                                            self.mark_changed();
+                                            self.refresh_para_status();
+                                        }
+                                        if ui.add(theme::green_button("居中")).clicked() {
+                                            self.editor.set_align(1);
+                                            self.mark_changed();
+                                            self.refresh_para_status();
+                                        }
+                                        if ui.add(theme::green_button("右对齐")).clicked() {
+                                            self.editor.set_align(2);
+                                            self.mark_changed();
+                                            self.refresh_para_status();
+                                        }
+                                        if ui.add(theme::green_button("首行缩进")).clicked() {
+                                            self.editor.toggle_indent(true);
+                                            self.mark_changed();
+                                            self.refresh_para_status();
+                                        }
+                                        if ui.add(theme::green_button("取消缩进")).clicked() {
+                                            self.editor.toggle_indent(false);
+                                            self.mark_changed();
+                                            self.refresh_para_status();
+                                        }
+                                        if ui.add(theme::green_button("导入docx")).clicked() {
+                                            self.pick_docx(ui.ctx());
+                                        }
+                                    });
+                                    crate::ui::controls::hint_label(ui, self.para_status.as_str());
+                                    self.editor_view(ui);
+                                    self.param_panel(ui);
                                 });
-                                crate::ui::controls::hint_label(ui, self.para_status.as_str());
-                                self.editor_view(ui);
-                                self.param_panel(ui);
+                            // 主按钮（不随面板滚动）
+                            ui.horizontal(|ui| {
+                                if ui.add(theme::primary_button("预览")).clicked() {
+                                    self.regenerate();
+                                }
+                                if ui.add(theme::primary_button("导出")).clicked() {
+                                    self.export_files(ui.ctx());
+                                }
+                                if ui.add(theme::primary_button("导出 PDF")).clicked() {
+                                    self.export_pdf(ui.ctx());
+                                }
                             });
-                        // 主按钮（不随面板滚动）
-                        ui.horizontal(|ui| {
-                            if ui.add(theme::primary_button("预览")).clicked() {
-                                self.regenerate();
-                            }
-                            if ui.add(theme::primary_button("导出")).clicked() {
-                                self.export_files(ui.ctx());
-                            }
-                            if ui.add(theme::primary_button("导出 PDF")).clicked() {
-                                self.export_pdf(ui.ctx());
-                            }
                         });
                     });
                 });
@@ -630,10 +638,11 @@ impl eframe::App for AppState {
 
 impl AppState {
     /// 预览区：底色框 + 预览图（contain 居中，TextureHandle 缓存，翻页/新结果才重建）。
-    fn preview_area(&mut self, ui: &mut egui::Ui) {
+    /// `height` 由调用方计算（= 主区域高度 - 翻页行高），避免占用全部高度挤掉其他行。
+    fn preview_area(&mut self, ui: &mut egui::Ui, height: f32) {
         let bg = PREVIEW_BG_COLORS[self.preview_bg_idx];
-        let avail = ui.available_size();
-        let (rect, _resp) = ui.allocate_exact_size(avail, egui::Sense::click());
+        let size = egui::vec2(ui.available_width(), height.max(40.0));
+        let (rect, _resp) = ui.allocate_exact_size(size, egui::Sense::click());
         ui.painter().rect(
             rect,
             6.0,
