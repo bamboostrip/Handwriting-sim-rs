@@ -29,6 +29,8 @@ eframe = { version = "0.36", default-features = false, features = [
     "wayland",
     "x11",
 ] }
+# egui 与 eframe 同版本线，直接依赖以便用 egui:: 路径（cargo 会与 eframe 内部版本统一）。
+egui = "0.36"
 ab_glyph = "0.2"
 image = "0.25"
 rand = "0.9"
