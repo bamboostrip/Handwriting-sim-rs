@@ -243,7 +243,7 @@ impl eframe::App for AppState {
                                 });
                                 crate::ui::controls::hint_label(ui, self.para_status.as_str());
                                 self.editor_view(ui);
-                                ui.label("（字体/背景/参数 - 阶段 2/3 实现）");
+                                self.param_panel(ui);
                             });
                     });
                 });
@@ -394,6 +394,171 @@ impl AppState {
         }
     }
 
+    /// 右侧参数面板（全部数值控件；按钮类动作在阶段 3 接入后台线程）。
+    fn param_panel(&mut self, ui: &mut egui::Ui) {
+        use crate::ui::controls::{field_label, group_box, hint_label, num_field};
+        let mut changed = false;
+
+        // ---- 字体 / 背景（路径可直接编辑；「选择」按钮阶段 3）----
+        ui.horizontal(|ui| {
+            field_label(ui, "字体");
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.ui.font_path)
+                        .desired_width(220.0)
+                        .hint_text("未选择字体"),
+                )
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            field_label(ui, "背景");
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.ui.background_path)
+                        .desired_width(220.0)
+                        .hint_text("未选择背景"),
+                )
+                .changed();
+        });
+        // ---- 文字颜色 ----
+        ui.horizontal(|ui| {
+            field_label(ui, "文字颜色");
+            changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.ui.font_color)
+                        .desired_width(96.0)
+                        .hint_text("#000000"),
+                )
+                .changed();
+        });
+        // ---- 预设（下拉直接载入；载入/保存文件按钮阶段 3）----
+        ui.horizontal(|ui| {
+            field_label(ui, "预设");
+            let chosen = self
+                .preset_chosen
+                .clone()
+                .unwrap_or_else(|| PRESET_PLACEHOLDER.to_string());
+            let names: Vec<String> = self.preset_names.clone();
+            egui::ComboBox::from_id_salt("preset_combo")
+                .selected_text(chosen.as_str())
+                .show_ui(ui, |ui| {
+                    for name in &names {
+                        if ui.selectable_label(name.as_str() == chosen.as_str(), name.as_str()).clicked() {
+                            self.select_preset(name.clone());
+                        }
+                    }
+                });
+        });
+
+        // ---- 排版参数 ----
+        group_box(ui, "排版参数", |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(86.0);
+                ui.label("数值");
+                ui.add_space(40.0);
+                ui.label("扰动 σ");
+            });
+            changed |= param_row(ui, "字水平间距", &mut self.ui.word_spacing, 0, 100, &mut self.ui.word_spacing_sigma, 0, 20);
+            changed |= param_row(ui, "字竖直间距", &mut self.ui.line_spacing, 0, 200, &mut self.ui.line_spacing_sigma, 0, 20);
+            changed |= param_row(ui, "字体大小", &mut self.ui.font_size, 8, 200, &mut self.ui.font_size_sigma, 0, 20);
+        });
+        // ---- 笔画扰动 ----
+        group_box(ui, "笔画扰动", |ui| {
+            ui.horizontal(|ui| {
+                field_label(ui, "水平笔画位移");
+                changed |= num_field(ui, &mut self.ui.perturb_x, 0, 20).changed();
+            });
+            ui.horizontal(|ui| {
+                field_label(ui, "竖直笔画位移");
+                changed |= num_field(ui, &mut self.ui.perturb_y, 0, 20).changed();
+            });
+            ui.horizontal(|ui| {
+                field_label(ui, "笔画旋转");
+                changed |= ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.ui.perturb_theta)
+                            .desired_width(70.0)
+                            .hint_text("0.05"),
+                    )
+                    .changed();
+            });
+        });
+        // ---- 写错字 ----
+        group_box(ui, "写错字", |ui| {
+            ui.horizontal(|ui| {
+                field_label(ui, "错字率");
+                changed |= ui
+                    .add(egui::Slider::new(&mut self.ui.miswrite_rate, 0.0..=30.0))
+                    .changed();
+                ui.label(format!("{:.1}%", self.ui.miswrite_rate));
+            });
+            ui.horizontal(|ui| {
+                field_label(ui, "重写方式");
+                let modes = ["右上方重写", "后文重写"];
+                let cur = self.ui.miswrite_mode.clamp(0, 1) as usize;
+                egui::ComboBox::from_id_salt("miswrite_mode")
+                    .selected_text(modes[cur])
+                    .show_ui(ui, |ui| {
+                        for (i, m) in modes.iter().enumerate() {
+                            if ui.selectable_label(i == cur, *m).clicked() {
+                                self.ui.miswrite_mode = i as i32;
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                field_label(ui, "涂改方式");
+                let sts = ["单横线", "双横线", "斜线", "叉号"];
+                let cur = self.ui.miswrite_strikeout.clamp(0, 3) as usize;
+                egui::ComboBox::from_id_salt("miswrite_strike")
+                    .selected_text(sts[cur])
+                    .show_ui(ui, |ui| {
+                        for (i, s) in sts.iter().enumerate() {
+                            if ui.selectable_label(i == cur, *s).clicked() {
+                                self.ui.miswrite_strikeout = i as i32;
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+        });
+        // ---- 边距 ----
+        group_box(ui, "边距", |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(120.0);
+                changed |= num_field(ui, &mut self.ui.margin_top, 0, 3000).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(60.0);
+                changed |= num_field(ui, &mut self.ui.margin_left, 0, 3000).changed();
+                ui.label("边距");
+                changed |= num_field(ui, &mut self.ui.margin_right, 0, 3000).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(120.0);
+                changed |= num_field(ui, &mut self.ui.margin_bottom, 0, 3000).changed();
+            });
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(&mut self.ui.bounds_visible, "边界提示(仅预览)")
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.ui.bounds_color)
+                            .desired_width(96.0)
+                            .hint_text("#4ca6a6"),
+                    )
+                    .changed();
+            });
+        });
+        hint_label(ui, "提示：选择字体与背景后自动预览，也可点击「预览」立即渲染");
+
+        if changed {
+            self.mark_changed();
+        }
+    }
+
     /// 扫描 exe 旁 presets/ 目录，刷新预设下拉（0 为占位符）。
     fn refresh_preset_combo(&mut self) {
         self.preset_names = vec![PRESET_PLACEHOLDER.to_string()];
@@ -413,6 +578,44 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// 下拉选中预设：从 presets/ 目录载入（同步，不阻塞）。
+    fn select_preset(&mut self, name: String) {
+        if name == PRESET_PLACEHOLDER {
+            self.preset_chosen = None;
+            return;
+        }
+        let idx = self
+            .preset_names
+            .iter()
+            .position(|n| *n == name)
+            .and_then(|i| i.checked_sub(1));
+        let Some(idx) = idx else {
+            return;
+        };
+        let Some(path) = self.preset_paths.get(idx).cloned() else {
+            return;
+        };
+        match crate::core::presets::load(&path) {
+            Ok(p) => {
+                self.preset_chosen = Some(name);
+                self.apply_preset_params(&p);
+                self.status = format!("已载入预设：{}", path.display());
+            }
+            Err(e) => self.status = format!("载入失败：{e}"),
+        }
+    }
+
+    /// 把预设参数回填 UI（保留边界提示开关/颜色，对齐 iced 版行为）。
+    fn apply_preset_params(&mut self, p: &HandwritingParams) {
+        let bounds_visible = self.ui.bounds_visible;
+        let bounds_color = self.ui.bounds_color.clone();
+        self.ui = crate::ui::params::apply_preset(p);
+        self.ui.bounds_visible = bounds_visible;
+        self.ui.bounds_color = bounds_color;
+        self.preset_params = Some(p.clone());
+        self.mark_changed();
     }
 
     /// 当前段格式提示（对齐 iced 版 `refresh_para_status`）。
@@ -459,4 +662,27 @@ impl AppState {
             .count();
         self.para_status = format!("第 {} 段（{} 字）：{align}{indent_txt}{seg_txt}", idx + 1, count);
     }
+}
+
+/// 「标签 | 数值 | σ | 数值」参数行（排版参数表格用），返回是否有控件变化。
+fn param_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    v: &mut i32,
+    vmin: i32,
+    vmax: i32,
+    s: &mut i32,
+    smin: i32,
+    smax: i32,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        crate::ui::controls::field_label(ui, label);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            changed |= crate::ui::controls::num_field(ui, s, smin, smax).changed();
+            ui.label("σ");
+            changed |= crate::ui::controls::num_field(ui, v, vmin, vmax).changed();
+        });
+    });
+    changed
 }
