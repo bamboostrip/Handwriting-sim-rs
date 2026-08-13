@@ -1035,7 +1035,7 @@ mod tests {
         let ch = '中';
         let wrong = get_wrong_char(ch, &mut rng);
         assert_ne!(ch, wrong);
-        assert!(wrong >= '\u{4e00}' && wrong <= '\u{9fa5}');
+        assert!(('\u{4e00}'..='\u{9fa5}').contains(&wrong));
 
         let ch_eng = 'A';
         let wrong_eng = get_wrong_char(ch_eng, &mut rng);

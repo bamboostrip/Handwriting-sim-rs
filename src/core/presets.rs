@@ -323,8 +323,10 @@ mod tests {
     #[test]
     fn test_presets_includes_strikeout_style() {
         use crate::core::models::StrikeoutStyle;
-        let mut p = HandwritingParams::default();
-        p.miswrite_strikeout_style = StrikeoutStyle::Cross;
+        let p = HandwritingParams {
+            miswrite_strikeout_style: StrikeoutStyle::Cross,
+            ..Default::default()
+        };
         let map = to_preset_map(&p);
         assert_eq!(map.get("miswrite_strikeout_style").unwrap().as_str().unwrap(), "cross");
         

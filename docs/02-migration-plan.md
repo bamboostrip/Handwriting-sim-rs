@@ -1,7 +1,7 @@
 # 迁移计划（从 Python 版）
 
 目标：把 `Handwriting-simulator`（Python + PyQt6 + numpy/scipy）迁移为
-`handwrite-sim`（Rust + Slint + 自研引擎），按阶段推进、逐模块验证。
+`handwrite-sim`（Rust + Iced + 自研引擎），按阶段推进、逐模块验证。
 
 ## 迁移原则
 
@@ -19,11 +19,11 @@
 ### 阶段 1：基础搭建（当前）
 - [x] 项目骨架、依赖、测试、文档
 - [x] 纯文本路径：排版 + 笔画扰动 + 预览/导出
-- [x] Slint 界面骨架
+- [x] Iced 界面骨架（2026-08 UI 重构后）
 
 ### 阶段 2：GUI 接通
-- [ ] `HandwritingParams` ↔ Slint 控件双向绑定（字号/行距/字距/扰动/文本）
-- [ ] 预览图显示（Slint `Image` + `SharedPixelBuffer`）
+- [x] `HandwritingParams` ↔ Iced 控件绑定（2026-08 重构后：纯函数收集/回填）
+- [x] 预览图显示（Iced `Image` + `Handle::from_rgba`）
 - [ ] 参数变更 → 防抖重新渲染（对齐 Python 版自动预览机制）
 - [ ] 文件对话框（`rfd`）：选字体/背景/导出目录
 

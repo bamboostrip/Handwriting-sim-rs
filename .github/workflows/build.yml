@@ -36,7 +36,7 @@ jobs:
         with:
           workspaces: .
 
-      # Slint 的 winit-x11 后端在 Linux 需要 xcb/xkbcommon/fontconfig 开发库
+      # egui/winit 的 x11 后端在 Linux 需要 xcb/xkbcommon/fontconfig 开发库
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
