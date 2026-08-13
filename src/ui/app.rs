@@ -31,9 +31,19 @@ pub(crate) const EDITOR_FONT_SIZE: f32 = 13.0;
 /// 右侧参数面板宽度（对齐 iced 版 460）。
 const PANEL_WIDTH: f32 = 460.0;
 
-/// 后台线程 → UI 的消息（mpsc channel）。阶段 3 扩展具体变体。
+/// 后台线程 → UI 的消息（单一持久 mpsc channel，所有 worker 共用，
+/// 避免并发 worker 互相覆盖接收端导致丢消息）。
 enum WorkerMsg {
     RenderDone(Result<Vec<RgbaImage>, String>),
+    ExportDone(Result<Vec<PathBuf>, String>),
+    PdfDone(Result<(), String>),
+    FontPicked(Option<PathBuf>),
+    BackgroundPicked(Option<PathBuf>),
+    DocxPicked(Option<PathBuf>),
+    PresetPicked(Option<PathBuf>),
+    PresetSavePath(Option<PathBuf>),
+    ExportDirPicked(Option<PathBuf>),
+    PdfPathPicked(Option<PathBuf>),
 }
 
 /// 编辑器在一帧内收集的动作（帧末统一应用，避免渲染迭代中改 vec 的借用冲突）。
@@ -70,8 +80,9 @@ pub struct AppState {
     last_edit: Instant,
     dirty: bool,
     rendering: bool,
-    /// 后台渲染结果接收端。
-    render_rx: Option<std::sync::mpsc::Receiver<WorkerMsg>>,
+    /// 后台 worker → UI 的持久 channel（boot 时创建）。
+    worker_tx: Option<std::sync::mpsc::Sender<WorkerMsg>>,
+    worker_rx: Option<std::sync::mpsc::Receiver<WorkerMsg>>,
     /// 编辑器交互收集到的待聚焦段（拆段/合并后）。
     pending_focus: Option<usize>,
 }
@@ -100,7 +111,8 @@ impl Default for AppState {
             last_edit: Instant::now(),
             dirty: false,
             rendering: false,
-            render_rx: None,
+            worker_tx: None,
+            worker_rx: None,
             pending_focus: None,
         }
     }
@@ -113,8 +125,10 @@ pub fn run() -> eframe::Result {
         .with_inner_size([1280.0, 840.0])
         .with_icon(icon)
         .with_title("手写模拟器");
-    let mut opts = eframe::NativeOptions::default();
-    opts.viewport = viewport;
+    let opts = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
     eframe::run_native(
         "手写模拟器",
         opts,
@@ -140,6 +154,7 @@ fn load_icon() -> egui::IconData {
 }
 
 impl AppState {
+    #[allow(clippy::field_reassign_with_default)] // worker channel 在 default 之后创建
     fn boot(cc: &eframe::CreationContext<'_>) -> Self {
         // 中文字体加载 + 视觉样式
         let mut fonts = egui::FontDefinitions::default();
@@ -147,6 +162,10 @@ impl AppState {
         cc.egui_ctx.set_fonts(fonts);
         theme::apply_visuals(&cc.egui_ctx);
         let mut app = Self::default();
+        // 后台 worker channel（持久，所有后台任务共用）
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.worker_tx = Some(tx);
+        app.worker_rx = Some(rx);
         app.refresh_preset_combo();
         app.refresh_para_status();
         app
@@ -156,6 +175,313 @@ impl AppState {
     pub(crate) fn mark_changed(&mut self) {
         self.dirty = true;
         self.last_edit = Instant::now();
+    }
+
+    /// 在后台线程执行闭包，结果经持久 channel 回 UI，完成时 request_repaint 唤醒。
+    fn spawn_worker<F>(&self, ctx: &egui::Context, f: F)
+    where
+        F: FnOnce() -> WorkerMsg + Send + 'static,
+    {
+        let Some(tx) = &self.worker_tx else { return };
+        let tx = tx.clone();
+        let ctx2 = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+            ctx2.request_repaint();
+        });
+    }
+
+    /// 分发后台 worker 消息（在 logic 里轮询后调用）。
+    fn handle_worker_msg(&mut self, msg: WorkerMsg, ctx: &egui::Context) {
+        match msg {
+            WorkerMsg::RenderDone(Ok(pages)) => {
+                self.preview_pages = pages;
+                self.preview_index = 0;
+                self.preview_texture = None; // 触发纹理重建
+                self.show_page();
+                self.rendering = false;
+                self.status = format!("预览完成（seed={}），共 {} 页", self.seed, self.preview_pages.len());
+            }
+            WorkerMsg::RenderDone(Err(e)) => {
+                self.rendering = false;
+                self.status = format!("渲染失败：{e}");
+            }
+            WorkerMsg::ExportDone(Ok(files)) => {
+                self.status = format!("已导出 {} 个文件", files.len());
+            }
+            WorkerMsg::ExportDone(Err(e)) => self.status = format!("导出失败：{e}"),
+            WorkerMsg::PdfDone(Ok(())) => self.status = "PDF 已导出".to_string(),
+            WorkerMsg::PdfDone(Err(e)) => self.status = format!("导出 PDF 失败：{e}"),
+            WorkerMsg::FontPicked(Some(p)) => {
+                self.ui.font_path = p.to_string_lossy().into_owned();
+                self.load_handwrite_font(ctx);
+                self.mark_changed();
+            }
+            WorkerMsg::FontPicked(None) => {}
+            WorkerMsg::BackgroundPicked(Some(p)) => {
+                self.ui.background_path = p.to_string_lossy().into_owned();
+                self.mark_changed();
+            }
+            WorkerMsg::BackgroundPicked(None) => {}
+            WorkerMsg::DocxPicked(Some(p)) => self.import_docx(p),
+            WorkerMsg::DocxPicked(None) => {}
+            WorkerMsg::PresetPicked(Some(p)) => self.load_preset_from(p),
+            WorkerMsg::PresetPicked(None) => {}
+            WorkerMsg::PresetSavePath(Some(p)) => self.do_save_preset(p),
+            WorkerMsg::PresetSavePath(None) => self.pending_save = None,
+            WorkerMsg::ExportDirPicked(Some(d)) => self.do_export(d, ctx),
+            WorkerMsg::ExportDirPicked(None) => {}
+            WorkerMsg::PdfPathPicked(Some(p)) => self.do_export_pdf(p, ctx),
+            WorkerMsg::PdfPathPicked(None) => {}
+        }
+    }
+
+    // ---- 防抖 / 自动渲染 ----
+
+    /// 停止输入满 300ms 且无渲染进行中 → 后台线程渲染预览。
+    fn maybe_render(&mut self, ctx: &egui::Context) {
+        if !self.dirty || self.rendering {
+            return;
+        }
+        if self.last_edit.elapsed() < std::time::Duration::from_millis(PREVIEW_DEBOUNCE_MS) {
+            // 还没到时间 → 安排一次到点唤醒
+            ctx.request_repaint_after(std::time::Duration::from_millis(PREVIEW_DEBOUNCE_MS));
+            return;
+        }
+        self.dirty = false;
+        let font_size = self.ui.font_size as f32;
+        let (paras, has_format) =
+            crate::ui::editor::paragraphs_from_editor(&self.editor, font_size);
+        let params = match crate::ui::params::collect_params(
+            &self.ui,
+            self.preset_params.as_ref(),
+            paras,
+            has_format,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = format!("参数错误：{e}");
+                return;
+            }
+        };
+        let bounds_visible = self.ui.bounds_visible;
+        let bounds_color =
+            crate::core::models::parse_color(&self.ui.bounds_color).unwrap_or([76, 166, 166]);
+        self.seed += 1;
+        let seed = self.seed;
+        self.rendering = true;
+        self.status = "渲染中…".to_string();
+        self.spawn_worker(ctx, move || {
+            let r = (|| -> Result<Vec<RgbaImage>, String> {
+                let mut pages = crate::core::engine::render_all_pages_preview(&params, seed)
+                    .map_err(|e| e.to_string())?;
+                if bounds_visible {
+                    for page in pages.iter_mut() {
+                        *page = crate::core::engine::overlay_bounds(page, &params, bounds_color);
+                    }
+                }
+                Ok(pages)
+            })();
+            WorkerMsg::RenderDone(r)
+        });
+    }
+
+    /// 立即触发渲染（不等防抖）。
+    fn regenerate(&mut self) {
+        self.mark_changed();
+        self.last_edit =
+            Instant::now() - std::time::Duration::from_millis(PREVIEW_DEBOUNCE_MS);
+    }
+
+    // ---- 文件对话框（rfd 阻塞调用走后台线程）----
+
+    fn pick_font(&self, ctx: &egui::Context) {
+        self.spawn_worker(ctx, || {
+            WorkerMsg::FontPicked(
+                rfd::FileDialog::new()
+                    .add_filter("字体文件", &["ttf", "ttc", "otf"])
+                    .pick_file(),
+            )
+        });
+    }
+
+    fn pick_background(&self, ctx: &egui::Context) {
+        self.spawn_worker(ctx, || {
+            WorkerMsg::BackgroundPicked(
+                rfd::FileDialog::new()
+                    .add_filter("图片", &["png", "jpg", "jpeg", "webp", "bmp"])
+                    .pick_file(),
+            )
+        });
+    }
+
+    fn pick_docx(&self, ctx: &egui::Context) {
+        self.spawn_worker(ctx, || {
+            WorkerMsg::DocxPicked(
+                rfd::FileDialog::new().add_filter("Word 文档", &["docx"]).pick_file(),
+            )
+        });
+    }
+
+    fn pick_preset_file(&self, ctx: &egui::Context) {
+        self.spawn_worker(ctx, || {
+            WorkerMsg::PresetPicked(
+                rfd::FileDialog::new().add_filter("预设", &["json"]).pick_file(),
+            )
+        })
+    }
+
+    fn pick_export_dir(&self, ctx: &egui::Context) {
+        self.spawn_worker(ctx, || WorkerMsg::ExportDirPicked(rfd::FileDialog::new().pick_folder()))
+    }
+
+    fn pick_pdf_path(&self, ctx: &egui::Context) {
+        self.spawn_worker(ctx, || {
+            WorkerMsg::PdfPathPicked(
+                rfd::FileDialog::new()
+                    .add_filter("PDF", &["pdf"])
+                    .set_file_name("handwrite.pdf")
+                    .save_file(),
+            )
+        })
+    }
+
+    // ---- 预设 / docx / 导出 / 字体 ----
+
+    fn load_preset_from(&mut self, path: PathBuf) {
+        match crate::core::presets::load(&path) {
+            Ok(p) => {
+                self.apply_preset_params(&p);
+                self.status = "预设已载入（含边距/扰动参数）".to_string();
+            }
+            Err(e) => self.status = format!("载入失败：{e}"),
+        }
+    }
+
+    fn save_preset(&mut self, ctx: &egui::Context) {
+        let font_size = self.ui.font_size as f32;
+        let (paras, has_format) =
+            crate::ui::editor::paragraphs_from_editor(&self.editor, font_size);
+        match crate::ui::params::collect_params(&self.ui, self.preset_params.as_ref(), paras, has_format) {
+            Ok(params) => {
+                self.pending_save = Some(params);
+                let dir = crate::core::presets::assets_root().join("presets");
+                self.spawn_worker(ctx, move || {
+                    WorkerMsg::PresetSavePath(
+                        rfd::FileDialog::new()
+                            .add_filter("预设", &["json"])
+                            .set_directory(dir)
+                            .set_file_name("preset.json")
+                            .save_file(),
+                    )
+                });
+            }
+            Err(e) => self.status = format!("参数错误：{e}"),
+        }
+    }
+
+    fn do_save_preset(&mut self, path: PathBuf) {
+        if let Some(params) = self.pending_save.take() {
+            match crate::core::presets::save(&params, &path) {
+                Ok(()) => {
+                    self.status = format!("预设已保存：{}", path.display());
+                    if path.starts_with(crate::core::presets::assets_root().join("presets")) {
+                        self.refresh_preset_combo();
+                    }
+                }
+                Err(e) => self.status = format!("保存失败：{e}"),
+            }
+        }
+    }
+
+    fn import_docx(&mut self, path: PathBuf) {
+        let font_size = self.ui.font_size as f32;
+        match crate::core::docx_io::load_paragraphs(&path, font_size) {
+            Ok(paras) => {
+                use crate::core::models::Align;
+                let text = paras.iter().map(|p| p.text.clone()).collect::<Vec<_>>().join("\n");
+                let formats = paras
+                    .iter()
+                    .map(|p| crate::ui::editor::ParaFormat {
+                        align: match p.align {
+                            Align::Center => 1,
+                            Align::Right => 2,
+                            _ => 0,
+                        },
+                        indent_em: if font_size > 0.0 { p.first_line_indent / font_size } else { 0.0 },
+                    })
+                    .collect();
+                self.editor.set_text(&text, formats);
+                self.refresh_para_status();
+                self.mark_changed();
+                self.status = format!("已导入 {} 个段落，回车分段、按钮设格式", paras.len());
+            }
+            Err(e) => self.status = format!("导入 docx 失败：{e}"),
+        }
+    }
+
+    fn export_files(&mut self, ctx: &egui::Context) {
+        self.pick_export_dir(ctx);
+    }
+
+    fn do_export(&mut self, dir: PathBuf, ctx: &egui::Context) {
+        let font_size = self.ui.font_size as f32;
+        let (paras, has_format) =
+            crate::ui::editor::paragraphs_from_editor(&self.editor, font_size);
+        let params =
+            match crate::ui::params::collect_params(&self.ui, self.preset_params.as_ref(), paras, has_format) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.status = format!("参数错误：{e}");
+                    return;
+                }
+            };
+        let seed = self.seed;
+        self.status = "导出中…".to_string();
+        self.spawn_worker(ctx, move || {
+            WorkerMsg::ExportDone(crate::core::engine::export(&params, &dir, seed).map_err(|e| e.to_string()))
+        });
+    }
+
+    fn export_pdf(&mut self, ctx: &egui::Context) {
+        self.pick_pdf_path(ctx);
+    }
+
+    fn do_export_pdf(&mut self, path: PathBuf, ctx: &egui::Context) {
+        let font_size = self.ui.font_size as f32;
+        let (paras, has_format) =
+            crate::ui::editor::paragraphs_from_editor(&self.editor, font_size);
+        let params =
+            match crate::ui::params::collect_params(&self.ui, self.preset_params.as_ref(), paras, has_format) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.status = format!("参数错误：{e}");
+                    return;
+                }
+            };
+        let seed = self.seed;
+        self.status = "导出中…".to_string();
+        self.spawn_worker(ctx, move || {
+            WorkerMsg::PdfDone(crate::core::engine::export_pdf(&params, &path, seed).map_err(|e| e.to_string()))
+        });
+    }
+
+    /// 选了手写字体后，把字体 bytes 加入 FontDefinitions（编辑器观感与渲染同源）。
+    fn load_handwrite_font(&mut self, ctx: &egui::Context) {
+        if self.ui.font_path.is_empty() {
+            return;
+        }
+        if let Ok(bytes) = std::fs::read(&self.ui.font_path) {
+            let mut fonts = egui::FontDefinitions::default();
+            collect_cjk_fonts(&mut fonts);
+            fonts
+                .font_data
+                .insert("handwrite".to_string(), Arc::new(egui::FontData::from_owned(bytes)));
+            if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                fam.insert(0, "handwrite".to_string());
+            }
+            ctx.set_fonts(fonts);
+        }
     }
 }
 
@@ -186,8 +512,19 @@ fn collect_cjk_fonts(fonts: &mut egui::FontDefinitions) {
 
 impl eframe::App for AppState {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 状态层：后台消息轮询、防抖渲染调度（阶段 3 填充）。
-        let _ = ctx;
+        // 1. 轮询后台 worker 结果（把 rx 取出到局部，避免与 handle_worker_msg 的 &mut self 冲突）
+        if let Some(rx) = self.worker_rx.take() {
+            loop {
+                match rx.try_recv() {
+                    Ok(msg) => self.handle_worker_msg(msg, ctx),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+            self.worker_rx = Some(rx);
+        }
+        // 2. 防抖：停止输入满 300ms 且无渲染中 → 后台渲染
+        self.maybe_render(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -203,7 +540,23 @@ impl eframe::App for AppState {
                         ui.set_min_width(ui.available_width() - PANEL_WIDTH - 8.0);
                         self.preview_area(ui);
                         ui.horizontal(|ui| {
+                            if ui.add(theme::green_button("◀ 上一页")).clicked()
+                                && self.preview_index > 0
+                            {
+                                self.preview_index -= 1;
+                                self.show_page();
+                            }
                             ui.label(self.page_text.as_str());
+                            if ui.add(theme::green_button("下一页 ▶")).clicked()
+                                && self.preview_index + 1 < self.preview_pages.len()
+                            {
+                                self.preview_index += 1;
+                                self.show_page();
+                            }
+                            if ui.add(theme::green_button("预览底色")).clicked() {
+                                self.preview_bg_idx =
+                                    (self.preview_bg_idx + 1) % PREVIEW_BG_COLORS.len();
+                            }
                         });
                     });
                     // ---- 右侧：参数面板（460）----
@@ -240,11 +593,26 @@ impl eframe::App for AppState {
                                         self.mark_changed();
                                         self.refresh_para_status();
                                     }
+                                    if ui.add(theme::green_button("导入docx")).clicked() {
+                                        self.pick_docx(ui.ctx());
+                                    }
                                 });
                                 crate::ui::controls::hint_label(ui, self.para_status.as_str());
                                 self.editor_view(ui);
                                 self.param_panel(ui);
                             });
+                        // 主按钮（不随面板滚动）
+                        ui.horizontal(|ui| {
+                            if ui.add(theme::primary_button("预览")).clicked() {
+                                self.regenerate();
+                            }
+                            if ui.add(theme::primary_button("导出")).clicked() {
+                                self.export_files(ui.ctx());
+                            }
+                            if ui.add(theme::primary_button("导出 PDF")).clicked() {
+                                self.export_pdf(ui.ctx());
+                            }
+                        });
                     });
                 });
                 ui.add_space(4.0);
@@ -261,10 +629,11 @@ impl eframe::App for AppState {
 }
 
 impl AppState {
-    /// 预览区（阶段 0 占位灰框；阶段 3 实现真正 Image + 翻页按钮）。
-    fn preview_area(&self, ui: &mut egui::Ui) {
+    /// 预览区：底色框 + 预览图（contain 居中，TextureHandle 缓存，翻页/新结果才重建）。
+    fn preview_area(&mut self, ui: &mut egui::Ui) {
         let bg = PREVIEW_BG_COLORS[self.preview_bg_idx];
-        let (rect, _resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
+        let avail = ui.available_size();
+        let (rect, _resp) = ui.allocate_exact_size(avail, egui::Sense::click());
         ui.painter().rect(
             rect,
             6.0,
@@ -272,6 +641,56 @@ impl AppState {
             egui::Stroke::new(1.0, theme::GROUP_BORDER),
             egui::StrokeKind::Inside,
         );
+
+        // 纹理为空时重建（翻页 / 新渲染结果时 preview_texture 被置 None）
+        if self.preview_texture.is_none() {
+            let new_tex = self.preview_pages.get(self.preview_index).map(|img| {
+                let (w, h) = img.dimensions();
+                let ci = egui::ColorImage::from_rgba_unmultiplied(
+                    [w as usize, h as usize],
+                    img.as_raw(),
+                );
+                ui.ctx()
+                    .load_texture("preview_page", ci, egui::TextureOptions::LINEAR)
+            });
+            if let Some(tex) = new_tex {
+                self.preview_texture = Some(tex);
+            }
+        }
+
+        // contain 居中缩放绘制
+        let dims = self
+            .preview_pages
+            .get(self.preview_index)
+            .map(|img| img.dimensions());
+        let tex_id = self.preview_texture.as_ref().map(|t| t.id());
+        if let (Some((w, h)), Some(tex_id)) = (dims, tex_id) {
+            let scale = (rect.width() / w as f32)
+                .min(rect.height() / h as f32)
+                .min(1.0);
+            let draw_w = w as f32 * scale;
+            let draw_h = h as f32 * scale;
+            let pos = egui::Pos2::new(rect.center().x - draw_w / 2.0, rect.center().y - draw_h / 2.0);
+            let draw_rect = egui::Rect::from_min_size(pos, egui::vec2(draw_w, draw_h));
+            ui.painter().image(
+                tex_id,
+                draw_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+    }
+
+    /// 更新页码文本 + 标记纹理重建。
+    fn show_page(&mut self) {
+        if self.preview_pages.is_empty() {
+            self.page_text = "第 1 / 1 页".to_string();
+            return;
+        }
+        let total = self.preview_pages.len();
+        let i = self.preview_index.min(total - 1);
+        self.page_text = format!("第 {} / {} 页", i + 1, total);
+        self.preview_texture = None; // 翻页/新结果 → 下一帧重建纹理
     }
 
     /// 段落编辑器：白底圆角框内，每段一个 `TextEdit::multiline`。
@@ -399,26 +818,32 @@ impl AppState {
         use crate::ui::controls::{field_label, group_box, hint_label, num_field};
         let mut changed = false;
 
-        // ---- 字体 / 背景（路径可直接编辑；「选择」按钮阶段 3）----
+        // ---- 字体 / 背景（路径可直接编辑 + 「选择」对话框）----
         ui.horizontal(|ui| {
             field_label(ui, "字体");
             changed |= ui
                 .add(
                     egui::TextEdit::singleline(&mut self.ui.font_path)
-                        .desired_width(220.0)
+                        .desired_width(180.0)
                         .hint_text("未选择字体"),
                 )
                 .changed();
+            if ui.add(theme::green_button("选择")).clicked() {
+                self.pick_font(ui.ctx());
+            }
         });
         ui.horizontal(|ui| {
             field_label(ui, "背景");
             changed |= ui
                 .add(
                     egui::TextEdit::singleline(&mut self.ui.background_path)
-                        .desired_width(220.0)
+                        .desired_width(180.0)
                         .hint_text("未选择背景"),
                 )
                 .changed();
+            if ui.add(theme::green_button("选择")).clicked() {
+                self.pick_background(ui.ctx());
+            }
         });
         // ---- 文字颜色 ----
         ui.horizontal(|ui| {
@@ -448,6 +873,12 @@ impl AppState {
                         }
                     }
                 });
+            if ui.add(theme::green_button("载入预设")).clicked() {
+                self.pick_preset_file(ui.ctx());
+            }
+            if ui.add(theme::green_button("保存预设")).clicked() {
+                self.save_preset(ui.ctx());
+            }
         });
 
         // ---- 排版参数 ----
@@ -665,6 +1096,7 @@ impl AppState {
 }
 
 /// 「标签 | 数值 | σ | 数值」参数行（排版参数表格用），返回是否有控件变化。
+#[allow(clippy::too_many_arguments)] // 表格行的自然参数数
 fn param_row(
     ui: &mut egui::Ui,
     label: &str,
