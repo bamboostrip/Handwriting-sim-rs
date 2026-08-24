@@ -189,3 +189,103 @@ fn miswrite_preview_matches_export_with_same_seed() {
     assert!(sum > sum0, "错字效果应增加墨迹：{sum} vs {sum0}");
     fs::remove_dir_all(dir.path()).ok();
 }
+/// 完整链路：PDF → pdfium 栅格化多页底图 → 第 2 页框选区域 → 渲染验证。
+/// 对应用户实际工作流「导入文档底图，在第 2/3 页框选手写填写」。
+/// 无 pdfium.dll 的环境优雅跳过。
+#[test]
+fn pdf_background_with_region_on_second_page() {
+    let Some(font) = system_font() else {
+        eprintln!("跳过：未找到系统 CJK 字体");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+
+    // 1. 生成两页 A4 PDF（100 DPI 栅格化 ≈ 827×1169）
+    let pdf_path = dir.path().join("exam.pdf");
+    {
+        use printpdf::PdfDocument;
+        let mut doc = PdfDocument::new("integration-test");
+        let empty_ops: Vec<printpdf::Op> = Vec::new();
+        doc.with_pages(vec![
+            printpdf::PdfPage::new(printpdf::Mm(210.0), printpdf::Mm(297.0), empty_ops.clone()),
+            printpdf::PdfPage::new(printpdf::Mm(210.0), printpdf::Mm(297.0), empty_ops),
+        ]);
+        let mut warnings = Vec::new();
+        let bytes = doc.save(&printpdf::PdfSaveOptions::default(), &mut warnings);
+        fs::write(&pdf_path, bytes).unwrap();
+    }
+
+    // 2. 栅格化为逐页 PNG
+    let pages_dir = dir.path().join("pages");
+    let page_files = match handwrite_sim::core::doc_render::pdf_to_images(&pdf_path, &pages_dir, 100)
+    {
+        Ok(paths) => paths,
+        Err(handwrite_sim::core::doc_render::DocRenderError::PdfiumUnavailable(_)) => {
+            eprintln!("跳过：未找到 pdfium.dll");
+            return;
+        }
+        Err(e) => panic!("PDF 栅格化失败：{e}"),
+    };
+    assert_eq!(page_files.len(), 2);
+    let page_w = image::open(&page_files[0]).unwrap().width() as usize;
+    let page_h = image::open(&page_files[0]).unwrap().height() as usize;
+
+    // 3. 第 2 页中部框选一个区域，打印体零扰动便于断言
+    let (bx, by, bw, bh) = (80usize, page_h / 2 - 60, page_w - 160, 120);
+    let mut params = HandwritingParams {
+        font_path: font.to_string_lossy().into_owned(),
+        background_path: page_files[0].to_string_lossy().into_owned(),
+        background_pages: page_files
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
+        text: String::new(),
+        regions: vec![handwrite_sim::core::models::TextRegion {
+            x: bx as i32,
+            y: by as i32,
+            w: bw as i32,
+            h: bh as i32,
+            text: "第二页填写的区域文字".into(),
+            printed: true,
+            page: 2,
+            ..Default::default()
+        }],
+        ..HandwritingParams::default()
+    };
+    params.font_size = 30.0;
+
+    // 4. 渲染全部页：共 2 页；第 1 页区域处无墨迹，第 2 页有墨迹
+    params.validate().unwrap();
+    let pages = render_all_pages_preview(&params, 42).unwrap();
+    assert_eq!(pages.len(), 2, "应输出文档底图全部两页");
+
+    let ink_count = |p: &RgbaImage| -> usize {
+        p.pixels()
+            .filter(|px| {
+                let [r, g, b, _] = px.0;
+                (u16::from(r) + u16::from(g) + u16::from(b)) / 3 < 128
+            })
+            .count()
+    };
+    let inner = |p: &RgbaImage| -> usize {
+        p.pixels()
+            .enumerate()
+            .filter(|(i, px)| {
+                let x = i % p.width() as usize;
+                let y = i / p.width() as usize;
+                x >= bx && x < bx + bw && y >= by && y < by + bh
+                    && {
+                        let [r, g, b, _] = px.0;
+                        (u16::from(r) + u16::from(g) + u16::from(b)) / 3 < 128
+                    }
+            })
+            .count()
+    };
+
+    assert_eq!(inner(&pages[0]), 0, "第 1 页不应出现第 2 页的区域墨迹");
+    assert!(inner(&pages[1]) > 0, "第 2 页区域内应有墨迹");
+    assert!(
+        ink_count(&pages[0]) == 0,
+        "无主文字时第 1 页应为纯背景"
+    );
+}
