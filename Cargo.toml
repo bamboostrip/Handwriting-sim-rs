@@ -1,23 +1,24 @@
+[workspace]
+members = ["src-tauri"]
+resolver = "2"
+
 [package]
 name = "handwrite-sim"
 version = "0.1.0"
 edition = "2021"
-description = "手写模拟器（Rust 版）- 基于 Slint + 自研笔画扰动引擎的手写体生成工具"
+description = "手写模拟器（Rust 版）- 自研笔画扰动渲染引擎核心（GUI：Tauri 2 + Vue，见 src-tauri/ 与 web/）"
 license = "MIT"
 authors = ["bamboostrip"]
 repository = "https://github.com/bamboostrip/handwrite-sim"
 
 # ---------------------------------------------------------------------------
 # 依赖说明
-# - slint: 桌面 GUI（crates.io 默认 GPLv3；本项目开源，程序整体按 GPLv3 分发）
 # - ab_glyph: 字体光栅化（替代 Python 版 PIL FreeType 黑盒）
 # - image: 图像加载/保存（PNG/webp 背景、导出）
 # - rand/rand_distr: 笔画扰动随机数（正态分布）
 # - serde: 预设 JSON 持久化
-# - rfd: 原生文件对话框（选字体/背景/导出目录）
 # ---------------------------------------------------------------------------
 [dependencies]
-slint = "1"
 ab_glyph = "0.2"
 image = "0.25"
 rand = "0.9"
@@ -25,9 +26,8 @@ rand_distr = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-rfd = "0.15"
 # docx 导入：手写解析（zip + quick-xml），完整对齐 Python 版 docx_io.py 语义，
-# 避免第三方 docx 库读取 API 限制（详见 docs/superpowers/specs 阶段三设计）
+# 避免第三方 docx 库读取 API 限制
 zip = "8"
 quick-xml = "0.41"
 # PDF 导出：位图层方案（MIT；禁用默认 html feature 避开 azul 依赖树）
@@ -40,20 +40,10 @@ fast_image_resize = { version = "6", features = ["rayon"] }
 # （exe 旁 pdfium.dll 或系统 PATH；缺失时导入 PDF 给出明确提示）。
 pdfium-render = "0.8"
 
-[build-dependencies]
-# 编译 .slint 界面描述（与 slint 同版本）
-slint-build = "1"
-# Windows exe 资源嵌入（窗口图标，仅 win32 生效）
-winresource = "0.1"
-
 [dev-dependencies]
 tempfile = "3"
-# Slint testing backend（headless）：CI 无显示环境（Linux 无 DISPLAY / macOS headless
-# runner）下创建 MainWindow 时避免 winit 初始化失败。版本需与 slint 严格一致。
-i-slint-backend-testing = "=1.17.1"
 
 [profile.release]
-# 越小越快的分发体积（与 Python 版 PyInstaller 产物对比）
 opt-level = 3
 lto = true
 codegen-units = 1

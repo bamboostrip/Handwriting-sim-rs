@@ -1,0 +1,23 @@
+[package]
+name = "handwrite-sim-tauri"
+version = "0.1.0"
+edition = "2021"
+description = "手写模拟器桌面端（Tauri 2）：复用 handwrite-sim core 渲染引擎，Vue 前端见 web/"
+license = "MIT"
+authors = ["bamboostrip"]
+repository = "https://github.com/bamboostrip/handwrite-sim"
+
+[[bin]]
+name = "handwrite-sim"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = "0.25"
+handwrite-sim = { path = ".." }

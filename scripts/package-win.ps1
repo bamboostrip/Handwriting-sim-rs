@@ -23,13 +23,15 @@ $Exe = Join-Path $Root "target\release\handwrite-sim.exe"
 $Staging = Join-Path $env:TEMP ("hs-staging-" + [guid]::NewGuid().ToString("N"))
 $ZipName = "handwrite-sim-windows-x86_64.zip"
 
-# ---- 1. release 构建 ----
+# ---- 1. release 构建（Tauri CLI：先构建前端再编译，嵌入 WebView 资源） ----
 if (-not $SkipBuild) {
-    Write-Host "[1/4] cargo build --release ..."
+    Write-Host "[1/4] tauri build --no-bundle ..."
     Push-Location $Root
     try {
-        cargo build --release
-        if ($LASTEXITCODE -ne 0) { throw "cargo build 失败（exit $LASTEXITCODE）" }
+        $Tauri = Join-Path $Root "web\node_modules\.bin\tauri.CMD"
+        if (-not (Test-Path $Tauri)) { throw "未找到 $Tauri，请先执行 pnpm --dir web install" }
+        & $Tauri build --no-bundle
+        if ($LASTEXITCODE -ne 0) { throw "tauri build 失败（exit $LASTEXITCODE）" }
     } finally {
         Pop-Location
     }
@@ -47,6 +49,11 @@ Copy-Item $Exe "$Staging\handwrite-sim.exe"
 Copy-Item "$Root\backgrounds\*" "$Staging\backgrounds\" -Recurse
 Copy-Item "$Root\presets\*" "$Staging\presets\" -Recurse
 Copy-Item "$Root\packaging\fonts-README.txt" "$Staging\fonts\README.txt"
+# PDF 底图栅格化运行时依赖（本地有就带上；CI 发布包不含，见 README）
+if (Test-Path "$Root\pdfium.dll") {
+    Copy-Item "$Root\pdfium.dll" "$Staging\"
+    Write-Host "      已附带 pdfium.dll（PDF 文档底图导入用）"
+}
 
 # ---- 3. 拷贝字体（本地自用；自动探测目录） ----
 $fontCandidates = @($FontsDir, "D:\code\手写模拟\fonts", (Join-Path $Root "fonts"))

@@ -19,7 +19,7 @@
 | | Python 版 | Rust 版 |
 | --- | --- | --- |
 | 渲染引擎 | numpy + scipy（FastEngine） | 纯 Rust：ab_glyph + 自研笔画扰动引擎 |
-| 界面 | PyQt6 | Slint（原生渲染，winit + femtovg，软件渲染兜底） |
+| 界面 | PyQt6 | Tauri 2 + Vue 3（系统 WebView 渲染；Rust 命令层复用核心引擎） |
 | PDF 导出 | ✅（同步对齐） | ✅ **300 DPI 位图层 PDF**（printpdf + lopdf） |
 | 错字率模拟 | ✅（同步对齐） | ✅ **错字率 + 划掉重写**（单线/双线/斜线/叉号四种涂改样式） |
 | docx 导入 | python-docx | zip + quick-xml 自研解析（对齐/首行缩进） |
@@ -32,8 +32,10 @@
 
 | 类别 | 选型 |
 | --- | --- |
-| 语言 | Rust（edition 2021，MSRV 1.92+） |
-| 界面 | Slint 1.x（winit + femtovg，软件渲染兜底） |
+| 语言 | Rust（edition 2021，MSRV 1.92+）+ TypeScript |
+| 桌面框架 | Tauri 2（系统 WebView：Windows WebView2 / macOS WKWebView / Linux WebKitGTK） |
+| 前端 | Vue 3 + Vite + Naive UI + VueUse（`web/`） |
+| 命令层 | Tauri commands：参数校验、后台渲染调度、文件 IO（`src-tauri/`） |
 | 渲染引擎 | ab_glyph（字体光栅化）+ 自研笔画扰动（连通域 + 旋转平移） |
 | 图像处理 | image（PNG/webp/bmp 背景与导出） |
 | 文件对话框 | rfd（原生对话框，Linux 走 xdg-portal） |
@@ -46,18 +48,22 @@
 ## 快速开始
 
 ```bash
-# 运行 GUI
-cargo run
+# 安装前端依赖（Node 20+/22+，pnpm）
+pnpm --dir web install
 
-# 运行全部测试
-cargo test
+# 开发模式（Vite HMR + Rust 增量编译）
+web/node_modules/.bin/tauri dev      # Windows 为 web\node_modules\.bin\tauri.CMD dev
 
-# 发布构建（LTO + strip，体积优化）
-cargo build --release
+# 运行全部测试（核心引擎）
+cargo test --workspace
+
+# 发布构建（vue-tsc + vite 构建前端并嵌入，LTO + strip）
+web/node_modules/.bin/tauri build --no-bundle
 ```
 
 产物在 `target/release/handwrite-sim(.exe)`，exe 为便携模式：把 exe 放进任意目录，同目录下的
 `presets/`、`backgrounds/`、`fonts/` 即为资源根目录，整个文件夹可随意拷贝移动。
+Windows 本地一键打包：`pwsh scripts/package-win.ps1`。
 
 ## 功能特性
 
@@ -74,6 +80,8 @@ cargo build --release
   涂改样式可选单线 / 双线 / 斜线 / 叉号
 - **实时自动预览**：停止输入 300ms 后自动渲染，后台线程不卡界面；预览按比例降采样，导出始终全分辨率
 - **多页预览**：上一页 / 下一页 / 页码指示，自动分页
+- **框选文字区域**：预览图上拖拽画框，在指定区域内手写/打印体填写；
+  支持 PDF/DOCX 导入为多页文档底图，逐页框选
 - **预览底色切换**：浅灰绿 / 深灰两档
 - **预设系统**：`presets/` 目录内预设下拉一键切换，也支持保存 / 载入任意位置（JSON v2，兼容 Python 版）
 - **一键导出**：全部页面导出为 `0.png`、`1.png`…… 到所选目录
@@ -83,30 +91,38 @@ cargo build --release
 
 ```
 src/
-├── main.rs            # 桌面入口（Slint GUI + 后台线程渲染调度）
-├── lib.rs             # 库入口
+├── lib.rs             # 库入口（core）
 ├── core/              # 渲染引擎（纯 Rust，无 GUI 依赖）
 │   ├── models.rs      # 参数模型 + 校验（对齐 Python 版默认值）
 │   ├── font.rs        # 字体光栅化（ab_glyph，字形轮廓缓存）
 │   ├── layout.rs      # 排版 + 错字模拟（对齐/缩进/换行规则/划掉重写）
 │   ├── perturb.rs     # 笔画扰动（连通域 + 旋转平移）
 │   ├── engine.rs      # 引擎接口 + 预览/导出/PDF 全链路
+│   ├── doc_render.rs  # PDF/DOCX 文档底图栅格化（pdfium）
 │   ├── presets.rs     # 预设读写（JSON v2 + 便携相对路径）
 │   └── docx_io.rs     # docx 解析（zip + quick-xml）
-├── ui/                # Slint 界面（main_window.slint + theme.slint）
+src-tauri/            # Tauri 2 桌面壳
+├── src/main.rs        # 命令层：render_preview / export / import / presets
+├── src/params.rs      # 前端 ↔ 引擎参数转换（camelCase 镜像）
+└── tauri.conf.json    # 窗口/安全/打包配置（asset 协议、resources）
+web/                  # Vue 3 前端
+└── src/
+    ├── store.ts       # 全局状态：参数收集、防抖渲染、段落/区域操作
+    └── components/    # 参数面板 / 逐段编辑器 / 预览框选 overlay / 区域对话框
 backgrounds/           # 内置背景素材（原创，随仓库分发）
 presets/               # 内置预设示例（JSON v2，相对路径引用资源）
 packaging/             # 打包辅助（fonts-README.txt）
-scripts/               # 图标生成脚本等
+scripts/               # 图标生成、Windows 打包脚本
 tests/                 # 集成测试
 docs/                  # 架构 / 迁移计划 / 许可策略
 ```
 
 ### 分层约定
 
-- `core/` 不依赖任何 GUI 模块；GUI 只做控件映射与任务调度
-- 数据流：GUI → `HandwritingParams`（校验）→ 引擎 → 图片
-- 渲染/导出在后台线程执行，`upgrade_in_event_loop` 切回 UI 线程应用结果
+- `core/` 不依赖任何 GUI 模块；Tauri 命令层只做参数校验与任务调度
+- 数据流：Vue 表单 → `invoke` → `UiParams` 转换校验 → 引擎 → PNG 缓存 → asset 协议回显
+- 渲染/导出在命令线程执行；前端以请求序号做代次守卫，只采纳最新结果；
+  参数改动防抖 300ms 自动预览
 
 ## 预设文件格式
 
@@ -191,8 +207,8 @@ cargo build --release
 
 ## 许可
 
-- 应用代码：MIT（见 [LICENSE](LICENSE)）
-- Slint：crates.io 默认 **GPLv3**（本项目开源，程序整体按 GPLv3 分发）
+- 应用代码（Rust 核心 + Tauri 壳 + Vue 前端）：**MIT**（见 [LICENSE](LICENSE)）
+- 迁移至 Tauri 2 后已摆脱 Slint 的 GPLv3 传染，全项目宽松许可分发
 
 ## 相关文档
 

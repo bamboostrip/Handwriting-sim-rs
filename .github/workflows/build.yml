@@ -18,12 +18,15 @@ jobs:
           - os: windows-latest
             artifact: handwrite-sim-windows-x86_64
             exe_name: handwrite-sim.exe
+            tauri_bin: web/node_modules/.bin/tauri.CMD
           - os: ubuntu-latest
             artifact: handwrite-sim-linux-x86_64
             exe_name: handwrite-sim
+            tauri_bin: web/node_modules/.bin/tauri
           - os: macos-latest
             artifact: handwrite-sim-macos-arm64
             exe_name: handwrite-sim
+            tauri_bin: web/node_modules/.bin/tauri
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -31,30 +34,46 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
 
-      # Slint 的 winit-x11 后端在 Linux 需要 xcb/xkbcommon/fontconfig 开发库
+      # Tauri v2 Linux 系统依赖（WebKitGTK 4.1 + GTK3 等）
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libfontconfig-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install frontend dependencies
+        run: pnpm --dir web install
 
       - name: Run tests
-        run: cargo test --release
+        run: cargo test --workspace
 
-      - name: Build (release)
-        run: cargo build --release
+      # --no-bundle：不做安装器，只产出裸二进制（便携 zip 分发模式）。
+      # beforeBuildCommand 自动执行 vue-tsc + vite build 并嵌入前端。
+      - name: Build (release, Tauri)
+        run: '& "${{ matrix.tauri_bin }}" build --no-bundle'
+        shell: pwsh
 
       # macOS 可执行文件需 ad-hoc 签名，否则 Gatekeeper 会拦截
       - name: Ad-hoc sign (macOS)
         if: runner.os == 'macOS'
         run: codesign --force --deep -s - "target/release/${{ matrix.exe_name }}"
 
-      # 组装便携包：exe + 预设 + 背景 + 空 fonts 目录（用户自备字体）
+      # 组装便携包：二进制 + 预设 + 背景 + 空 fonts 目录（用户自备字体）
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

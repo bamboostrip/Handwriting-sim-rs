@@ -1,0 +1,355 @@
+/* 手写模拟器 · 全局样式（Tauri 2 + Vue 版）
+   布局沿用原 Slint 版：左预览区（可伸缩）+ 右参数面板（460px，可滚动）+ 底部状态栏 */
+
+:root {
+  --accent: #2e7d74;
+  --accent-soft: #e3efed;
+  --danger: #e5484d;
+  --edit-blue: #2f7df6;
+  --rubber-blue: #4a90ff;
+  --text-main: #24312e;
+  --text-sub: #6b7a76;
+  --border: #d8e2df;
+  --panel-bg: #f7faf9;
+  --kaiti: "KaiTi", "楷体", "STKaiti", serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  color: var(--text-main);
+  font-size: 13px;
+}
+
+.app-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+}
+
+.app-main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* ---------------- 左侧预览区 ---------------- */
+.preview-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 8px 6px 10px;
+  gap: 6px;
+}
+
+.preview-box {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  user-select: none;
+}
+
+.draw-area {
+  position: absolute;
+}
+
+.page-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+.interact-layer {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+}
+
+.empty-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-sub);
+  font-size: 13px;
+  letter-spacing: 0.05em;
+}
+
+.region-overlay {
+  position: absolute;
+  border: 2px solid var(--danger);
+  border-radius: 2px;
+  background: rgba(229, 72, 77, 0.11);
+  pointer-events: none;
+}
+
+.region-overlay.is-highlight {
+  background: rgba(229, 72, 77, 0.33);
+}
+
+.rubber-band {
+  position: absolute;
+  border: 2px solid var(--rubber-blue);
+  border-radius: 2px;
+  background: rgba(74, 144, 255, 0.125);
+  pointer-events: none;
+}
+
+.edit-box {
+  position: absolute;
+  border: 2px solid var(--edit-blue);
+  border-radius: 2px;
+  background: rgba(47, 125, 246, 0.063);
+  pointer-events: none;
+}
+
+.edit-box .handle {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: #fff;
+  border: 1px solid var(--edit-blue);
+  border-radius: 1px;
+}
+
+.pagenav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pagenav .page-text {
+  flex: 1;
+  text-align: center;
+  font-family: var(--kaiti);
+  font-size: 14px;
+  color: var(--text-main);
+}
+
+/* ---------------- 右侧参数面板 ---------------- */
+.params-col {
+  width: 470px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 10px 10px 6px 4px;
+}
+
+.params-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 6px;
+}
+
+.section-title {
+  font-weight: 700;
+  font-size: 13px;
+  margin: 10px 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-title:first-child {
+  margin-top: 2px;
+}
+
+.hint-line {
+  font-size: 11px;
+  color: var(--text-sub);
+  line-height: 1.5;
+  margin: 2px 0 6px;
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.field-label {
+  width: 58px;
+  flex-shrink: 0;
+  text-align: right;
+  color: var(--text-main);
+  font-size: 12.5px;
+}
+
+.group-card {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px 12px 10px;
+  margin-bottom: 10px;
+}
+
+.group-card > .group-legend {
+  position: absolute;
+  top: -9px;
+  left: 12px;
+  background: var(--panel-bg);
+  padding: 0 6px;
+  font-weight: 700;
+  font-size: 12.5px;
+  color: var(--accent);
+}
+
+.sigma-grid {
+  display: grid;
+  grid-template-columns: 84px 1fr 18px 1fr;
+  gap: 6px 4px;
+  align-items: center;
+}
+
+.sigma-grid .col-head {
+  text-align: center;
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--text-sub);
+}
+
+.margin-grid {
+  display: grid;
+  grid-template-columns: 1fr 110px 1fr;
+  gap: 6px;
+  justify-items: center;
+  align-items: center;
+  max-width: 340px;
+  margin: 0 auto;
+}
+
+.margin-center-mark {
+  font-family: var(--kaiti);
+  font-weight: 700;
+  color: #4ca6a6;
+  font-size: 15px;
+}
+
+.action-bar {
+  display: flex;
+  gap: 10px;
+  padding-top: 8px;
+}
+
+.action-bar > * {
+  flex: 1;
+}
+
+.status-bar {
+  height: 26px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border-top: 1px solid var(--border);
+  color: var(--text-sub);
+  font-family: var(--kaiti);
+  font-size: 12.5px;
+  background: #fff;
+  flex-shrink: 0;
+}
+
+.status-bar .status-text {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------------- 逐段编辑器 ---------------- */
+.para-editor {
+  height: 190px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  overflow-y: auto;
+  padding: 4px 18px 4px 8px;
+  cursor: text;
+}
+
+.para-editor.is-empty::before {
+  content: "请输入文本内容，支持多段；回车分段，用上方按钮设置当前段格式。";
+  position: sticky;
+  top: 0;
+  display: block;
+  color: #9aa8a4;
+  font-size: 12px;
+  pointer-events: none;
+  float: left;
+  width: 100%;
+}
+
+.para-row {
+  font-family: var(--kaiti);
+  font-size: 13px;
+  line-height: 1.55;
+  min-height: 20px;
+  outline: none;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-bottom: 1px solid #eef2ee;
+  padding: 0 2px 1px;
+}
+
+.para-row:focus {
+  background: #fbfdfb;
+}
+
+/* ---------------- 区域列表 ---------------- */
+.region-list {
+  height: 96px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.region-item {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  color: var(--text-main);
+  cursor: default;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.region-item:hover {
+  background: #f0f5ee;
+}
+
+.region-item.is-selected {
+  background: #e3efe6;
+}
+
+.region-empty {
+  color: var(--text-sub);
+  font-size: 11.5px;
+  padding: 4px 6px;
+}

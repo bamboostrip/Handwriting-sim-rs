@@ -1,6 +1,12 @@
 # 构建产物
 /target
+/src-tauri/target
 **/*.rs.bk
+
+# 前端（Tauri 2 + Vue）
+/web/node_modules
+/web/dist
+/src-tauri/gen
 
 # 本地运行产物（与 Python 版保持一致）
 /output
