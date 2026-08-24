@@ -24,6 +24,7 @@ export const api = {
   savePreset: (params: UiParams, path: string) =>
     invoke<void>("save_preset", { params, path }),
   defaultPresetDir: () => invoke<string>("default_preset_dir"),
+  pathExists: (path: string) => invoke<boolean>("path_exists", { path }),
 };
 
 const filters = {

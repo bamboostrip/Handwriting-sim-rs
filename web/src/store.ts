@@ -539,7 +539,8 @@ export function clampRect(
 
 export function setRegionMode(on: boolean): void {
   store.regionMode = on;
-  if (!on) store.editingIndex = -1;
+  // 对齐 Python 版 set_region_mode：进入框选模式时结束进行中的区域调整
+  if (on) store.editingIndex = -1;
 }
 
 /** 新框选完成 → 暂存矩形并弹出属性对话框（默认起始页=当前页）。 */

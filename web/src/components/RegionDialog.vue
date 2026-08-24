@@ -3,10 +3,31 @@
 //! 起始页 / 打印字体（仅打印体）/ 字号（0 = 跟随主设置）。
 
 import { computed } from "vue";
-import { NButton, NInput, NInputNumber, NModal, NRadioButton, NRadioGroup } from "naive-ui";
+import {
+  NButton,
+  NInput,
+  NInputNumber,
+  NModal,
+  NRadioButton,
+  NRadioGroup,
+  NTooltip,
+  useMessage,
+} from "naive-ui";
+import { api } from "../api";
 import { cancelRegionDialog, chooseRegionFont, confirmRegionDialog, store } from "../store";
 
 const isPrinted = computed(() => store.dialogStyleIndex === 1);
+const message = useMessage();
+
+/** 确定前校验打印字体文件存在（对齐 Python 版字体检查，失败保持对话框打开） */
+async function onConfirm(): Promise<void> {
+  const fontPath = store.dialogFontPath.trim();
+  if (isPrinted.value && fontPath !== "" && !(await api.pathExists(fontPath))) {
+    message.warning(`文字区域字体文件不存在：${fontPath}`);
+    return;
+  }
+  confirmRegionDialog();
+}
 </script>
 
 <template>
@@ -24,7 +45,7 @@ const isPrinted = computed(() => store.dialogStyleIndex === 1);
     <NInput
       v-model:value="store.dialogText"
       type="textarea"
-      placeholder="该矩形内要填写/覆盖的文字，支持多行"
+      placeholder="输入该区域内要生成的文字，支持多行"
       :autosize="{ minRows: 3, maxRows: 6 }"
     />
 
@@ -35,14 +56,19 @@ const isPrinted = computed(() => store.dialogStyleIndex === 1);
         <NRadioButton :value="1">打印体</NRadioButton>
       </NRadioGroup>
       <span class="field-label" style="width: 44px">起始页</span>
-      <NInputNumber
-        v-model:value="store.dialogPage"
-        size="small"
-        :min="1"
-        :max="999"
-        style="width: 92px"
-        :show-button="false"
-      />
+      <NTooltip trigger="hover" placement="top">
+        <template #trigger>
+          <NInputNumber
+            v-model:value="store.dialogPage"
+            size="small"
+            :min="1"
+            :max="999"
+            style="width: 92px"
+            :show-button="false"
+          />
+        </template>
+        区域文字从第几页开始渲染；放不下会延续到后续页
+      </NTooltip>
     </div>
 
     <div class="field-row">
@@ -64,16 +90,17 @@ const isPrinted = computed(() => store.dialogStyleIndex === 1);
         :min="0"
         :max="300"
         style="width: 92px"
+        :placeholder="'跟随主设置'"
       />
       <span class="hint-line" style="flex: 1; margin: 0">
-        0 = 跟随主设置；打印体不做笔画扰动、排版规整。
+        提示：打印体不做笔画扰动、排版规整；主字号当前为 {{ store.fontSize }}，填 0 跟随主设置。
       </span>
     </div>
 
     <template #footer>
       <div class="action-bar" style="padding-top: 0">
         <NButton @click="cancelRegionDialog()">取消</NButton>
-        <NButton type="primary" @click="confirmRegionDialog()">确定</NButton>
+        <NButton type="primary" @click="onConfirm()">确定</NButton>
       </div>
     </template>
   </NModal>

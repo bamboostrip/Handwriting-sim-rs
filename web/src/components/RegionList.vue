@@ -1,5 +1,6 @@
 <script setup lang="ts">
-//! 框选文字区域列表：悬浮高亮 / 点击跳页进入调整态 / 双击编辑属性。
+//! 框选文字区域列表（对齐 Python 版 group_regions）：
+//! 悬浮列表项 → 预览图临时虚线高亮；单击 → 跳页并进入调整态；双击 → 编辑属性。
 
 import { NButton } from "naive-ui";
 import {
@@ -8,24 +9,15 @@ import {
   jumpToRegion,
   openEditRegionDialog,
   regionLabel,
-  setRegionMode,
   store,
 } from "../store";
 </script>
 
 <template>
-  <div class="section-title" style="justify-content: space-between">
-    <span>框选文字区域</span>
-    <NButton
-      size="tiny"
-      :type="store.regionMode ? 'primary' : 'default'"
-      @click="setRegionMode(!store.regionMode)"
-    >
-      {{ store.regionMode ? "框选：开" : "框选：关" }}
-    </NButton>
-  </div>
+  <div class="section-title">文字区域（手写 / 打印混排）</div>
   <div class="hint-line">
-    开启框选后在预览图上拖出矩形；点列表项可在预览中拖动/缩放调整框，双击编辑文字。
+    勾选「框选文字」后在左侧预览图拖出矩形生成文字；单击右侧列表项可在预览中拖动 /
+    缩放该区域边框（Esc 或点击空白退出），双击列表项可编辑文字。
   </div>
 
   <div class="region-list">
@@ -46,11 +38,9 @@ import {
   </div>
 
   <div class="field-row" style="margin-top: 6px">
-    <NButton size="small" :disabled="store.selectedRegionIndex < 0" @click="deleteSelectedRegion">
+    <NButton size="small" :disabled="store.selectedRegionIndex < 0" @click="deleteSelectedRegion()">
       删除选中
     </NButton>
-    <NButton size="small" :disabled="store.regions.length === 0" @click="clearRegions">
-      清空全部
-    </NButton>
+    <NButton size="small" :disabled="store.regions.length === 0" @click="clearRegions()">清空</NButton>
   </div>
 </template>

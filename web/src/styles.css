@@ -92,41 +92,22 @@ body,
   letter-spacing: 0.05em;
 }
 
-.region-overlay {
+/* 悬浮列表项的临时高亮：红虚线框 + 浅填充（对齐 Python _draw_rect_overlays 的
+   DashLine #e5484d + rgba(229,72,77,28)） */
+.region-highlight {
   position: absolute;
-  border: 2px solid var(--danger);
+  border: 2px dashed var(--danger);
   border-radius: 2px;
   background: rgba(229, 72, 77, 0.11);
   pointer-events: none;
 }
 
-.region-overlay.is-highlight {
-  background: rgba(229, 72, 77, 0.33);
-}
-
+/* 橡皮筋：新建框选与区域调整共用（对齐 QRubberBand，无手柄靠 8px 容差命中） */
 .rubber-band {
   position: absolute;
-  border: 2px solid var(--rubber-blue);
-  border-radius: 2px;
-  background: rgba(74, 144, 255, 0.125);
+  border: 1px solid var(--rubber-blue);
+  background: rgba(74, 144, 255, 0.16);
   pointer-events: none;
-}
-
-.edit-box {
-  position: absolute;
-  border: 2px solid var(--edit-blue);
-  border-radius: 2px;
-  background: rgba(47, 125, 246, 0.063);
-  pointer-events: none;
-}
-
-.edit-box .handle {
-  position: absolute;
-  width: 8px;
-  height: 8px;
-  background: #fff;
-  border: 1px solid var(--edit-blue);
-  border-radius: 1px;
 }
 
 .pagenav {

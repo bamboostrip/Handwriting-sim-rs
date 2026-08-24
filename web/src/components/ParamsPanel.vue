@@ -12,6 +12,7 @@ import {
   NInputNumber,
   NSelect,
   NSlider,
+  NTooltip,
 } from "naive-ui";
 import ParaEditor from "./ParaEditor.vue";
 import RegionList from "./RegionList.vue";
@@ -48,7 +49,7 @@ const presetOptions = computed(() =>
         <NButton size="tiny" @click="setAlign(2)">右对齐</NButton>
         <NButton size="tiny" @click="toggleIndent(true)">首行缩进</NButton>
         <NButton size="tiny" @click="toggleIndent(false)">取消缩进</NButton>
-        <NButton size="tiny" @click="importDocx()">导入docx</NButton>
+        <NButton size="tiny" @click="importDocx()">导入 docx</NButton>
       </div>
       <div class="hint-line">{{ store.paraStatus }}</div>
       <ParaEditor />
@@ -73,10 +74,18 @@ const presetOptions = computed(() =>
       </div>
       <div class="field-row">
         <span class="field-label">文档底图</span>
-        <span class="hint-line" style="flex: 1; margin: 0; overflow: hidden; text-overflow: ellipsis">
-          {{ store.docStatus === "" ? "导入 PDF/DOCX 打印预览作为多页底图" : store.docStatus }}
-        </span>
-        <NButton size="small" @click="importDocument()">导入…</NButton>
+        <NTooltip trigger="hover" placement="top">
+          <template #trigger>
+            <NInput
+              :value="store.docStatus"
+              size="small"
+              readonly
+              placeholder="可选：导入 PDF / Word 作为打印底图"
+            />
+          </template>
+          把 PDF / Word 文档的打印预览逐页作为背景（替换当前背景图片），然后在预览上框选需要手写填写的位置
+        </NTooltip>
+        <NButton size="small" @click="importDocument()">导入</NButton>
       </div>
 
       <!-- ============ 文字颜色 ============ -->

@@ -259,6 +259,12 @@ fn default_preset_dir() -> String {
         .into_owned()
 }
 
+/// 路径存在性检查（区域打印字体校验等，对齐 Python 版 _on_region_selected）。
+#[tauri::command]
+fn path_exists(path: String) -> bool {
+    !path.trim().is_empty() && Path::new(path.trim()).is_file()
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -274,7 +280,8 @@ pub fn run() {
             list_presets,
             load_preset,
             save_preset,
-            default_preset_dir
+            default_preset_dir,
+            path_exists
         ])
         .run(tauri::generate_context!())
         .expect("手写模拟器启动失败");
