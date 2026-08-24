@@ -110,6 +110,22 @@ body,
   pointer-events: none;
 }
 
+/* 调整态编辑框：加粗边框 + 手柄圆点，提示可拖动 / 缩放 */
+.rubber-band.is-editing {
+  border-width: 2px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.65);
+}
+
+.handle-dot {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  background: #fff;
+  border: 1.5px solid var(--rubber-blue);
+  border-radius: 50%;
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.25);
+}
+
 .pagenav {
   display: flex;
   align-items: center;

@@ -515,7 +515,8 @@ export function regionLabel(r: Region, index: number): string {
   return `${index}. ${style}${page} ${[...r.text].length}字 (${r.x},${r.y} ${r.w}×${r.h})`;
 }
 
-/** 把矩形钳制到背景范围并保证最小尺寸（对齐原 clamp_rect）。 */
+/** 把矩形钳制到背景范围并保证最小尺寸（对齐原 clamp_rect）。
+ *  全部返回整数：serde 侧区域坐标是 i32，浮点会直接被拒。 */
 export function clampRect(
   x: number,
   y: number,
@@ -525,13 +526,13 @@ export function clampRect(
   bh: number,
 ): [number, number, number, number] | null {
   if (bw <= 8 || bh <= 8) return null;
-  const cw = Math.max(8, w);
-  const chh = Math.max(8, h);
-  const cx = Math.max(0, Math.min(x, bw - 8));
-  const cy = Math.max(0, Math.min(y, bh - 8));
+  const cw = Math.max(8, Math.round(w));
+  const chh = Math.max(8, Math.round(h));
+  const cx = Math.max(0, Math.min(Math.round(x), bw - 8));
+  const cy = Math.max(0, Math.min(Math.round(y), bh - 8));
   return [
-    Math.round(cx),
-    Math.round(cy),
+    cx,
+    cy,
     Math.max(1, Math.min(cw, bw - cx)),
     Math.max(1, Math.min(chh, bh - cy)),
   ];
@@ -590,8 +591,8 @@ export function confirmRegionDialog(): void {
         text,
         fontPath,
         printed: d.dialogStyleIndex === 1,
-        fontSize: d.dialogFontSize,
-        page: Math.max(1, d.dialogPage),
+        fontSize: Math.round(num(d.dialogFontSize, 0)),
+        page: Math.max(1, Math.round(num(d.dialogPage, 1))),
       });
     }
   } else {

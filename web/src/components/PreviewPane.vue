@@ -327,6 +327,18 @@ const boxBackground = computed(() =>
   store.previewBgIdx % 2 === 0 ? "#c8d0ca" : "#565b56",
 );
 
+/** 编辑框手柄圆点位置：四角 + 四边中点（纯视觉提示，命中仍靠 8px 容差） */
+const HANDLE_DOTS: Record<string, string>[] = [
+  { left: "-4px", top: "-4px" },
+  { left: "calc(50% - 3.5px)", top: "-4px" },
+  { right: "-4px", top: "-4px" },
+  { right: "-4px", top: "calc(50% - 3.5px)" },
+  { right: "-4px", bottom: "-4px" },
+  { left: "calc(50% - 3.5px)", bottom: "-4px" },
+  { left: "-4px", bottom: "-4px" },
+  { left: "-4px", top: "calc(50% - 3.5px)" },
+];
+
 function pxStyle(r: { x: number; y: number; w: number; h: number }) {
   return {
     left: `${r.x}px`,
@@ -347,18 +359,21 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
           <!-- 悬浮列表项的临时高亮：红虚线框 + 浅填充（对齐 _draw_rect_overlays） -->
           <div v-if="highlightBox" class="region-highlight" :style="pxStyle(highlightBox)" />
 
-          <!-- 调整态橡皮筋编辑框（新建与调整共用样式，无手柄，对齐 QRubberBand） -->
+          <!-- 调整态橡皮筋编辑框（新建拖拽共用样式，无手柄） -->
           <div
             v-if="(adjusting || rubberLive) && (rb.w > 0 || rb.h > 0)"
             class="rubber-band"
             :style="pxStyle(rb)"
           />
-          <!-- 非交互中的编辑框（进入调整态后静止显示） -->
-          <div
-            v-else-if="hasEdit && editBox"
-            class="rubber-band"
-            :style="pxStyle(editBox)"
-          />
+          <!-- 非交互中的编辑框（进入调整态后静止显示）：四角 + 四边中点手柄提示可拖拽/缩放 -->
+          <div v-else-if="hasEdit && editBox" class="rubber-band is-editing" :style="pxStyle(editBox)">
+            <span
+              v-for="(h, i) in HANDLE_DOTS"
+              :key="i"
+              class="handle-dot"
+              :style="h"
+            />
+          </div>
 
           <div
             ref="interactEl"
