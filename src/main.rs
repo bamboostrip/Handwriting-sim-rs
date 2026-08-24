@@ -1484,6 +1484,15 @@ fn show_page(
     ui.set_preview_nat_w(width as f32);
     ui.set_preview_nat_h(height as f32);
     ui.set_current_page_index(i as i32);
+    // 背景原始像素 → 预览像素的缩放比（大背景降采样后 <1），
+    // 区域叠加/编辑框按「原始 × 本系数 × fit-scale」定位
+    let bg_text = ui.get_background_path_text();
+    let scale = image::ImageReader::open(bg_text.as_str().trim())
+        .ok()
+        .and_then(|r| r.into_dimensions().ok())
+        .map(|(w, _)| if w > 0 { width as f32 / w as f32 } else { 1.0 })
+        .unwrap_or(1.0);
+    ui.set_bg_preview_scale(scale.min(1.0));
     ui.set_page_text(SharedString::from(format!("第 {} / {total} 页", i + 1)));
 }
 

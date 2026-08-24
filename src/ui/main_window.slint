@@ -107,6 +107,9 @@ export component MainWindow inherits Window {
     // 预览图自然尺寸（Rust 在 show_page 时设置；0 = 无预览）
     in property <float> preview-nat-w: 0.0;
     in property <float> preview-nat-h: 0.0;
+    // 背景原始像素 → 预览像素的缩放比（≤1，降采样时小于 1；无降采样为 1）。
+    // 区域模型存的是背景原始像素坐标：叠加/编辑框显示几何 = 原始 × 本系数 × fit-scale
+    in property <float> bg-preview-scale: 1.0;
 
     // ---- 框选文字区域（对应 Python 版 PreviewLabel + 区域列表面板） ----
     in-out property <bool> region-mode: false;   // 框选模式开关（十字光标 + 拖拽新建）
@@ -210,10 +213,10 @@ export component MainWindow inherits Window {
                         visible: (r.page - 1) == root.current-page-index
                             && r.w > 0.0
                             && i != root.editing-index;
-                        x: parent.off-x + r.x * parent.fit-scale * 1px;
-                        y: parent.off-y + r.y * parent.fit-scale * 1px;
-                        width: max(1px, r.w * parent.fit-scale * 1px);
-                        height: max(1px, r.h * parent.fit-scale * 1px);
+                        x: parent.off-x + r.x * parent.fit-scale * root.bg-preview-scale * 1px;
+                        y: parent.off-y + r.y * parent.fit-scale * root.bg-preview-scale * 1px;
+                        width: max(1px, r.w * parent.fit-scale * root.bg-preview-scale * 1px);
+                        height: max(1px, r.h * parent.fit-scale * root.bg-preview-scale * 1px);
                         border-width: 2px;
                         border-color: #e5484d;
                         background: i == root.highlight-index ? #e5484d55 : #e5484d1c;
@@ -243,14 +246,15 @@ export component MainWindow inherits Window {
                         property <bool> has-edit: root.editing-index >= 0
                             && root.editing-index < root.regions.length;
                         // 编辑框实时几何：交互中取 rb-*，静止时按模型换算
+                        // （模型为背景原始像素 → ×bg-preview-scale 转预览像素 → ×fit-scale 转显示）
                         property <length> eb-x: mode != 0 ? rb-x
-                            : (has-edit ? root.regions[root.editing-index].x * parent.fit-scale * 1px : 0px);
+                            : (has-edit ? root.regions[root.editing-index].x * parent.fit-scale * root.bg-preview-scale * 1px : 0px);
                         property <length> eb-y: mode != 0 ? rb-y
-                            : (has-edit ? root.regions[root.editing-index].y * parent.fit-scale * 1px : 0px);
+                            : (has-edit ? root.regions[root.editing-index].y * parent.fit-scale * root.bg-preview-scale * 1px : 0px);
                         property <length> eb-w: mode != 0 ? rb-w
-                            : (has-edit ? root.regions[root.editing-index].w * parent.fit-scale * 1px : 0px);
+                            : (has-edit ? root.regions[root.editing-index].w * parent.fit-scale * root.bg-preview-scale * 1px : 0px);
                         property <length> eb-h: mode != 0 ? rb-h
-                            : (has-edit ? root.regions[root.editing-index].h * parent.fit-scale * 1px : 0px);
+                            : (has-edit ? root.regions[root.editing-index].h * parent.fit-scale * root.bg-preview-scale * 1px : 0px);
 
                         // 显示坐标 → 源图像素
                         function src-f(v: length) -> float {
