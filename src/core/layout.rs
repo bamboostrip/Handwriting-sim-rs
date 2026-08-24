@@ -229,10 +229,32 @@ pub fn layout_page(
     width: usize,
     height: usize,
 ) -> LayoutResult {
+    layout_text(params, font, rng, text, start, width, height, false)
+}
+
+/// 泛化排版：在任意 `width × height` 画布内排版文字（对应 Python 版
+/// `_layout_text`）。页面路径传背景尺寸；区域路径传框选矩形宽高并置
+/// `force_first_line = true`——矩形再矮也至少排一行，否则矮区域一个字都画不出。
+#[allow(clippy::too_many_arguments)]
+pub fn layout_text(
+    params: &HandwritingParams,
+    font: &FontFace,
+    rng: &mut impl Rng,
+    text: &str,
+    start: usize,
+    width: usize,
+    height: usize,
+    force_first_line: bool,
+) -> LayoutResult {
     let width_f = width as f32;
     let mut mask = vec![false; width * height];
 
     let chars: Vec<char> = text.chars().collect();
+    if start >= chars.len() {
+        // 纯背景预览（无文字）时不加载字体也合法：这里 font 由调用方提供，
+        // 直接返回空掩码即可
+        return LayoutResult { mask, consumed: start };
+    }
     let text_len = chars.len();
     let line_spacing = params.total_line_spacing();
     let end_chars = params.end_chars.as_str();
@@ -245,8 +267,12 @@ pub fn layout_page(
 
     let mut i = start;
     let mut y = params.first_line_y();
+    let mut first_line = true;
 
-    while y <= height as f32 - params.bottom_margin - params.font_size {
+    while y <= height as f32 - params.bottom_margin - params.font_size
+        || (force_first_line && first_line)
+    {
+        first_line = false;
         let mut x = params.left_margin;
         loop {
             if i >= text_len {
@@ -1035,7 +1061,7 @@ mod tests {
         let ch = '中';
         let wrong = get_wrong_char(ch, &mut rng);
         assert_ne!(ch, wrong);
-        assert!(wrong >= '\u{4e00}' && wrong <= '\u{9fa5}');
+        assert!(('\u{4e00}'..='\u{9fa5}').contains(&wrong));
 
         let ch_eng = 'A';
         let wrong_eng = get_wrong_char(ch_eng, &mut rng);

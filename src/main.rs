@@ -10,19 +10,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use handwrite_sim::core::doc_render;
 use handwrite_sim::core::docx_io;
 use handwrite_sim::core::engine::{export, export_pdf, overlay_bounds, render_all_pages_preview, EngineError};
 use handwrite_sim::core::models::{
-    parse_color, Align, HandwritingParams, MiswriteMode, Paragraph, StrikeoutStyle,
+    parse_color, Align, HandwritingParams, MiswriteMode, Paragraph, StrikeoutStyle, TextRegion,
 };
 use handwrite_sim::core::presets;
-use handwrite_sim::ui::{MainWindow, ParaRow};
+use handwrite_sim::ui::{MainWindow, ParaRow, RegionInfo};
 use image::RgbaImage;
 use slint::{
     ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer,
@@ -75,6 +76,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_paragraphs(ModelRc::from(para_model.clone()));
     // 当前光标/焦点所在段（对齐/缩进按钮的作用目标）
     let current_row = Rc::new(Cell::new(0usize));
+    // ---- 框选文字区域状态 ----
+    // 区域数据源（背景原始像素坐标）
+    let regions_all = Rc::new(RefCell::new(Vec::<TextRegion>::new()));
+    // 预览叠加模型 + 列表摘要模型（与 regions_all 同步刷新）
+    let region_model = Rc::new(VecModel::<RegionInfo>::default());
+    ui.set_regions(ModelRc::from(region_model.clone()));
+    let region_labels = Rc::new(VecModel::<SharedString>::default());
+    ui.set_region_labels(ModelRc::from(region_labels.clone()));
+    // 正在二次调整的区域索引（-1 = 无）
+    let editing_index = Rc::new(Cell::new(-1i32));
+    // 新框选完成、对话框尚未确认的暂存矩形（背景原始像素坐标）
+    let pending_rect = Rc::new(RefCell::new(None::<[i32; 4]>));
+    // 文档底图逐页 PNG 路径（None = 未使用文档底图）；
+    // 用 Arc<Mutex> 以便在后台导入任务的 UI 回调（要求 Send）中写入
+    let doc_pages: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
     // 预设下拉：显示名模型 + 索引→路径映射（0 为占位符）
     let preset_model = Rc::new(VecModel::<SharedString>::default());
     let preset_paths = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
@@ -91,6 +107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pages = Arc::clone(&preview_pages);
         let index = Arc::clone(&preview_index);
         let render_gen = Arc::clone(&render_gen);
+        let regions_all = Rc::clone(&regions_all);
+        let doc_pages = Arc::clone(&doc_pages);
         ui.on_regenerate(move || {
             let Some(ui) = weak.upgrade() else { return };
             gui_dbg!("「预览」按钮触发（300ms 防抖后开始渲染）");
@@ -101,10 +119,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let index = Arc::clone(&index);
             let render_gen = Arc::clone(&render_gen);
             let para_model_timer = Rc::clone(&para_model);
+            let regions_all = Rc::clone(&regions_all);
+            let doc_pages = Arc::clone(&doc_pages);
             timer.start(TimerMode::SingleShot, Duration::from_millis(PREVIEW_DEBOUNCE_MS), move || {
                 gui_dbg!("预览渲染开始（seed={}）", seed.borrow());
                 // UI 线程：快速收集参数（不耗时，不阻塞）
-                let params = match collect_params(&ui, &preset_params, &para_model_timer) {
+                let params = match collect_params(&ui, &preset_params, &para_model_timer, &regions_all, &doc_pages) {
                     Ok(p) => p,
                     Err(e) => {
                         gui_dbg!("参数收集失败：{e}");
@@ -251,10 +271,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let preset_params = Rc::clone(&preset_params);
         let para_model = Rc::clone(&para_model);
         let render_gen = Arc::clone(&render_gen);
+        let regions_all = Rc::clone(&regions_all);
+        let doc_pages = Arc::clone(&doc_pages);
         ui.on_export_files(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(dir) = rfd::FileDialog::new().pick_folder() else { return };
-            let params = match collect_params(&ui, &preset_params, &para_model) {
+            let params = match collect_params(&ui, &preset_params, &para_model, &regions_all, &doc_pages) {
                 Ok(p) => p,
                 Err(e) => {
                     ui.set_status_text(SharedString::from(format!("参数错误：{e}")));
@@ -291,6 +313,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let preset_params = Rc::clone(&preset_params);
         let para_model = Rc::clone(&para_model);
         let render_gen = Arc::clone(&render_gen);
+        let regions_all = Rc::clone(&regions_all);
+        let doc_pages = Arc::clone(&doc_pages);
         ui.on_export_pdf(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(path) = rfd::FileDialog::new()
@@ -300,7 +324,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             else {
                 return;
             };
-            let params = match collect_params(&ui, &preset_params, &para_model) {
+            let params = match collect_params(&ui, &preset_params, &para_model, &regions_all, &doc_pages) {
                 Ok(p) => p,
                 Err(e) => {
                     ui.set_status_text(SharedString::from(format!("参数错误：{e}")));
@@ -651,6 +675,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let para_model = Rc::clone(&para_model);
         let preset_model = Rc::clone(&preset_model);
         let preset_paths = Rc::clone(&preset_paths);
+        let regions_all = Rc::clone(&regions_all);
+        let doc_pages = Arc::clone(&doc_pages);
         ui.on_save_preset(move || {
             let Some(ui) = weak.upgrade() else { return };
             let default_dir = presets::assets_root().join("presets");
@@ -661,7 +687,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .set_file_name("preset.json")
                 .save_file()
             {
-                let params = match collect_params(&ui, &preset_params, &para_model) {
+                let params = match collect_params(&ui, &preset_params, &para_model, &regions_all, &doc_pages) {
                     Ok(p) => p,
                     Err(e) => {
                         ui.set_status_text(SharedString::from(format!("参数错误：{e}")));
@@ -703,6 +729,425 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(e) => ui.set_status_text(SharedString::from(format!("载入失败：{e}"))),
                 }
             }
+        });
+    }
+
+    // ---- 框选文字区域：辅助函数与回调（对齐 Python 版 main_window 区域接线） ----
+
+    /// 把区域列表同步到预览叠加模型与列表面板。
+    fn refresh_region_ui(
+        regions: &Rc<RefCell<Vec<TextRegion>>>,
+        model: &Rc<VecModel<RegionInfo>>,
+        labels: &Rc<VecModel<SharedString>>,
+    ) {
+        let regs = regions.borrow();
+        model.set_vec(
+            regs.iter()
+                .enumerate()
+                .map(|(i, r)| RegionInfo {
+                    x: r.x as f32,
+                    y: r.y as f32,
+                    w: r.w as f32,
+                    h: r.h as f32,
+                    page: r.page,
+                    label: SharedString::from(r.label(i + 1)),
+                })
+                .collect::<Vec<RegionInfo>>(),
+        );
+        labels.set_vec(
+            regs.iter()
+                .enumerate()
+                .map(|(i, r)| SharedString::from(r.label(i + 1)))
+                .collect::<Vec<SharedString>>(),
+        );
+    }
+
+    fn set_editing(ui: &MainWindow, editing: &Rc<Cell<i32>>, idx: i32) {
+        editing.set(idx);
+        ui.set_editing_index(idx);
+    }
+
+    /// 读取背景图尺寸（只读头，不完整解码）。
+    fn bg_dimensions(path: &str) -> Option<(i32, i32)> {
+        image::ImageReader::open(path)
+            .ok()?
+            .into_dimensions()
+            .ok()
+            .map(|(w, h)| (w as i32, h as i32))
+    }
+
+    /// 预览坐标 → 背景原始像素的缩放比（原始宽 / 预览宽；≥1）。
+    fn preview_scale(ui: &MainWindow) -> f32 {
+        let nat_w = ui.get_preview_nat_w();
+        if nat_w <= 0.0 {
+            return 1.0;
+        }
+        let bg_text = ui.get_background_path_text();
+        match bg_dimensions(bg_text.as_str().trim()) {
+            Some((w, _)) => w as f32 / nat_w,
+            None => 1.0,
+        }
+    }
+
+    /// 把框选矩形（背景像素）钳制到背景范围内并保证最小尺寸。
+    fn clamp_rect(x: i32, y: i32, w: i32, h: i32, bw: i32, bh: i32) -> Option<[i32; 4]> {
+        if bw <= 8 || bh <= 8 {
+            return None;
+        }
+        let w = w.max(8);
+        let h = h.max(8);
+        let x = x.max(0).min(bw - 8);
+        let y = y.max(0).min(bh - 8);
+        Some([x, y, w.min(bw - x).max(1), h.min(bh - y).max(1)])
+    }
+
+    /// 打开区域编辑对话框；`index` 为 Some 时回填已有区域，None 时为新建。
+    fn open_region_dialog(
+        ui: &MainWindow,
+        regions: &Rc<RefCell<Vec<TextRegion>>>,
+        index: Option<usize>,
+        default_page: i32,
+    ) {
+        match index.and_then(|i| regions.borrow().get(i).cloned()) {
+            Some(r) => {
+                ui.set_dialog_text(SharedString::from(r.text.clone()));
+                ui.set_dialog_style_index(if r.printed { 1 } else { 0 });
+                ui.set_dialog_font_path(SharedString::from(r.font_path.clone()));
+                ui.set_dialog_font_size(r.font_size);
+                ui.set_dialog_page(r.page.max(1));
+                ui.set_dialog_target_index(index.map(|i| i as i32).unwrap_or(-1));
+            }
+            None => {
+                ui.set_dialog_text(SharedString::default());
+                ui.set_dialog_style_index(0);
+                ui.set_dialog_font_path(SharedString::default());
+                ui.set_dialog_font_size(0);
+                ui.set_dialog_page(default_page.max(1));
+                ui.set_dialog_target_index(-1);
+            }
+        }
+        ui.set_dialog_open(true);
+    }
+
+    /// 文档底图缓存目录（LOCALAPPDATA 或系统临时目录）。
+    fn doc_cache_dir() -> PathBuf {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(std::env::temp_dir)
+            .join("handwrite-sim")
+            .join("doc_bg")
+    }
+
+    // 框选模式开关：关闭时结束进行中的区域调整
+    {
+        let weak = ui.as_weak();
+        let editing = Rc::clone(&editing_index);
+        ui.on_toggle_region_mode(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let new_val = !ui.get_region_mode();
+            ui.set_region_mode(new_val);
+            if !new_val && editing.get() >= 0 {
+                set_editing(&ui, &editing, -1);
+            }
+        });
+    }
+
+    // 预览图上框选完成：换算回原始背景坐标并存暂存，弹出编辑对话框
+    {
+        let weak = ui.as_weak();
+        let pending = Rc::clone(&pending_rect);
+        ui.on_region_selected(move |sx, sy, sw, sh| {
+            let Some(ui) = weak.upgrade() else { return };
+            let scale = preview_scale(&ui);
+            let bg_text = ui.get_background_path_text();
+            let rect = bg_dimensions(bg_text.as_str().trim())
+                .and_then(|(bw, bh)| {
+                    clamp_rect(
+                        (sx * scale).round() as i32,
+                        (sy * scale).round() as i32,
+                        (sw * scale).round() as i32,
+                        (sh * scale).round() as i32,
+                        bw,
+                        bh,
+                    )
+                });
+            let Some(rect) = rect else { return };
+            let page = (ui.get_current_page_index() + 1).max(1);
+            *pending.borrow_mut() = Some(rect);
+            open_region_dialog(&ui, &(Rc::new(RefCell::new(Vec::new()))), None, page);
+        });
+    }
+
+    // 二次调整写回：按当前比例换算并钳制到背景范围
+    {
+        let weak = ui.as_weak();
+        let regions = Rc::clone(&regions_all);
+        let region_model = Rc::clone(&region_model);
+        let region_labels = Rc::clone(&region_labels);
+        ui.on_region_geometry_changed(move |idx, sx, sy, sw, sh| {
+            let Some(ui) = weak.upgrade() else { return };
+            let idx = idx as usize;
+            let scale = preview_scale(&ui);
+            let bg_text = ui.get_background_path_text();
+            let mut regs = regions.borrow_mut();
+            let Some(region) = regs.get_mut(idx) else { return };
+            let Some(rect) = bg_dimensions(bg_text.as_str().trim())
+                .and_then(|(bw, bh)| {
+                    clamp_rect(
+                        (sx * scale).round() as i32,
+                        (sy * scale).round() as i32,
+                        (sw * scale).round() as i32,
+                        (sh * scale).round() as i32,
+                        bw,
+                        bh,
+                    )
+                })
+            else {
+                return;
+            };
+            region.x = rect[0];
+            region.y = rect[1];
+            region.w = rect[2];
+            region.h = rect[3];
+            drop(regs);
+            refresh_region_ui(&regions, &region_model, &region_labels);
+            gui_dbg!("区域 {} 调整为 {:?}", idx + 1, rect);
+            ui.invoke_regenerate();
+        });
+    }
+
+    // 编辑态被取消（Esc / 点击框外 / 关闭模式）
+    {
+        let weak = ui.as_weak();
+        let editing = Rc::clone(&editing_index);
+        ui.on_region_edit_cancelled(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            set_editing(&ui, &editing, -1);
+        });
+    }
+
+    // 列表项点击：跳到该页并进入调整态
+    {
+        let weak = ui.as_weak();
+        let regions = Rc::clone(&regions_all);
+        let editing = Rc::clone(&editing_index);
+        let pages = Arc::clone(&preview_pages);
+        let index = Arc::clone(&preview_index);
+        ui.on_region_item_clicked(move |row| {
+            let Some(ui) = weak.upgrade() else { return };
+            let row = row as usize;
+            let page = {
+                let regs = regions.borrow();
+                match regs.get(row) {
+                    Some(r) => r.page.max(1),
+                    None => return,
+                }
+            };
+            // 区域不在当前页时先翻页（页码 1 基 → 索引 0 基）
+            if page - 1 != ui.get_current_page_index() {
+                {
+                    let mut idx = index.lock().unwrap();
+                    let total = pages.lock().unwrap().len();
+                    let target = (page as usize - 1).min(total.saturating_sub(1));
+                    *idx = target;
+                }
+                show_page(&ui, &pages, &index);
+            }
+            set_editing(&ui, &editing, row as i32);
+        });
+    }
+
+    // 列表项悬浮：临时高亮对应区域红框
+    {
+        let weak = ui.as_weak();
+        ui.on_region_item_hovered(move |row| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_highlight_index(row);
+        });
+    }
+
+    // 双击列表项：编辑区域属性
+    {
+        let weak = ui.as_weak();
+        let regions = Rc::clone(&regions_all);
+        ui.on_region_edit_requested(move |row| {
+            let Some(ui) = weak.upgrade() else { return };
+            open_region_dialog(&ui, &regions, Some(row as usize), 1);
+        });
+    }
+
+    // 删除单个区域
+    {
+        let weak = ui.as_weak();
+        let regions = Rc::clone(&regions_all);
+        let region_model = Rc::clone(&region_model);
+        let region_labels = Rc::clone(&region_labels);
+        let editing = Rc::clone(&editing_index);
+        ui.on_region_delete(move |row| {
+            let Some(ui) = weak.upgrade() else { return };
+            let row = row as usize;
+            let mut regs = regions.borrow_mut();
+            if row < regs.len() {
+                regs.remove(row);
+            }
+            drop(regs);
+            set_editing(&ui, &editing, -1);
+            ui.set_highlight_index(-1);
+            refresh_region_ui(&regions, &region_model, &region_labels);
+            ui.invoke_regenerate();
+        });
+    }
+
+    // 清空全部区域
+    {
+        let weak = ui.as_weak();
+        let regions = Rc::clone(&regions_all);
+        let region_model = Rc::clone(&region_model);
+        let region_labels = Rc::clone(&region_labels);
+        let editing = Rc::clone(&editing_index);
+        ui.on_region_clear(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            regions.borrow_mut().clear();
+            set_editing(&ui, &editing, -1);
+            ui.set_highlight_index(-1);
+            refresh_region_ui(&regions, &region_model, &region_labels);
+            ui.invoke_regenerate();
+        });
+    }
+
+    // 区域对话框确认：index < 0 = 新建（用暂存矩形），否则更新已有区域属性
+    {
+        let weak = ui.as_weak();
+        let regions = Rc::clone(&regions_all);
+        let region_model = Rc::clone(&region_model);
+        let region_labels = Rc::clone(&region_labels);
+        let pending = Rc::clone(&pending_rect);
+        ui.on_region_dialog_confirmed(
+            move |idx, text, printed, font_path, font_size, page| {
+                let Some(ui) = weak.upgrade() else { return };
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    *pending.borrow_mut() = None;
+                    ui.set_status_text(SharedString::from("区域文字为空，已放弃该区域"));
+                    return;
+                }
+                let font_path = font_path.trim().to_string();
+                if !font_path.is_empty() && !Path::new(&font_path).is_file() {
+                    ui.set_status_text(SharedString::from(format!(
+                        "文字区域字体文件不存在：{font_path}"
+                    )));
+                    return;
+                }
+                let mut regs = regions.borrow_mut();
+                if idx < 0 {
+                    // 新建：取暂存矩形
+                    let Some(rect) = pending.borrow_mut().take() else {
+                        drop(regs);
+                        return;
+                    };
+                    regs.push(TextRegion {
+                        x: rect[0],
+                        y: rect[1],
+                        w: rect[2],
+                        h: rect[3],
+                        text,
+                        font_path,
+                        printed,
+                        font_size,
+                        page: page.max(1),
+                    });
+                } else if let Some(region) = regs.get_mut(idx as usize) {
+                    // 编辑：只更新属性，几何以调整框为准
+                    region.text = text;
+                    region.printed = printed;
+                    region.font_path = font_path;
+                    region.font_size = font_size;
+                    let new_page = page.max(1);
+                    region.page = new_page;
+                }
+                drop(regs);
+                refresh_region_ui(&regions, &region_model, &region_labels);
+                ui.invoke_regenerate();
+            },
+        );
+    }
+
+    // 区域对话框取消：丢弃暂存矩形
+    {
+        let pending = Rc::clone(&pending_rect);
+        ui.on_region_dialog_cancelled(move || {
+            *pending.borrow_mut() = None;
+        });
+    }
+
+    // 对话框内选择打印字体
+    {
+        let weak = ui.as_weak();
+        ui.on_choose_region_font(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("字体文件", &["ttf", "ttc", "otf"])
+                .pick_file()
+            {
+                ui.set_dialog_font_path(SharedString::from(path.to_string_lossy().into_owned()));
+            }
+        });
+    }
+
+    // 导入 PDF/DOCX 文档底图：后台渲染逐页 PNG，替换当前背景
+    {
+        let weak = ui.as_weak();
+        let doc_pages = Arc::clone(&doc_pages);
+        let render_gen = Arc::clone(&render_gen);
+        ui.on_import_document(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("文档", &["pdf", "docx"])
+                .pick_file()
+            else {
+                return;
+            };
+            ui.set_status_text(SharedString::from("正在渲染文档底图…"));
+            // worker 与 apply 各需一份独立克隆（两者都是 move 闭包）
+            let doc_pages_apply = Arc::clone(&doc_pages);
+            spawn_ui_work(
+                &ui,
+                &render_gen,
+                move || -> Result<Vec<PathBuf>, EngineError> {
+                    let pages =
+                        doc_render::document_to_page_images(&path, &doc_cache_dir(), 200)
+                            .map_err(|e| EngineError::Doc(e.to_string()))?;
+                    Ok(pages)
+                },
+                move |ui, result| match result {
+                    Ok(pages) => {
+                        let count = pages.len();
+                        let first = pages
+                            .first()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        *doc_pages_apply.lock().unwrap() = Some(
+                            pages
+                                .iter()
+                                .map(|p| p.to_string_lossy().into_owned())
+                                .collect(),
+                        );
+                        ui.set_background_path_text(SharedString::from(first));
+                        ui.set_doc_status_text(SharedString::from(format!(
+                            "已导入 {count} 页，可逐页框选"
+                        )));
+                        ui.set_status_text(SharedString::from(format!(
+                            "已导入文档底图（{count} 页）；在目标页开启「框选」即可填写"
+                        )));
+                        ui.invoke_regenerate();
+                    }
+                    Err(e) => {
+                        ui.set_doc_status_text(SharedString::default());
+                        ui.set_status_text(SharedString::from(format!("导入文档失败：{e}")));
+                    }
+                },
+            );
         });
     }
 
@@ -901,6 +1346,8 @@ fn collect_params(
     ui: &MainWindow,
     preset_params: &RefCell<Option<HandwritingParams>>,
     para_model: &VecModel<ParaRow>,
+    regions_all: &RefCell<Vec<TextRegion>>,
+    doc_pages: &Mutex<Option<Vec<String>>>,
 ) -> Result<HandwritingParams, EngineError> {
     let mut params = preset_params.borrow().clone().unwrap_or_default();
     let font_size = ui.get_font_size() as f32;
@@ -968,7 +1415,17 @@ fn collect_params(
     };
     // 文字颜色
     params.fill = parse_color(ui.get_font_color().as_str()).map_err(EngineError::Params)?;
-    params.validate().map_err(EngineError::Params)?;
+    // 框选区域 + 多页文档底图（区域坐标为背景原始像素，直接随参数进引擎）。
+    // 背景路径被手动改走时文档底图自动失效（对齐 Python 版 _sync_doc_state）
+    params.regions = regions_all.borrow().clone();
+    let doc = doc_pages.lock().unwrap().clone();
+    let bg_now = ui.get_background_path_text().as_str().trim().to_string();
+    params.background_pages = match doc {
+        Some(pages) if pages.first().map(|p| p.as_str()) == Some(bg_now.as_str()) => pages,
+        _ => Vec::new(),
+    };
+    // 纯背景预览合法（无文字/区域时只要求背景有效），与 Python 版一致
+    params.validate_with(false).map_err(EngineError::Params)?;
     Ok(params)
 }
 
@@ -1012,6 +1469,9 @@ fn show_page(
     let pages = preview_pages.lock().unwrap();
     let total = pages.len();
     if total == 0 {
+        ui.set_preview_nat_w(0.0);
+        ui.set_preview_nat_h(0.0);
+        ui.set_current_page_index(0);
         ui.set_page_text(SharedString::from("第 1 / 1 页"));
         return;
     }
@@ -1020,6 +1480,10 @@ fn show_page(
     let (width, height) = img.dimensions();
     let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(img.as_raw(), width, height);
     ui.set_preview_image(Image::from_rgba8(buffer));
+    // 预览图自然尺寸 + 当前页索引：供框选坐标换算与区域叠加过滤
+    ui.set_preview_nat_w(width as f32);
+    ui.set_preview_nat_h(height as f32);
+    ui.set_current_page_index(i as i32);
     ui.set_page_text(SharedString::from(format!("第 {} / {total} 页", i + 1)));
 }
 
@@ -1051,20 +1515,40 @@ mod tests {
         let dummy_bg = tempfile::NamedTempFile::new().unwrap();
         let bg_path = dummy_bg.path().to_string_lossy().to_string();
 
-        let mut params = HandwritingParams::default();
-        params.text = "测试文本".to_string();
-        params.font_path = font_path;
-        params.background_path = bg_path;
-        params.miswrite_strikeout_style = StrikeoutStyle::Cross;
-        params.miswrite_rewrite_mode = MiswriteMode::Rewrite;
+        let params = HandwritingParams {
+            text: "测试文本".to_string(),
+            font_path,
+            background_path: bg_path,
+            miswrite_strikeout_style: StrikeoutStyle::Cross,
+            miswrite_rewrite_mode: MiswriteMode::Rewrite,
+            ..HandwritingParams::default()
+        };
 
         apply_preset_to_ui(&ui, &preset_params, &params);
         assert_eq!(ui.get_miswrite_strikeout_style_index(), 3);
         assert_eq!(ui.get_miswrite_mode_index(), 1);
 
-        let collected = collect_params(&ui, &preset_params, &para_model).unwrap();
+        let regions_all = RefCell::new(Vec::<TextRegion>::new());
+        let doc_pages = std::sync::Mutex::new(None::<Vec<String>>);
+        let collected =
+            collect_params(&ui, &preset_params, &para_model, &regions_all, &doc_pages).unwrap();
         assert_eq!(collected.miswrite_strikeout_style, StrikeoutStyle::Cross);
         assert_eq!(collected.miswrite_rewrite_mode, MiswriteMode::Rewrite);
+
+        // 区域随参数进入引擎：collect_params 应带上 UI 侧的区域状态
+        regions_all.borrow_mut().push(TextRegion {
+            x: 10,
+            y: 20,
+            w: 100,
+            h: 60,
+            text: "区域文字".into(),
+            printed: true,
+            ..TextRegion::default()
+        });
+        let collected =
+            collect_params(&ui, &preset_params, &para_model, &regions_all, &doc_pages).unwrap();
+        assert_eq!(collected.regions.len(), 1);
+        assert!(collected.regions[0].printed);
     }
 }
 

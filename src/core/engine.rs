@@ -14,7 +14,7 @@ use rand::{rngs::StdRng, SeedableRng};
 
 use crate::core::font::FontFace;
 use crate::core::layout;
-use crate::core::models::{HandwritingParams, ParamsError};
+use crate::core::models::{HandwritingParams, ParamsError, TextRegion};
 use crate::core::perturb;
 
 /// 引擎错误。
@@ -26,6 +26,8 @@ pub enum EngineError {
     Font(String),
     #[error("背景图片加载失败：{0}")]
     Background(String),
+    #[error("文档底图渲染失败：{0}")]
+    Doc(String),
     #[error("IO 错误：{0}")]
     Io(#[from] std::io::Error),
     #[error("图像处理失败：{0}")]
@@ -85,6 +87,17 @@ fn scaled_params_for(params: &HandwritingParams, src_w: u32) -> HandwritingParam
     // 否则大背景预览中缩进相对字号偏大（如 2 字宽缩进显示为 4 字宽）
     for p in scaled.paragraphs.iter_mut() {
         p.first_line_indent *= scale;
+    }
+    // 框选区域同样按比例缩放到预览坐标（对齐 Python 版 `_scale_params_for_preview`：
+    // 区域矩形 × scale、区域字号 × scale；深拷贝不污染原始参数）
+    for r in scaled.regions.iter_mut() {
+        r.x = (r.x as f64 * scale as f64).round() as i32;
+        r.y = (r.y as f64 * scale as f64).round() as i32;
+        r.w = ((r.w as f64 * scale as f64).round() as i32).max(1);
+        r.h = ((r.h as f64 * scale as f64).round() as i32).max(1);
+        if r.font_size > 0 {
+            r.font_size = ((r.font_size as f64 * scale as f64).round() as i32).max(1);
+        }
     }
     scaled
 }
@@ -197,99 +210,278 @@ impl DefaultEngine {
         Ok((thumb, scaled))
     }
 
-    /// 渲染一页（纯文本路径）。
-    fn render_page_from(
-        &self,
+    // ------------------------------------------------------------------
+    // 多页背景与区域合成
+    // ------------------------------------------------------------------
+
+    /// 第 index 页（0 基）背景文件路径：多页文档超出自身页数时复用最后一页；
+    /// 无多页背景时恒为 `background_path`。对齐 Python 版 `_page_background` 取路逻辑。
+    fn background_page_path(params: &HandwritingParams, index: usize) -> String {
+        if params.background_pages.is_empty() {
+            params.background_path.clone()
+        } else {
+            params.background_pages[index.min(params.background_pages.len() - 1)].clone()
+        }
+    }
+
+    /// 把背景图缩放到统一页面尺寸（某页与首页尺寸不同时对齐首页，保证排版坐标一致）。
+    fn resize_to_size(img: RgbImage, width: u32, height: u32) -> RgbImage {
+        if img.width() == width && img.height() == height {
+            return img;
+        }
+        image::imageops::resize(&img, width, height, image::imageops::FilterType::Lanczos3)
+    }
+
+    /// 构造区域局部的渲染参数：独立字体/字号；打印体关闭全部扰动。
+    /// 区域以矩形自身为界，不再叠加整页边距（对齐 Python 版 `_region_params`）。
+    fn region_local_params(params: &HandwritingParams, region: &TextRegion) -> HandwritingParams {
+        let mut rp = params.clone();
+        rp.text = region.text.clone();
+        rp.paragraphs = Vec::new();
+        rp.regions = Vec::new();
+        rp.left_margin = 0.0;
+        rp.right_margin = 0.0;
+        rp.top_margin = 0.0;
+        rp.bottom_margin = 0.0;
+        if !region.font_path.is_empty() {
+            rp.font_path = region.font_path.clone();
+        }
+        if region.font_size > 0 {
+            rp.font_size = region.font_size as f32;
+        }
+        if region.printed {
+            rp.word_spacing_sigma = 0.0;
+            rp.line_spacing_sigma = 0.0;
+            rp.font_size_sigma = 0.0;
+            rp.perturb_x_sigma = 0.0;
+            rp.perturb_y_sigma = 0.0;
+            rp.perturb_theta_sigma = 0.0;
+            rp.miswrite_rate = 0.0;
+        }
+        rp
+    }
+
+    /// 每区域独立排版随机源：由主 seed 派生的确定性字符串种子
+    /// （对齐 Python 版 `random.Random(f"{seed}|region{index}")` 的派生方式，
+    /// 经哈希映射到 u64；相同 seed 下预览与导出完全一致）。
+    fn region_seed(seed: u64, index: usize) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let text = format!("{seed}|region{index}");
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// 笔画扰动的独立随机源（区域路径专用，避免与排版流交叉影响）。
+    fn perturb_seed(seed: u64) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let text = format!("{seed}|perturb");
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// 主文字（text 或 paragraphs）的逐页墨迹掩码；无文字返回空。
+    /// 返回值第二项为「排版停滞」标志：纯文本路径某页一个字都没消费
+    /// （文本区过小）时为 true，调用方据此报 `TextAreaTooSmall` 而不是
+    /// 无限追加空白页（保持既有回归语义）。
+    fn main_page_masks(
         params: &HandwritingParams,
         font: &FontFace,
         rng: &mut StdRng,
-        text: &str,
-        start: usize,
-        background: &RgbImage,
-    ) -> Result<(RgbaImage, usize), EngineError> {
-        let (width, height) = (background.width() as usize, background.height() as usize);
-        let t0 = std::time::Instant::now();
-        let result = layout::layout_page(params, font, rng, text, start, width, height);
-        let t1 = t0.elapsed().as_millis();
-        let canvas =
-            perturb::perturb_mask(&result.mask, width, height, params, rng, background.as_raw());
-        let t2 = t0.elapsed().as_millis();
-        dbg_log(
-            &format!("单页排版 {t1}ms + 扰动 {t2}ms（消费 {}/{} 字）", result.consumed, text.chars().count()),
-            t2,
-        );
-        Ok((rgba_from_rgb(&canvas, width, height), result.consumed))
+        width: usize,
+        height: usize,
+    ) -> (Vec<Vec<bool>>, bool) {
+        if !params.paragraphs.is_empty() {
+            let pages =
+                layout::layout_paragraphs(params, font, rng, &params.paragraphs, width, height);
+            return (pages, false);
+        }
+        if params.text.trim().is_empty() {
+            return (Vec::new(), false);
+        }
+        let mut masks = Vec::new();
+        let total_chars = params.text.chars().count();
+        let mut start = 0usize;
+        let mut stalled = false;
+        loop {
+            let result =
+                layout::layout_text(params, font, rng, &params.text, start, width, height, false);
+            let no_progress = result.consumed <= start;
+            start = result.consumed;
+            masks.push(result.mask);
+            if start >= total_chars {
+                break;
+            }
+            if no_progress {
+                stalled = true;
+                break;
+            }
+        }
+        (masks, stalled)
     }
+}
+
+/// 一个框选区域的预计算条目：局部参数、页面偏移/尺寸、逐页掩码、全局起始页。
+struct RegionEntry {
+    local_params: HandwritingParams,
+    ox: usize,
+    oy: usize,
+    rw: usize,
+    rh: usize,
+    masks: Vec<Vec<bool>>,
+    /// 全局起始页索引（0 基）。
+    start_page: usize,
+}
+
+/// 统一的多页生成器：预览（降采样参数 + 缩略底图）与导出（原始参数 +
+/// 全分辨率底图）共用同一段编排逻辑，保证同 seed 输出一致。
+///
+/// `first_background` 为第 1 页背景（决定画布尺寸），`page_background(index)`
+/// 返回第 index 页已缩放到统一尺寸的背景。
+fn generate_pages_with(
+    params: &HandwritingParams,
+    font: Option<&FontFace>,
+    seed: u64,
+    first_background: RgbImage,
+    page_background: &dyn Fn(usize) -> Result<RgbImage, EngineError>,
+) -> Result<Vec<RgbaImage>, EngineError> {
+    let width = first_background.width() as usize;
+    let height = first_background.height() as usize;
+
+    // ---- 主文字逐页掩码（无文字时为空 → 纯背景路径） ----
+    let main_rng = &mut StdRng::seed_from_u64(seed);
+    let (main_masks, stalled) = match font {
+        Some(f) => DefaultEngine::main_page_masks(params, f, main_rng, width, height),
+        None => (Vec::new(), false),
+    };
+    if stalled {
+        return Err(EngineError::TextAreaTooSmall);
+    }
+
+    // ---- 区域条目：每区域独立字体/参数/随机源（对齐 `_pages_with_regions`） ----
+    let mut entries: Vec<RegionEntry> = Vec::new();
+    for (index, region) in params.regions.iter().enumerate() {
+        if region.text.trim().is_empty() {
+            continue;
+        }
+        let ox = (region.x.max(0) as usize).min(width.saturating_sub(1));
+        let oy = (region.y.max(0) as usize).min(height.saturating_sub(1));
+        let rw = (region.w.max(1) as usize).min(width.saturating_sub(ox)).max(1);
+        let rh = (region.h.max(1) as usize).min(height.saturating_sub(oy)).max(1);
+        let rp = DefaultEngine::region_local_params(params, region);
+        let font_r = FontFace::load(Path::new(&rp.font_path), rp.font_size)
+            .map_err(EngineError::Font)?;
+        let rrand = &mut StdRng::seed_from_u64(DefaultEngine::region_seed(seed, index));
+        let total_chars = region.text.chars().count();
+        let mut masks: Vec<Vec<bool>> = Vec::new();
+        let mut start = 0usize;
+        loop {
+            let prev = start;
+            let result =
+                layout::layout_text(&rp, &font_r, rrand, &region.text, start, rw, rh, true);
+            start = result.consumed;
+            masks.push(result.mask);
+            // 文字排完，或区域矮到一行都放不下（start 不再推进）时结束，避免死循环
+            if start >= total_chars || start == prev {
+                break;
+            }
+        }
+        drop(font_r);
+        entries.push(RegionEntry {
+            local_params: rp,
+            ox,
+            oy,
+            rw,
+            rh,
+            masks,
+            start_page: region.page.max(1) as usize - 1,
+        });
+    }
+
+    // ---- 总页数 = 主文字 / 背景页数 / 各区域所需末页的最大值（至少 1 页） ----
+    let n_pages = main_masks
+        .len()
+        .max(params.background_pages.len())
+        .max(entries.iter().map(|e| e.start_page + e.masks.len()).max().unwrap_or(0))
+        .max(1);
+
+    let perturb_rng = &mut StdRng::seed_from_u64(DefaultEngine::perturb_seed(seed));
+    let mut out: Vec<RgbaImage> = Vec::with_capacity(n_pages);
+    let mut scratch: Vec<u8> = Vec::with_capacity(width * height * 3);
+    for page_index in 0..n_pages {
+        let bg = page_background(page_index)?;
+        let mut canvas = bg.as_raw().clone();
+        // 区域先合成（重叠时主文字在上）
+        for e in &entries {
+            let local = match page_index.checked_sub(e.start_page) {
+                Some(l) if l < e.masks.len() => l,
+                _ => continue,
+            };
+            perturb::perturb_region_into(
+                &e.masks[local],
+                e.rw,
+                e.rh,
+                &e.local_params,
+                perturb_rng,
+                e.ox,
+                e.oy,
+                &mut canvas,
+                width,
+                height,
+            );
+        }
+        // 主文字后合成：以当前画布为底（含区域墨迹），扰动写入
+        if page_index < main_masks.len() && main_masks[page_index].iter().any(|&b| b) {
+            perturb::perturb_mask_into(
+                &main_masks[page_index],
+                width,
+                height,
+                params,
+                perturb_rng,
+                &canvas,
+                &mut scratch,
+            );
+            std::mem::swap(&mut canvas, &mut scratch);
+        }
+        out.push(rgba_from_rgb(&canvas, width, height));
+    }
+    Ok(out)
 }
 
 impl Engine for DefaultEngine {
     fn render_preview(&self, params: &HandwritingParams) -> Result<RgbaImage, EngineError> {
-        params.validate()?;
-        let font =
-            FontFace::load(Path::new(&params.font_path), params.font_size).map_err(EngineError::Font)?;
-        let (background, scaled) = Self::load_background_for_preview(params)?;
-        let mut rng = StdRng::seed_from_u64(self.seed);
-        if !scaled.paragraphs.is_empty() {
-            let pages = layout::layout_paragraphs(
-                &scaled, &font, &mut rng, &scaled.paragraphs,
-                background.width() as usize, background.height() as usize,
-            );
-            let canvas = perturb::perturb_mask(
-                &pages[0], background.width() as usize, background.height() as usize,
-                &scaled, &mut rng, background.as_raw(),
-            );
-            return Ok(rgba_from_rgb(&canvas, background.width() as usize, background.height() as usize));
-        }
-        let (page, _) = self.render_page_from(&scaled, &font, &mut rng, &params.text, 0, &background)?;
-        Ok(page)
+        params.validate_with(false)?;
+        let pages = preview_pages_impl(self.seed, params)?;
+        pages
+            .into_iter()
+            .next()
+            .ok_or_else(|| EngineError::Image("未生成任何页面".into()))
     }
 
     fn render_pages(&self, params: &HandwritingParams) -> Result<Vec<RgbaImage>, EngineError> {
         let t0 = std::time::Instant::now();
-        params.validate()?;
-        let font =
-            FontFace::load(Path::new(&params.font_path), params.font_size).map_err(EngineError::Font)?;
+        params.validate_with(false)?;
+        let has_content = has_renderable_content(params);
+        let font = load_font_if_needed(params, has_content)?;
         let background = Self::load_background(&params.background_path)?;
-        dbg_log(&format!("字体+背景加载完成（背景 {}x{}）", background.width(), background.height()), t0.elapsed().as_millis());
-        let mut rng = StdRng::seed_from_u64(self.seed);
-        if !params.paragraphs.is_empty() {
-            let pages = layout::layout_paragraphs(
-                params, &font, &mut rng, &params.paragraphs,
-                background.width() as usize, background.height() as usize,
-            );
-            dbg_log(&format!("段落排版完成（{} 页，等待逐页扰动）", pages.len()), t0.elapsed().as_millis());
-            let mut out = Vec::with_capacity(pages.len());
-            let mut canvas = Vec::with_capacity(background.as_raw().len());
-            for (index, mask) in pages.into_iter().enumerate() {
-                let t1 = std::time::Instant::now();
-                perturb::perturb_mask_into(
-                    &mask, background.width() as usize, background.height() as usize,
-                    params, &mut rng, background.as_raw(), &mut canvas,
-                );
-                dbg_log(&format!("第 {} 页扰动完成", index + 1), t1.elapsed().as_millis());
-                out.push(rgba_from_rgb(&canvas, background.width() as usize, background.height() as usize));
+        dbg_log(
+            &format!("字体+背景加载完成（背景 {}x{}）", background.width(), background.height()),
+            t0.elapsed().as_millis(),
+        );
+        let first_w = background.width();
+        let first_h = background.height();
+        let bg_for_closure = background.clone();
+        let page_background = move |index: usize| -> Result<RgbImage, EngineError> {
+            if index == 0 {
+                return Ok(bg_for_closure.clone());
             }
-            return Ok(out);
-        }
-        let mut pages = Vec::new();
-        let mut start = 0;
-        let total_chars = params.text.chars().count();
-        let mut page_no = 0;
-        loop {
-            page_no += 1;
-            let (page, consumed) = self.render_page_from(params, &font, &mut rng, &params.text, start, &background)?;
-            pages.push(page);
-            dbg_log(&format!("第 {page_no} 页完成（消费 {consumed}/{total_chars} 字）"), t0.elapsed().as_millis());
-            if consumed >= total_chars {
-                break;
-            }
-            if consumed <= start {
-                // 一页未消费任何字符（文本区过小等）：再渲染只会无限追加空白页
-                return Err(EngineError::TextAreaTooSmall);
-            }
-            start = consumed;
-        }
-        dbg_log(&format!("全部 {page_no} 页渲染完成"), t0.elapsed().as_millis());
+            let path = Self::background_page_path(params, index);
+            let img = Self::load_background(&path)?;
+            Ok(Self::resize_to_size(img, first_w, first_h))
+        };
+        let pages = generate_pages_with(params, font.as_ref(), self.seed, background, &page_background)?;
+        dbg_log(&format!("全部 {} 页渲染完成", pages.len()), t0.elapsed().as_millis());
         Ok(pages)
     }
 
@@ -342,6 +534,61 @@ impl Engine for DefaultEngine {
     }
 }
 
+/// 是否存在可渲染内容（主文字 / 段落 / 非空区域文字）——决定是否需要加载主字体。
+fn has_renderable_content(params: &HandwritingParams) -> bool {
+    !params.text.trim().is_empty()
+        || !params.paragraphs.is_empty()
+        || params.regions.iter().any(|r| !r.text.trim().is_empty())
+}
+
+/// 有内容时加载主字体；纯背景预览允许 font_path 为空（一个字都不画）。
+fn load_font_if_needed(
+    params: &HandwritingParams,
+    has_content: bool,
+) -> Result<Option<FontFace>, EngineError> {
+    if !has_content {
+        return Ok(None);
+    }
+    FontFace::load(Path::new(&params.font_path), params.font_size)
+        .map(Some)
+        .map_err(EngineError::Font)
+}
+
+/// 预览全页实现：降采样背景 + 等比缩放参数后走统一生成器。
+fn preview_pages_impl(seed: u64, params: &HandwritingParams) -> Result<Vec<RgbaImage>, EngineError> {
+    let t0 = std::time::Instant::now();
+    params.validate_with(false)?;
+    dbg_log(
+        &format!(
+            "参数校验通过（文本 {} 字 / 段落 {} 段 / 区域 {} 个）",
+            params.text.chars().count(),
+            params.paragraphs.len(),
+            params.regions.len()
+        ),
+        t0.elapsed().as_millis(),
+    );
+    let font = load_font_if_needed(params, has_renderable_content(params))?;
+    dbg_log("字体加载完成", t0.elapsed().as_millis());
+    let (background, scaled) = DefaultEngine::load_background_for_preview(params)?;
+    let (width, height) = (background.width() as usize, background.height() as usize);
+    dbg_log(&format!("画布 {width}x{height}，开始排版"), t0.elapsed().as_millis());
+    let first_w = background.width();
+    let first_h = background.height();
+    let bg_for_closure = background.clone();
+    let page_background = move |index: usize| -> Result<RgbImage, EngineError> {
+        if index == 0 {
+            return Ok(bg_for_closure.clone());
+        }
+        // 预览路径的后续文档页：加载原图后缩放到首页缩略图尺寸
+        let path = DefaultEngine::background_page_path(params, index);
+        let img = DefaultEngine::load_background(&path)?;
+        Ok(DefaultEngine::resize_to_size(img, first_w, first_h))
+    };
+    let pages = generate_pages_with(&scaled, font.as_ref(), seed, background, &page_background)?;
+    dbg_log(&format!("预览渲染完成（共 {} 页）", pages.len()), t0.elapsed().as_millis());
+    Ok(pages)
+}
+
 /// 把 RGB 缓冲包装为 RGBA 图像（前景不透明）。
 fn rgba_from_rgb(rgb: &[u8], width: usize, height: usize) -> RgbaImage {
     let mut buf = Vec::with_capacity(rgb.len() / 3 * 4);
@@ -367,53 +614,7 @@ pub fn render_all_pages_preview(
     params: &HandwritingParams,
     seed: u64,
 ) -> Result<Vec<RgbaImage>, EngineError> {
-    let t0 = std::time::Instant::now();
-    params.validate()?;
-    dbg_log(&format!("参数校验通过（文本 {} 字 / 段落 {} 段）", params.text.chars().count(), params.paragraphs.len()), t0.elapsed().as_millis());
-    let font =
-        FontFace::load(Path::new(&params.font_path), params.font_size).map_err(EngineError::Font)?;
-    dbg_log("字体加载完成", t0.elapsed().as_millis());
-    let (background, scaled) = DefaultEngine::load_background_for_preview(params)?;
-    let (width, height) = (background.width() as usize, background.height() as usize);
-    dbg_log(&format!("画布 {width}x{height}，开始排版"), t0.elapsed().as_millis());
-    let mut rng = StdRng::seed_from_u64(seed);
-    let engine = DefaultEngine::new(seed);
-
-    if !scaled.paragraphs.is_empty() {
-        let pages = layout::layout_paragraphs(&scaled, &font, &mut rng, &scaled.paragraphs, width, height);
-        dbg_log(&format!("段落排版完成（{} 页，等待逐页扰动）", pages.len()), t0.elapsed().as_millis());
-        let mut out = Vec::with_capacity(pages.len());
-        let mut canvas = Vec::with_capacity(background.as_raw().len());
-        for (index, mask) in pages.into_iter().enumerate() {
-            let t1 = std::time::Instant::now();
-            perturb::perturb_mask_into(&mask, width, height, &scaled, &mut rng, background.as_raw(), &mut canvas);
-            dbg_log(&format!("第 {} 页扰动完成", index + 1), t1.elapsed().as_millis());
-            out.push(rgba_from_rgb(&canvas, width, height));
-        }
-        dbg_log(&format!("预览渲染完成（共 {} 页）", out.len()), t0.elapsed().as_millis());
-        return Ok(out);
-    }
-    let mut pages = Vec::new();
-    let mut start = 0;
-    let total_chars = params.text.chars().count();
-    let mut page_no = 0;
-    loop {
-        page_no += 1;
-        let (page, consumed) = engine.render_page_from(&scaled, &font, &mut rng, &params.text, start, &background)?;
-        pages.push(page);
-        dbg_log(&format!("第 {page_no} 页完成（消费 {consumed}/{total_chars} 字）"), t0.elapsed().as_millis());
-        if consumed >= total_chars {
-            break;
-        }
-        if consumed <= start {
-            // 一页未消费任何字符（文本区过小等）：再渲染只会无限追加空白页
-            return Err(EngineError::TextAreaTooSmall);
-        }
-        start = consumed;
-    }
-    let done_ms = t0.elapsed().as_millis();
-    dbg_log(&format!("预览渲染完成（共 {page_no} 页）"), done_ms);
-    Ok(pages)
+    preview_pages_impl(seed, params)
 }
 
 /// 便捷入口：导出 PDF（位图层方案，300 DPI）。
@@ -714,10 +915,11 @@ mod tests {
 
     #[test]
     fn render_preview_rejects_invalid_params() {
+        // 纯背景预览合法后（require_text=false），默认参数在「无背景」处被拦下
         let params = HandwritingParams::default();
         assert!(matches!(
             render_preview(&params, 1),
-            Err(EngineError::Params(ParamsError::NoText))
+            Err(EngineError::Params(ParamsError::NoBackground))
         ));
     }
 
@@ -935,5 +1137,296 @@ mod tests {
             page.media_box.height.0
         );
         fs::remove_dir_all(dir.path()).ok();
+    }
+
+    // =====================================================================
+    // 框选文字区域（对应 Python 版 tests/test_regions.py）
+    // =====================================================================
+
+    /// 白底黑字的墨迹掩码。
+    fn region_ink_mask(page: &RgbaImage) -> Vec<bool> {
+        page.as_raw()
+            .chunks_exact(4)
+            .map(|px| ((px[0] as u16 + px[1] as u16 + px[2] as u16) / 3) < 128)
+            .collect()
+    }
+
+    /// 统计矩形区域内的墨迹像素数。
+    fn inner_ink(ink: &[bool], w: usize, x: usize, y: usize, rw: usize, rh: usize) -> usize {
+        let mut count = 0;
+        for yy in y..(y + rh) {
+            for xx in x..(x + rw) {
+                if ink[yy * w + xx] {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    fn region_test_params(font: &Path, dir: &tempfile::TempDir) -> HandwritingParams {
+        let bg = dir.path().join("bg.png");
+        let mut img = RgbImage::new(400, 300);
+        for px in img.pixels_mut() {
+            *px = Rgb([255, 255, 255]);
+        }
+        img.save(&bg).unwrap();
+        HandwritingParams {
+            text: String::new(),
+            font_path: font.to_string_lossy().into_owned(),
+            background_path: bg.to_string_lossy().into_owned(),
+            font_size: 30.0,
+            line_spacing: 40.0,
+            word_spacing: 5.0,
+            ..HandwritingParams::default()
+        }
+    }
+
+    #[test]
+    fn printed_region_ink_near_box() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let params = region_test_params(&font, &dir);
+        let (bx, by, bw, bh) = (60usize, 50usize, 200usize, 120usize);
+        let mut p = params;
+        p.regions = vec![TextRegion {
+            x: bx as i32, y: by as i32, w: bw as i32, h: bh as i32,
+            text: "打印体测试文字".into(), printed: true, ..TextRegion::default()
+        }];
+        let image = DefaultEngine::new(7).render_preview(&p).unwrap();
+        let ink = region_ink_mask(&image);
+        assert!(ink.iter().any(|&b| b));
+        let slack = (p.font_size * 2.0) as usize;
+        let (mut min_x, mut min_y) = (usize::MAX, usize::MAX);
+        let (mut max_x, mut max_y) = (0usize, 0usize);
+        for (i, &v) in ink.iter().enumerate() {
+            if v {
+                let (x, y) = (i % 400, i / 400);
+                min_x = min_x.min(x); max_x = max_x.max(x);
+                min_y = min_y.min(y); max_y = max_y.max(y);
+            }
+        }
+        assert!(min_x + slack >= bx && min_y + slack >= by, "墨迹不应远离矩形左上：{min_x},{min_y}");
+        assert!(max_x <= bx + bw + slack && max_y <= by + bh + slack, "墨迹不应溢出矩形太远");
+        assert!(inner_ink(&ink, 400, bx, by, bw, bh) > 0, "墨迹应与矩形相交");
+    }
+
+    #[test]
+    fn handwritten_region_renders() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = region_test_params(&font, &dir);
+        params.regions = vec![TextRegion {
+            x: 40, y: 40, w: 300, h: 200, text: "手写体区域内容".into(), ..TextRegion::default()
+        }];
+        let image = render_preview(&params, 42).unwrap();
+        assert!(region_ink_mask(&image).iter().any(|&b| b), "手写体区域应有前景");
+    }
+
+    #[test]
+    fn region_and_main_text_coexist() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = region_test_params(&font, &dir);
+        params.text = "这是主文字，铺满页面边距区域。".repeat(10);
+        let (bx, by, bw, bh) = (150usize, 100usize, 160usize, 90usize);
+        params.regions = vec![TextRegion {
+            x: bx as i32, y: by as i32, w: bw as i32, h: bh as i32,
+            text: "区域文字".into(), printed: true, ..TextRegion::default()
+        }];
+        let image = render_preview(&params, 42).unwrap();
+        let ink = region_ink_mask(&image);
+        assert!(inner_ink(&ink, 400, bx, by, bw, bh) > 0, "区域内应有墨迹");
+        // 区域外左上角应有主文字墨迹（首行基线在 top_margin + line_spacing ≈ 70）
+        assert!(inner_ink(&ink, 400, 31, 71, 109, 29) > 0, "区域外应有主文字墨迹");
+    }
+
+    #[test]
+    fn region_multi_page_flows_to_next_page() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = region_test_params(&font, &dir);
+        let (bx, by, bw, bh) = (50usize, 40usize, 180usize, 80usize);
+        params.regions = vec![TextRegion {
+            x: bx as i32, y: by as i32, w: bw as i32, h: bh as i32,
+            text: "很长的一段区域文字。".repeat(30),
+            ..TextRegion::default()
+        }];
+        let pages = render_all_pages_preview(&params, 7).unwrap();
+        assert!(pages.len() >= 2, "区域文字应跨页，实际 {} 页", pages.len());
+        for page in &pages {
+            let ink = region_ink_mask(page);
+            assert!(ink.iter().any(|&b| b));
+            assert!(
+                inner_ink(&ink, 400, bx, by, bw, bh) > 0,
+                "每页同一矩形内都应有延续的区域墨迹"
+            );
+        }
+    }
+
+    #[test]
+    fn region_same_seed_preview_matches_export() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = region_test_params(&font, &dir);
+        params.text = "主文字内容。".repeat(20);
+        params.regions = vec![
+            TextRegion { x: 30, y: 30, w: 200, h: 100, text: "区域一".into(), ..TextRegion::default() },
+            TextRegion {
+                x: 240, y: 150, w: 130, h: 110, text: "区域二".into(),
+                printed: true, font_size: 24, ..TextRegion::default()
+            },
+        ];
+        let preview_pages = render_all_pages_preview(&params, 99).unwrap();
+        let out = dir.path().join("export");
+        let files = DefaultEngine::new(99).save_all(&params, &out).unwrap();
+        assert_eq!(files.len(), preview_pages.len());
+        for (path, page) in files.iter().zip(preview_pages.iter()) {
+            let saved = image::open(path).unwrap().to_rgba8();
+            assert_eq!(saved.as_raw(), page.as_raw(), "同 seed 预览与导出应逐像素一致");
+        }
+    }
+
+    #[test]
+    fn region_only_passes_validation() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = region_test_params(&font, &dir);
+        params.regions = vec![TextRegion {
+            x: 10, y: 10, w: 100, h: 60, text: "仅区域".into(), ..TextRegion::default()
+        }];
+        assert!(params.validate_with(true).is_ok(), "只有区域没有主文字也应通过校验");
+    }
+
+    #[test]
+    fn region_missing_font_fails_validation() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = region_test_params(&font, &dir);
+        params.regions = vec![TextRegion {
+            x: 10, y: 10, w: 100, h: 60, text: "字".into(),
+            font_path: dir.path().join("nope.ttf").to_string_lossy().into_owned(),
+            ..TextRegion::default()
+        }];
+        assert!(matches!(
+            params.validate_with(true),
+            Err(ParamsError::RegionFontMissing { .. })
+        ));
+    }
+
+    #[test]
+    fn region_bad_rect_and_page_fail_validation() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = region_test_params(&font, &dir);
+        p.regions = vec![TextRegion {
+            x: 10, y: 10, w: 0, h: 60, text: "字".into(), ..TextRegion::default()
+        }];
+        assert!(matches!(p.validate_with(true), Err(ParamsError::RegionSize { index: 1 })));
+        p.regions = vec![TextRegion {
+            x: 10, y: 10, w: 100, h: 60, text: "字".into(), page: 0, ..TextRegion::default()
+        }];
+        assert!(matches!(p.validate_with(true), Err(ParamsError::RegionPage { index: 1 })));
+    }
+
+    #[test]
+    fn region_on_requested_page() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = region_test_params(&font, &dir);
+        let box1 = (40usize, 40usize, 220usize, 100usize);
+        let box2 = (200usize, 150usize, 170usize, 110usize);
+        params.regions = vec![
+            TextRegion {
+                x: box1.0 as i32, y: box1.1 as i32, w: box1.2 as i32, h: box1.3 as i32,
+                text: "第一页区域".into(), printed: true, ..TextRegion::default()
+            },
+            TextRegion {
+                x: box2.0 as i32, y: box2.1 as i32, w: box2.2 as i32, h: box2.3 as i32,
+                text: "第二页区域".into(), printed: true, page: 2, ..TextRegion::default()
+            },
+        ];
+        let pages = render_all_pages_preview(&params, 7).unwrap();
+        assert!(pages.len() >= 2);
+        let ink0 = region_ink_mask(&pages[0]);
+        let ink1 = region_ink_mask(&pages[1]);
+        assert!(inner_ink(&ink0, 400, box1.0, box1.1, box1.2, box1.3) > 0, "第一页区域应出现在第一页");
+        assert_eq!(inner_ink(&ink0, 400, box2.0, box2.1, box2.2, box2.3), 0, "第二页区域不应提前出现");
+        assert!(inner_ink(&ink1, 400, box2.0, box2.1, box2.2, box2.3) > 0, "第二页区域应出现在第二页");
+        assert_eq!(inner_ink(&ink1, 400, box1.0, box1.1, box1.2, box1.3), 0, "第一页单页区域不应延续");
+    }
+
+    #[test]
+    fn region_empty_text_skipped() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = region_test_params(&font, &dir);
+        params.regions = vec![
+            TextRegion { x: 10, y: 10, w: 100, h: 60, text: "   ".into(), ..TextRegion::default() },
+            TextRegion { x: 10, y: 100, w: 100, h: 100, text: "有效区域".into(), ..TextRegion::default() },
+        ];
+        let image = render_preview(&params, 42).unwrap();
+        assert!(region_ink_mask(&image).iter().any(|&b| b));
+    }
+
+    #[test]
+    fn region_clamped_to_page() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = region_test_params(&font, &dir);
+        params.regions = vec![
+            TextRegion { x: 350, y: 250, w: 200, h: 150, text: "越界区域".into(), ..TextRegion::default() },
+            TextRegion { x: 0, y: 0, w: 5000, h: 5000, text: "超大区域".into(), ..TextRegion::default() },
+        ];
+        let image = render_preview(&params, 42).unwrap();
+        assert_eq!((image.width(), image.height()), (400, 300), "越界区域应被钳制不崩溃");
+    }
+
+    /// 纯背景预览：无文字、无区域时输出空白背景页而不是报「未输入文字」。
+    #[test]
+    fn pure_background_preview_allowed() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let params = region_test_params(&font, &dir);
+        let pages = render_all_pages_preview(&params, 42).unwrap();
+        assert_eq!(pages.len(), 1);
+        assert_eq!((pages[0].width(), pages[0].height()), (400, 300));
+        // 无墨迹
+        assert!(pages[0].as_raw().chunks_exact(4).all(|px| px[0] == 255));
+    }
+
+    /// 多页文档背景：background_pages 提供逐页底图，主文字只占首页，
+    /// 其余页输出纯背景便于翻页浏览后再框选；尺寸不同的页面被统一缩放。
+    #[test]
+    fn multi_page_backgrounds_rendered_as_tail_pages() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let bg1 = dir.path().join("doc_0.png");
+        let bg2 = dir.path().join("doc_1.png");
+        let mut img1 = RgbImage::new(400, 300);
+        for px in img1.pixels_mut() {
+            *px = Rgb([255, 255, 255]);
+        }
+        img1.save(&bg1).unwrap();
+        // 第二页尺寸故意不同：应被统一缩放到首页尺寸
+        let mut img2 = RgbImage::new(800, 600);
+        for px in img2.pixels_mut() {
+            *px = Rgb([250, 250, 250]);
+        }
+        img2.save(&bg2).unwrap();
+
+        let mut params = region_test_params(&font, &dir);
+        params.background_path = bg1.to_string_lossy().into_owned();
+        params.background_pages = vec![
+            bg1.to_string_lossy().into_owned(),
+            bg2.to_string_lossy().into_owned(),
+        ];
+        params.text = "首页文字。".into();
+        let pages = render_all_pages_preview(&params, 7).unwrap();
+        assert_eq!(pages.len(), 2, "文档底图第二页也应输出，实际 {} 页", pages.len());
+        assert_eq!((pages[1].width(), pages[1].height()), (400, 300), "第二页应统一到首页尺寸");
+        // 第二页应是纯背景（浅色），没有黑字
+        let ink1 = region_ink_mask(&pages[1]);
+        assert!(!ink1.iter().any(|&b| b), "第二页应为纯背景无墨迹");
     }
 }

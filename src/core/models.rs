@@ -90,6 +90,59 @@ impl StrikeoutStyle {
     }
 }
 
+/// 页面上一个框选文字区域（实验特性：手写/打印混排）。
+///
+/// 对应 Python 版 `models.TextRegion`。坐标为背景图**原始像素**坐标
+/// （与预览降采样无关，GUI/引擎负责换算）。文字在矩形内自行换行，
+/// 放不下时流式延续到后续页的同一矩形。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextRegion {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// 区域内文字（支持多行）。
+    #[serde(default)]
+    pub text: String,
+    /// 区域独立字体；空 = 使用主字体。
+    #[serde(default)]
+    pub font_path: String,
+    /// true = 打印体（零扰动、规整排版）。
+    #[serde(default)]
+    pub printed: bool,
+    /// 区域字号；0 = 跟随主设置。
+    #[serde(default)]
+    pub font_size: i32,
+    /// 起始页（1 基）；1 = 第一页。
+    #[serde(default)]
+    pub page: i32,
+}
+
+impl Default for TextRegion {
+    fn default() -> Self {
+        Self { x: 0, y: 0, w: 0, h: 0, text: String::new(), font_path: String::new(), printed: false, font_size: 0, page: 1 }
+    }
+}
+
+impl TextRegion {
+    /// 区域列表里的一行摘要（对齐 Python 版 `TextRegion.label`）。
+    pub fn label(&self, index: usize) -> String {
+        let style = if self.printed { "打印" } else { "手写" };
+        let page = if self.page > 1 { format!(" 第{}页", self.page) } else { String::new() };
+        format!(
+            "{}. {}{} {}字 ({},{} {}×{})",
+            index,
+            style,
+            page,
+            self.text.chars().count(),
+            self.x,
+            self.y,
+            self.w,
+            self.h
+        )
+    }
+}
+
 /// 单个段落的排版信息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Paragraph {
@@ -122,6 +175,18 @@ pub enum ParamsError {
     NoBackground,
     #[error("背景图片不存在：{0}")]
     BackgroundMissing(String),
+    #[error("第 {page} 页背景文件不存在：{path}")]
+    BackgroundPageMissing { page: usize, path: String },
+    #[error("文字区域 {index} 的宽高必须为正")]
+    RegionSize { index: usize },
+    #[error("文字区域 {index} 的坐标不能为负")]
+    RegionPosition { index: usize },
+    #[error("文字区域 {index} 的页码必须从 1 开始")]
+    RegionPage { index: usize },
+    #[error("文字区域 {index} 的字体文件不存在：{path}")]
+    RegionFontMissing { index: usize, path: String },
+    #[error("文字区域 {index} 的字号不能为负")]
+    RegionFontSize { index: usize },
     #[error("{name} 不能为负")]
     Negative { name: &'static str },
     #[error("颜色分量必须在 0-255 之间：{value}")]
@@ -155,9 +220,16 @@ pub struct HandwritingParams {
     // ---- 输入 ----
     pub font_path: String,
     pub background_path: String,
+    /// 多页文档背景（导入的 PDF/DOCX 打印预览，每页一张 PNG 路径）；
+    /// 为空时所有页使用 `background_path` 单张背景。
+    #[serde(default)]
+    pub background_pages: Vec<String>,
     pub text: String,
     /// 非空时启用段落渲染（分段对齐/缩进）。
     pub paragraphs: Vec<Paragraph>,
+    /// 非空时在框选矩形内渲染区域文字（可与主文字并存）。
+    #[serde(default)]
+    pub regions: Vec<TextRegion>,
 
     // ---- 字体颜色 (RGB) ----
     pub fill: [u8; 3],
@@ -202,8 +274,10 @@ impl Default for HandwritingParams {
         Self {
             font_path: String::new(),
             background_path: String::new(),
+            background_pages: Vec::new(),
             text: String::new(),
             paragraphs: Vec::new(),
+            regions: Vec::new(),
             fill: [0, 0, 0],
             font_size: 36.0,
             word_spacing: 5.0,
@@ -228,22 +302,42 @@ impl Default for HandwritingParams {
 }
 
 impl HandwritingParams {
-    /// 校验参数是否完整、合法。
+    /// 校验参数是否完整、合法（要求存在文字/区域，供导出等场景）。
     pub fn validate(&self) -> Result<(), ParamsError> {
-        if self.text.trim().is_empty() && self.paragraphs.is_empty() {
+        self.validate_with(true)
+    }
+
+    /// 校验参数；`require_text=false` 时允许「纯背景预览」：
+    /// 没有文字/区域时不要求字体（一个字都不画），但仍要求背景文件有效。
+    /// 对齐 Python 版 `HandwritingParams.validate(require_text=...)`。
+    pub fn validate_with(&self, require_text: bool) -> Result<(), ParamsError> {
+        let has_region_text = self.regions.iter().any(|r| !r.text.trim().is_empty());
+        let has_content =
+            !self.text.trim().is_empty() || !self.paragraphs.is_empty() || has_region_text;
+        if require_text && !has_content {
             return Err(ParamsError::NoText);
         }
-        if self.font_path.is_empty() {
+        if has_content && self.font_path.is_empty() {
             return Err(ParamsError::NoFont);
         }
-        if !std::path::Path::new(&self.font_path).is_file() {
+        if has_content && !std::path::Path::new(&self.font_path).is_file() {
             return Err(ParamsError::FontMissing(self.font_path.clone()));
         }
-        if self.background_path.is_empty() {
+        if self.background_path.is_empty() && self.background_pages.is_empty() {
             return Err(ParamsError::NoBackground);
         }
-        if !std::path::Path::new(&self.background_path).is_file() {
+        if !self.background_path.is_empty()
+            && !std::path::Path::new(&self.background_path).is_file()
+        {
             return Err(ParamsError::BackgroundMissing(self.background_path.clone()));
+        }
+        for (i, page_bg) in self.background_pages.iter().enumerate() {
+            if !std::path::Path::new(page_bg).is_file() {
+                return Err(ParamsError::BackgroundPageMissing {
+                    page: i + 1,
+                    path: page_bg.clone(),
+                });
+            }
         }
         for (name, value) in [
             ("font_size", self.font_size),
@@ -269,6 +363,27 @@ impl HandwritingParams {
     }
     if !(0.0..=1.0).contains(&self.miswrite_rate) {
         return Err(ParamsError::MiswriteRate { value: self.miswrite_rate });
+    }
+    for (i, region) in self.regions.iter().enumerate() {
+        let index = i + 1;
+        if region.w <= 0 || region.h <= 0 {
+            return Err(ParamsError::RegionSize { index });
+        }
+        if region.x < 0 || region.y < 0 {
+            return Err(ParamsError::RegionPosition { index });
+        }
+        if region.page < 1 {
+            return Err(ParamsError::RegionPage { index });
+        }
+        if !region.font_path.is_empty() && !std::path::Path::new(&region.font_path).is_file() {
+            return Err(ParamsError::RegionFontMissing {
+                index,
+                path: region.font_path.clone(),
+            });
+        }
+        if region.font_size < 0 {
+            return Err(ParamsError::RegionFontSize { index });
+        }
     }
     Ok(())
 }

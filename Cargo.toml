@@ -36,6 +36,9 @@ lopdf = "0.44.0"
 # 预览降采样：SIMD 加速重采样（image::imageops::resize 对千万像素级输入极慢，
 # 32MP 背景 Lanczos3 实测 80s；本库同滤镜毫秒级）。rayon 开启多线程。
 fast_image_resize = { version = "6", features = ["rayon"] }
+# PDF 底图栅格化（对应 Python 版 pypdfium2）：运行时需 pdfium 动态库
+# （exe 旁 pdfium.dll 或系统 PATH；缺失时导入 PDF 给出明确提示）。
+pdfium-render = "0.8"
 
 [build-dependencies]
 # 编译 .slint 界面描述（与 slint 同版本）

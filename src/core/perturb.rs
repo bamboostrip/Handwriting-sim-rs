@@ -139,35 +139,102 @@ pub fn perturb_mask_into(
     if !mask.iter().any(|&b| b) {
         return;
     }
-
     let strokes = label_strokes(mask, width, height);
     let n = strokes.len();
     let dxs = normals(params.perturb_x_sigma, n, rng);
     let dys = normals(params.perturb_y_sigma, n, rng);
     let thetas = normals(params.perturb_theta_sigma, n, rng);
 
-    let [fr, fg, fb] = params.fill;
     for (k, stroke) in strokes.iter().enumerate() {
-        let dx = dxs[k];
-        let dy = dys[k];
-        let ct = thetas[k].cos();
-        let st = thetas[k].sin();
-        let cx = stroke.cx;
-        let cy = stroke.cy;
-        for &(xs, ys) in &stroke.pixels {
-            let xf = xs as f32;
-            let yf = ys as f32;
-            let fx = (xf - cx) * ct + (yf - cy) * st + cx;
-            let fy = (yf - cy) * ct - (xf - cx) * st + cy;
-            let nx = (fx + dx).round() as isize;
-            let ny = (fy + dy).round() as isize;
-            if nx >= 0 && ny >= 0 && (nx as usize) < width && (ny as usize) < height {
-                let dst = (ny as usize) * width + (nx as usize);
-                canvas[dst * 3] = fr;
-                canvas[dst * 3 + 1] = fg;
-                canvas[dst * 3 + 2] = fb;
-            }
+        write_perturbed_stroke(
+            stroke,
+            dxs[k],
+            dys[k],
+            thetas[k],
+            0,
+            0,
+            params.fill,
+            canvas,
+            (width, height),
+        );
+    }
+}
+
+/// 把一个扰动后的笔画以偏移 (ox, oy) 写入整页 RGB 画布。
+///
+/// 坐标越界（超出页面）的像素忽略；对应 Python 版
+/// `_pages_with_regions` 中 `_perturbed_positions` + `canvas[oy+ys, ox+xs]`。
+#[allow(clippy::too_many_arguments)]
+fn write_perturbed_stroke(
+    stroke: &Stroke,
+    dx: f32,
+    dy: f32,
+    theta: f32,
+    ox: usize,
+    oy: usize,
+    fill: [u8; 3],
+    canvas: &mut [u8],
+    page: (usize, usize),
+) {
+    let (page_w, page_h) = page;
+    let ct = theta.cos();
+    let st = theta.sin();
+    let cx = stroke.cx;
+    let cy = stroke.cy;
+    let (fr, fg, fb) = (fill[0], fill[1], fill[2]);
+    for &(xs, ys) in &stroke.pixels {
+        let xf = xs as f32;
+        let yf = ys as f32;
+        let fx = (xf - cx) * ct + (yf - cy) * st + cx;
+        let fy = (yf - cy) * ct - (xf - cx) * st + cy;
+        let nx = (fx + dx).round() as isize + ox as isize;
+        let ny = (fy + dy).round() as isize + oy as isize;
+        if nx >= 0 && ny >= 0 && (nx as usize) < page_w && (ny as usize) < page_h {
+            let dst = (ny as usize) * page_w + (nx as usize);
+            canvas[dst * 3] = fr;
+            canvas[dst * 3 + 1] = fg;
+            canvas[dst * 3 + 2] = fb;
         }
+    }
+}
+
+/// 区域合成：对区域局部掩码按笔画扰动后，偏移 (ox, oy) 写入整页画布。
+///
+/// 与 `perturb_mask_into` 的区别：不拷贝背景（画布已含当页底图），
+/// 且局部掩码坐标经平移落到整页坐标。扰动公式与主路径逐字一致。
+#[allow(clippy::too_many_arguments)]
+pub fn perturb_region_into(
+    mask: &[bool],
+    width: usize,
+    height: usize,
+    params: &HandwritingParams,
+    rng: &mut impl Rng,
+    ox: usize,
+    oy: usize,
+    canvas: &mut [u8],
+    page_width: usize,
+    page_height: usize,
+) {
+    if !mask.iter().any(|&b| b) {
+        return;
+    }
+    let strokes = label_strokes(mask, width, height);
+    let n = strokes.len();
+    let dxs = normals(params.perturb_x_sigma, n, rng);
+    let dys = normals(params.perturb_y_sigma, n, rng);
+    let thetas = normals(params.perturb_theta_sigma, n, rng);
+    for (k, stroke) in strokes.iter().enumerate() {
+        write_perturbed_stroke(
+            stroke,
+            dxs[k],
+            dys[k],
+            thetas[k],
+            ox,
+            oy,
+            params.fill,
+            canvas,
+            (page_width, page_height),
+        );
     }
 }
 
