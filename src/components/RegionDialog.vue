@@ -23,6 +23,7 @@ import {
   useMessage,
 } from "naive-ui";
 import { api } from "../api";
+import RegionTextEditor from "./RegionTextEditor.vue";
 import {
   cancelRegionDialog,
   chooseRegionFont,
@@ -119,59 +120,62 @@ async function onConfirm(): Promise<void> {
         <NButton size="tiny" @click="importDocxToDraft()">导入 docx</NButton>
       </div>
 
-      <NInput
-        v-model:value="draft.text"
-        type="textarea"
-        placeholder="输入该区域内要生成的文字，支持多行；留空则放弃该区域"
-        :autosize="{ minRows: 3, maxRows: 6 }"
+      <RegionTextEditor
+        :text="draft.text"
+        :align="draft.align"
+        :indent-em="draft.indentEm"
+        placeholder="输入该区域内要生成的文字，支持多行；回车分段；留空则放弃该区域"
+        @update:text="draft.text = $event"
       />
 
-      <div class="field-row" style="margin-top: 10px">
-        <span class="field-label">样式</span>
+      <!-- 基础参数：统一「标签列 + 控件列」网格，四行标签右对齐、控件左缘对齐 -->
+      <div class="dlg-form">
+        <span class="dlg-label">样式</span>
         <NRadioGroup v-model:value="draft.printed" size="small">
           <NRadioButton :value="false">手写体</NRadioButton>
           <NRadioButton :value="true">打印体</NRadioButton>
         </NRadioGroup>
-        <span class="field-label" style="width: 44px">起始页</span>
-        <NTooltip trigger="hover" placement="top">
-          <template #trigger>
-            <NInputNumber
-              v-model:value="draft.page"
-              size="small"
-              :min="1"
-              :max="999"
-              style="width: 92px"
-              :show-button="false"
-            />
-          </template>
-          区域文字从第几页开始渲染；放不下会延续到后续页
-        </NTooltip>
-      </div>
 
-      <div class="field-row">
-        <span class="field-label">打印字体</span>
-        <NInput
-          v-model:value="draft.fontPath"
-          size="small"
-          :disabled="!isPrinted"
-          placeholder="留空使用主字体"
-        />
-        <NButton size="small" :disabled="!isPrinted" @click="chooseRegionFont()">选择</NButton>
-      </div>
+        <span class="dlg-label">起始页</span>
+        <div class="dlg-field">
+          <NTooltip trigger="hover" placement="top">
+            <template #trigger>
+              <NInputNumber
+                v-model:value="draft.page"
+                size="small"
+                :min="1"
+                :max="999"
+                style="width: 92px; flex: none"
+                :show-button="false"
+              />
+            </template>
+            区域文字从第几页开始渲染；放不下会延续到后续页
+          </NTooltip>
+        </div>
 
-      <div class="field-row">
-        <span class="field-label">字号</span>
-        <NInputNumber
-          v-model:value="draft.fontSize"
-          size="small"
-          :min="0"
-          :max="300"
-          style="width: 92px"
-          placeholder="跟随主设置"
-        />
-        <span class="hint-line" style="flex: 1; margin: 0">
-          主字号当前为 {{ store.fontSize }}，填 0 跟随主设置。
-        </span>
+        <span class="dlg-label">打印字体</span>
+        <div class="dlg-field">
+          <NInput
+            v-model:value="draft.fontPath"
+            size="small"
+            :disabled="!isPrinted"
+            placeholder="留空使用主字体"
+          />
+          <NButton size="small" :disabled="!isPrinted" @click="chooseRegionFont()">选择</NButton>
+        </div>
+
+        <span class="dlg-label">字号</span>
+        <div class="dlg-field">
+          <NInputNumber
+            v-model:value="draft.fontSize"
+            size="small"
+            :min="0"
+            :max="300"
+            style="width: 92px; flex: none"
+            placeholder="跟随主设置"
+          />
+          <span class="hint-line dlg-hint">主字号当前为 {{ store.fontSize }}，填 0 跟随主设置。</span>
+        </div>
       </div>
 
       <!-- ======== 折叠：逐区域排版 / 扰动覆盖 ======== -->
@@ -251,6 +255,39 @@ async function onConfirm(): Promise<void> {
 </template>
 
 <style scoped>
+/* 基础参数网格：固定标签列 + 弹性控件列，四行标签右对齐、控件左缘对齐 */
+.dlg-form {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px 10px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.dlg-label {
+  text-align: right;
+  font-size: 12.5px;
+  color: var(--text-main);
+  white-space: nowrap;
+}
+
+.dlg-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dlg-field :deep(.n-input) {
+  flex: 1;
+  min-width: 0;
+}
+
+.dlg-hint {
+  flex: 1;
+  margin: 0;
+}
+
 /* 覆盖项网格：固定标签列 + 弹性输入列，两字段一行保持对齐 */
 .adv-grid {
   display: grid;

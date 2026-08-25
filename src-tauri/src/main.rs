@@ -299,6 +299,16 @@ pub fn run() {
             path_exists,
             image_dimensions
         ])
+        // 页面真正加载完成后再显示窗口：dev 冷启动时 Vite 还在编译模块，
+        // 提前显示只会让用户对着白屏等（对齐官方 splashscreen 模式）。
+        .on_page_load(|webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                if let Some(win) = webview.app_handle().get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("手写模拟器启动失败");
 }

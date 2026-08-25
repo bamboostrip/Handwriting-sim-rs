@@ -18,6 +18,7 @@ import {
   clampRect,
   cancelRegionEdit,
   nextPage,
+  openEditRegionDialog,
   openNewRegionDialog,
   prevPage,
   setRegionMode,
@@ -161,7 +162,7 @@ const cursorStyle = computed(() => {
 });
 
 // ---- 指针事件 ----
-function localPoint(e: PointerEvent): { x: number; y: number } {
+function localPoint(e: { clientX: number; clientY: number }): { x: number; y: number } {
   const rect = interactEl.value?.getBoundingClientRect();
   return rect ? { x: e.clientX - rect.left, y: e.clientY - rect.top } : { x: 0, y: 0 };
 }
@@ -323,6 +324,23 @@ function onCancel(): void {
   rubberLive.value = false;
 }
 
+/** 双击区域 → 打开属性对话框（修改文字 / 参数）。命中当前页最上层包含点的区域。 */
+function onDblClick(e: MouseEvent): void {
+  if (!hasPreview.value || store.dialogOpen) return;
+  const p = localPoint(e);
+  const f = factor.value;
+  for (let i = store.regions.length - 1; i >= 0; i--) {
+    const r = store.regions[i];
+    if (r.page - 1 !== store.pageIndex) continue;
+    const x = r.x * f;
+    const y = r.y * f;
+    if (p.x >= x && p.x <= x + r.w * f && p.y >= y && p.y <= y + r.h * f) {
+      openEditRegionDialog(i);
+      return;
+    }
+  }
+}
+
 const boxBackground = computed(() =>
   store.previewBgIdx % 2 === 0 ? "#c8d0ca" : "#565b56",
 );
@@ -383,6 +401,7 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
             @pointermove="onMove"
             @pointerup="onUp"
             @pointercancel="onCancel"
+            @dblclick="onDblClick"
           />
         </div>
       </template>
