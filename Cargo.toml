@@ -9,3 +9,20 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+# dev 构建下优化核心渲染路径：debug 未优化时引擎慢 10~30 倍，
+# 预览/导出会卡顿数秒。只优化重计算 crate，编译时间基本不受影响。
+[profile.dev.package."handwrite-sim"]
+opt-level = 2
+
+[profile.dev.package.ab_glyph]
+opt-level = 2
+
+[profile.dev.package.fast_image_resize]
+opt-level = 3
+
+[profile.dev.package.image]
+opt-level = 2
+
+[profile.dev.package.pdfium-render]
+opt-level = 2
