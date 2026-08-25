@@ -123,21 +123,21 @@ const presetOptions = computed(() =>
           <span></span>
           <span class="col-head">数值</span>
           <span></span>
-          <span class="col-head">扰动 σ</span>
+          <span class="col-head">随机扰动</span>
 
           <span class="field-label" style="width: auto">字水平间距</span>
           <NInputNumber v-model:value="store.wordSpacing" size="small" :min="0" :max="100" :show-button="false" />
-          <span class="col-head">σ</span>
+          <span></span>
           <NInputNumber v-model:value="store.wordSpacingSigma" size="small" :min="0" :max="20" :show-button="false" />
 
           <span class="field-label" style="width: auto">字竖直间距</span>
           <NInputNumber v-model:value="store.lineSpacing" size="small" :min="0" :max="200" :show-button="false" />
-          <span class="col-head">σ</span>
+          <span></span>
           <NInputNumber v-model:value="store.lineSpacingSigma" size="small" :min="0" :max="20" :show-button="false" />
 
           <span class="field-label" style="width: auto">字体大小</span>
           <NInputNumber v-model:value="store.fontSize" size="small" :min="8" :max="200" :show-button="false" />
-          <span class="col-head">σ</span>
+          <span></span>
           <NInputNumber v-model:value="store.fontSizeSigma" size="small" :min="0" :max="20" :show-button="false" />
         </div>
       </div>

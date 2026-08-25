@@ -154,24 +154,24 @@ async function onConfirm(): Promise<void> {
         <div class="adv-grid">
           <span class="adv-label">水平间距</span>
           <NInputNumber v-model:value="store.dialogAdv.wordSpacing" size="small" :min="0" :max="100" :show-button="false" placeholder="跟随主设置" />
-          <span class="adv-label">间距 σ</span>
+          <span class="adv-label">间距扰动</span>
           <NInputNumber v-model:value="store.dialogAdv.wordSpacingSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
 
           <span class="adv-label">竖直间距</span>
           <NInputNumber v-model:value="store.dialogAdv.lineSpacing" size="small" :min="0" :max="200" :show-button="false" placeholder="跟随主设置" />
-          <span class="adv-label">间距 σ</span>
+          <span class="adv-label">间距扰动</span>
           <NInputNumber v-model:value="store.dialogAdv.lineSpacingSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
 
-          <span class="adv-label">字号 σ</span>
+          <span class="adv-label">字号扰动</span>
           <NInputNumber v-model:value="store.dialogAdv.fontSizeSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
           <span></span>
 
-          <span class="adv-label">水平位移</span>
+          <span class="adv-label">水平扰动</span>
           <NInputNumber v-model:value="store.dialogAdv.perturbXSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
-          <span class="adv-label">竖直位移</span>
+          <span class="adv-label">竖直扰动</span>
           <NInputNumber v-model:value="store.dialogAdv.perturbYSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
 
-          <span class="adv-label">笔画旋转</span>
+          <span class="adv-label">旋转扰动</span>
           <NInputNumber
             v-model:value="store.dialogAdv.perturbThetaSigma"
             size="small"
@@ -179,10 +179,11 @@ async function onConfirm(): Promise<void> {
             :max="2"
             :step="0.01"
             :precision="3"
+            :show-button="false"
             placeholder="跟随主设置"
           />
           <span class="adv-label">错字率 %</span>
-          <NInputNumber v-model:value="store.dialogAdv.miswriteRatePct" size="small" :min="0" :max="30" :step="0.1" placeholder="跟随主设置" />
+          <NInputNumber v-model:value="store.dialogAdv.miswriteRatePct" size="small" :min="0" :max="30" :step="0.1" :show-button="false" placeholder="跟随主设置" />
 
           <span class="adv-label">涂改方式</span>
           <NSelect
