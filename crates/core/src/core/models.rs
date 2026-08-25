@@ -94,7 +94,7 @@ impl StrikeoutStyle {
 ///
 /// 对应 Python 版 `models.TextRegion`。坐标为背景图**原始像素**坐标
 /// （与预览降采样无关，GUI/引擎负责换算）。文字在矩形内自行换行，
-/// 放不下时流式延续到后续页的同一矩形。
+/// 仅在指定所在页渲染，超出框选范围的内容自然截断。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextRegion {
     pub x: i32,
@@ -113,7 +113,7 @@ pub struct TextRegion {
     /// 区域字号；0 = 跟随主设置。
     #[serde(default)]
     pub font_size: i32,
-    /// 起始页（1 基）；1 = 第一页。
+    /// 所在页（1 基）；1 = 第一页。
     #[serde(default)]
     pub page: i32,
     /// 对齐方式：0 左 / 1 居中 / 2 右（应用于区域整体文本）。
@@ -122,6 +122,9 @@ pub struct TextRegion {
     /// 首行缩进（字符数 em；0 = 无）。渲染时 × 区域字号换算像素。
     #[serde(default)]
     pub indent_em: f32,
+    /// 区域内多段落排版信息（各段独立设置对齐与缩进；非空时优先于单文本）。
+    #[serde(default)]
+    pub paragraphs: Vec<Paragraph>,
 
     // ---- 逐区域排版/扰动覆盖项（None = 跟随主设置）----
     /// 字水平间距。
@@ -157,6 +160,20 @@ pub struct TextRegion {
     /// 文字颜色覆盖（#RRGGBB 解析后的 RGB）。
     #[serde(default)]
     pub fill: Option<[u8; 3]>,
+
+    // ---- 区域内边距（像素；None / 0 = 紧贴框边界，默认 0）----
+    /// 区域上边距。
+    #[serde(default)]
+    pub margin_top: Option<f32>,
+    /// 区域下边距。
+    #[serde(default)]
+    pub margin_bottom: Option<f32>,
+    /// 区域左边距。
+    #[serde(default)]
+    pub margin_left: Option<f32>,
+    /// 区域右边距。
+    #[serde(default)]
+    pub margin_right: Option<f32>,
 }
 
 impl Default for TextRegion {
@@ -170,6 +187,7 @@ impl Default for TextRegion {
             page: 1,
             align: 0,
             indent_em: 0.0,
+            paragraphs: Vec::new(),
             word_spacing: None,
             line_spacing: None,
             font_size_sigma: None,
@@ -181,6 +199,10 @@ impl Default for TextRegion {
             miswrite_rate: None,
             miswrite_strikeout_style: None,
             fill: None,
+            margin_top: None,
+            margin_bottom: None,
+            margin_left: None,
+            margin_right: None,
         }
     }
 }
@@ -199,6 +221,10 @@ impl TextRegion {
             || self.miswrite_rate.is_some()
             || self.miswrite_strikeout_style.is_some()
             || self.fill.is_some()
+            || self.margin_top.is_some_and(|v| v > 0.0)
+            || self.margin_bottom.is_some_and(|v| v > 0.0)
+            || self.margin_left.is_some_and(|v| v > 0.0)
+            || self.margin_right.is_some_and(|v| v > 0.0)
     }
     /// 区域列表里的一行摘要（对齐 Python 版 `TextRegion.label`）。
     pub fn label(&self, index: usize) -> String {
@@ -219,7 +245,7 @@ impl TextRegion {
 }
 
 /// 单个段落的排版信息。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Paragraph {
     pub text: String,
     pub align: Align,

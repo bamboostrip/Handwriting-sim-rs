@@ -23,6 +23,8 @@ export interface UiRegion {
   align: number;
   /** 首行缩进（字符数 em；0 = 无） */
   indentEm: number;
+  /** 区域内各段落排版信息（各段独立设置对齐与缩进） */
+  paragraphs?: UiParagraph[];
 
   // ---- 逐区域覆盖项（null = 跟随主设置）----
   wordSpacing?: number | null;
@@ -39,6 +41,11 @@ export interface UiRegion {
   miswriteStrikeoutStyleIndex?: number | null;
   /** 文字颜色 #RRGGBB；null = 跟随主设置 */
   fill?: string | null;
+  /** 区域边距（像素；null / 0 = 紧贴框边界，默认 0） */
+  marginTop?: number | null;
+  marginBottom?: number | null;
+  marginLeft?: number | null;
+  marginRight?: number | null;
 }
 
 export interface UiParams {

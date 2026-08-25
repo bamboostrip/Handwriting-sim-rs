@@ -27,20 +27,26 @@ import RegionTextEditor from "./RegionTextEditor.vue";
 import {
   cancelRegionDialog,
   chooseRegionFont,
+  cleanText,
   confirmRegionDialog,
   importDocxToDraft,
   regionHasOverrides,
   store,
 } from "../store";
+import type { UiParagraph } from "../types";
 
 const message = useMessage();
 const advOpen = ref<string[]>([]);
+const curRowIndex = ref(0);
 
-// 每次打开对话框时折叠面板收起
+// 每次打开对话框时折叠面板收起、重置聚焦行为第一行
 watch(
   () => store.dialogOpen,
   (open) => {
-    if (open) advOpen.value = [];
+    if (open) {
+      advOpen.value = [];
+      curRowIndex.value = 0;
+    }
   },
 );
 
@@ -48,12 +54,49 @@ const draft = computed(() => store.dialogDraft);
 const isPrinted = computed(() => draft.value?.printed ?? false);
 const isNew = computed(() => store.dialogTargetIndex < 0);
 
-/** 对齐 / 首行缩进：直接作用于草稿 */
+const curPara = computed<UiParagraph | undefined>(
+  () => draft.value?.paragraphs?.[curRowIndex.value],
+);
+const currentAlign = computed(() => curPara.value?.align ?? 0);
+const currentIndent = computed(() => curPara.value?.indentEm ?? 0);
+
+const curRowStatus = computed(() => {
+  const len = draft.value?.paragraphs?.length ?? 0;
+  if (len === 0) return "光标定位到行后可用上方按钮设置该行格式";
+  const idx = Math.min(curRowIndex.value, len - 1);
+  const p = draft.value?.paragraphs?.[idx];
+  if (!p) return "光标定位到行后可用上方按钮设置该行格式";
+  const alignName = ["左对齐", "居中", "右对齐"][p.align] ?? "左对齐";
+  const indentTxt = (p.indentEm ?? 0) > 0 ? "，首行缩进 2 字" : "";
+  const text = cleanText(p.text).replace(/\n/g, "");
+  const segTxt = text.trim() === "" ? "（空行）" : "";
+  return `第 ${idx + 1} 行（${[...text].length} 字）：${alignName}${indentTxt}${segTxt}`;
+});
+
+/** 对齐 / 首行缩进：作用于当前聚焦行 */
 function setDraftAlign(align: number): void {
-  if (draft.value) draft.value.align = align;
+  if (curPara.value) {
+    curPara.value.align = align as 0 | 1 | 2;
+  }
+  if (draft.value && draft.value.paragraphs) {
+    draft.value.align = draft.value.paragraphs[0]?.align ?? 0;
+  }
 }
+
 function toggleDraftIndent(): void {
-  if (draft.value) draft.value.indentEm = draft.value.indentEm > 0 ? 0 : 2;
+  if (curPara.value) {
+    curPara.value.indentEm = (curPara.value.indentEm ?? 0) > 0 ? 0 : 2;
+  }
+  if (draft.value && draft.value.paragraphs) {
+    draft.value.indentEm = draft.value.paragraphs[0]?.indentEm ?? 0;
+  }
+}
+
+function onUpdateParagraphs(paras: UiParagraph[]): void {
+  if (draft.value) {
+    draft.value.paragraphs = paras;
+    draft.value.text = paras.map((p) => p.text).join("\n");
+  }
 }
 
 /** 覆盖项是否已有任意设置（折叠标题显示状态徽标） */
@@ -102,42 +145,47 @@ async function onConfirm(): Promise<void> {
     :show="store.dialogOpen"
     preset="card"
     :title="isNew ? '添加文字区域' : '编辑文字区域'"
-    style="width: 540px"
+    style="width: 560px; max-width: 95vw"
     :mask-closable="false"
     :z-index="1000"
     @update:show="(v: boolean) => (v ? undefined : cancelRegionDialog())"
     @esc="cancelRegionDialog"
   >
-    <div v-if="draft">
-      <!-- 工具行：对齐 / 缩进 / 导入 docx（与主界面待处理文本一致） -->
-      <div class="field-row" style="flex-wrap: wrap">
-        <NButton size="tiny" :type="draft.align === 0 ? 'primary' : 'default'" @click="setDraftAlign(0)">左对齐</NButton>
-        <NButton size="tiny" :type="draft.align === 1 ? 'primary' : 'default'" @click="setDraftAlign(1)">居中</NButton>
-        <NButton size="tiny" :type="draft.align === 2 ? 'primary' : 'default'" @click="setDraftAlign(2)">右对齐</NButton>
-        <NButton size="tiny" :type="draft.indentEm > 0 ? 'primary' : 'default'" @click="toggleDraftIndent()">
-          {{ draft.indentEm > 0 ? "取消缩进" : "首行缩进" }}
+    <div v-if="draft" class="dlg-body">
+      <!-- 工具行：对齐 / 缩进 / 导入 docx（作用于当前光标所在行） -->
+      <div class="field-row" style="flex-wrap: wrap; margin-bottom: 2px">
+        <NButton size="tiny" :type="currentAlign === 0 ? 'primary' : 'default'" @click="setDraftAlign(0)">左对齐</NButton>
+        <NButton size="tiny" :type="currentAlign === 1 ? 'primary' : 'default'" @click="setDraftAlign(1)">居中</NButton>
+        <NButton size="tiny" :type="currentAlign === 2 ? 'primary' : 'default'" @click="setDraftAlign(2)">右对齐</NButton>
+        <NButton size="tiny" :type="currentIndent > 0 ? 'primary' : 'default'" @click="toggleDraftIndent()">
+          {{ currentIndent > 0 ? "取消缩进" : "首行缩进" }}
         </NButton>
         <NButton size="tiny" @click="importDocxToDraft()">导入 docx</NButton>
       </div>
 
+      <div class="hint-line" style="margin: 2px 0 6px">{{ curRowStatus }}</div>
+
       <RegionTextEditor
-        :text="draft.text"
-        :align="draft.align"
-        :indent-em="draft.indentEm"
-        placeholder="输入该区域内要生成的文字，支持多行；回车分段；留空则放弃该区域"
-        @update:text="draft.text = $event"
+        v-if="draft.paragraphs"
+        :paragraphs="draft.paragraphs"
+        :cur-index="curRowIndex"
+        placeholder="输入该区域内要生成的文字，支持多行；回车分段，上方按钮设置当前行对齐/缩进；留空则放弃该区域"
+        @update:paragraphs="onUpdateParagraphs"
+        @update:cur-index="curRowIndex = $event"
       />
 
-      <!-- 基础参数：统一「标签列 + 控件列」网格，四行标签右对齐、控件左缘对齐 -->
-      <div class="dlg-form">
-        <span class="dlg-label">样式</span>
-        <NRadioGroup v-model:value="draft.printed" size="small">
-          <NRadioButton :value="false">手写体</NRadioButton>
-          <NRadioButton :value="true">打印体</NRadioButton>
-        </NRadioGroup>
+      <!-- 基础参数：统一「标签列 + 控件列」网格 -->
+      <div class="dlg-basic-grid">
+        <span class="field-label">样式</span>
+        <div class="field-control">
+          <NRadioGroup v-model:value="draft.printed" size="small">
+            <NRadioButton :value="false">手写体</NRadioButton>
+            <NRadioButton :value="true">打印体</NRadioButton>
+          </NRadioGroup>
+        </div>
 
-        <span class="dlg-label">起始页</span>
-        <div class="dlg-field">
+        <span class="field-label">所在页</span>
+        <div class="field-control">
           <NTooltip trigger="hover" placement="top">
             <template #trigger>
               <NInputNumber
@@ -145,41 +193,30 @@ async function onConfirm(): Promise<void> {
                 size="small"
                 :min="1"
                 :max="999"
-                style="width: 92px; flex: none"
+                style="width: 100px; flex: none"
                 :show-button="false"
               />
             </template>
-            区域文字从第几页开始渲染；放不下会延续到后续页
+            该文字区域在第几页渲染（超出框选范围的内容将自然截断）
           </NTooltip>
+          <span class="hint-line" style="margin: 0; margin-left: 6px">仅在指定页渲染，超出框选范围的内容自然截断</span>
         </div>
 
-        <span class="dlg-label">打印字体</span>
-        <div class="dlg-field">
+        <span class="field-label">打印字体</span>
+        <div class="field-control">
           <NInput
             v-model:value="draft.fontPath"
             size="small"
             :disabled="!isPrinted"
             placeholder="留空使用主字体"
+            style="flex: 1"
           />
           <NButton size="small" :disabled="!isPrinted" @click="chooseRegionFont()">选择</NButton>
-        </div>
-
-        <span class="dlg-label">字号</span>
-        <div class="dlg-field">
-          <NInputNumber
-            v-model:value="draft.fontSize"
-            size="small"
-            :min="0"
-            :max="300"
-            style="width: 92px; flex: none"
-            placeholder="跟随主设置"
-          />
-          <span class="hint-line dlg-hint">主字号当前为 {{ store.fontSize }}，填 0 跟随主设置。</span>
         </div>
       </div>
 
       <!-- ======== 折叠：逐区域排版 / 扰动覆盖 ======== -->
-      <NCollapse v-model:expanded-names="advOpen" style="margin-top: 6px">
+      <NCollapse v-model:expanded-names="advOpen" style="margin-top: 10px">
         <NCollapseItem name="adv">
           <template #header>
             排版与扰动覆盖
@@ -190,56 +227,224 @@ async function onConfirm(): Promise<void> {
             <span v-else style="margin-left: 6px; font-size: 11px; color: #9aa8a4">跟随主设置</span>
           </template>
 
-          <div class="hint-line" style="margin-top: 0">
-            留空即跟随左侧全局设置；打印体下扰动 / 错字类覆盖不生效。
+          <div class="hint-line" style="margin: 0 0 10px 0">
+            留空即跟随全局设置；打印体下扰动 / 错字类覆盖不生效。
           </div>
-          <div class="adv-grid">
-            <span class="adv-label">水平间距</span>
-            <NInputNumber v-model:value="draft.wordSpacing" size="small" :min="0" :max="100" :show-button="false" placeholder="跟随主设置" />
-            <span class="adv-label">间距扰动</span>
-            <NInputNumber v-model:value="draft.wordSpacingSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
 
-            <span class="adv-label">竖直间距</span>
-            <NInputNumber v-model:value="draft.lineSpacing" size="small" :min="0" :max="200" :show-button="false" placeholder="跟随主设置" />
-            <span class="adv-label">间距扰动</span>
-            <NInputNumber v-model:value="draft.lineSpacingSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
+          <!-- ============ 排版参数 ============ -->
+          <div class="group-card">
+            <span class="group-legend">排版参数</span>
+            <div class="sigma-grid">
+              <span></span>
+              <span class="col-head">数值</span>
+              <span></span>
+              <span class="col-head">随机扰动</span>
 
-            <span class="adv-label">字号扰动</span>
-            <NInputNumber v-model:value="draft.fontSizeSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
-            <span></span>
+              <span class="field-label" style="width: auto">字水平间距</span>
+              <NInputNumber
+                v-model:value="draft.wordSpacing"
+                size="small"
+                :min="0"
+                :max="100"
+                :show-button="false"
+                placeholder="跟随主设置"
+              />
+              <span></span>
+              <NInputNumber
+                v-model:value="draft.wordSpacingSigma"
+                size="small"
+                :min="0"
+                :max="20"
+                :show-button="false"
+                placeholder="跟随主设置"
+              />
 
-            <span class="adv-label">水平扰动</span>
-            <NInputNumber v-model:value="draft.perturbXSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
-            <span class="adv-label">竖直扰动</span>
-            <NInputNumber v-model:value="draft.perturbYSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
+              <span class="field-label" style="width: auto">字竖直间距</span>
+              <NInputNumber
+                v-model:value="draft.lineSpacing"
+                size="small"
+                :min="0"
+                :max="200"
+                :show-button="false"
+                placeholder="跟随主设置"
+              />
+              <span></span>
+              <NInputNumber
+                v-model:value="draft.lineSpacingSigma"
+                size="small"
+                :min="0"
+                :max="20"
+                :show-button="false"
+                placeholder="跟随主设置"
+              />
 
-            <span class="adv-label">旋转扰动</span>
-            <NInputNumber
-              v-model:value="draft.perturbThetaSigma"
-              size="small"
-              :min="0"
-              :max="2"
-              :step="0.01"
-              :precision="3"
-              :show-button="false"
-              placeholder="跟随主设置"
-            />
-            <span class="adv-label">错字率 %</span>
-            <NInputNumber v-model:value="miswriteRatePctProxy" size="small" :min="0" :max="30" :step="0.1" :show-button="false" placeholder="跟随主设置" />
+              <span class="field-label" style="width: auto">字体大小</span>
+              <NInputNumber
+                v-model:value="draft.fontSize"
+                size="small"
+                :min="0"
+                :max="300"
+                :show-button="false"
+                placeholder="跟随主设置"
+              />
+              <span></span>
+              <NInputNumber
+                v-model:value="draft.fontSizeSigma"
+                size="small"
+                :min="0"
+                :max="20"
+                :show-button="false"
+                placeholder="跟随主设置"
+              />
+            </div>
+            <div class="hint-line" style="margin: 6px 0 0 0; text-align: right">
+              主字号当前为 {{ store.fontSize }}，填 0 或留空跟随主设置。
+            </div>
+          </div>
 
-            <span class="adv-label">涂改方式</span>
-            <NSelect v-model:value="strikeoutProxy" size="small" :options="strikeoutOptions" class="span3" />
+          <!-- ============ 笔画扰动 ============ -->
+          <div class="group-card">
+            <span class="group-legend">笔画扰动</span>
+            <div class="sigma-grid" style="grid-template-columns: 84px 1fr">
+              <span class="field-label" style="width: auto">水平笔画位移</span>
+              <NInputNumber
+                v-model:value="draft.perturbXSigma"
+                size="small"
+                :min="0"
+                :max="20"
+                :show-button="false"
+                placeholder="跟随主设置"
+              />
+              <span class="field-label" style="width: auto">竖直笔画位移</span>
+              <NInputNumber
+                v-model:value="draft.perturbYSigma"
+                size="small"
+                :min="0"
+                :max="20"
+                :show-button="false"
+                placeholder="跟随主设置"
+              />
+              <span class="field-label" style="width: auto">笔画旋转</span>
+              <NInputNumber
+                v-model:value="draft.perturbThetaSigma"
+                size="small"
+                :min="0"
+                :max="2"
+                :step="0.01"
+                :precision="3"
+                :show-button="false"
+                placeholder="跟随主设置"
+              />
+            </div>
+          </div>
 
-            <span class="adv-label">文字颜色</span>
-            <NColorPicker
-              v-model:value="draft.fill"
-              :show-alpha="false"
-              size="small"
-              :actions="['clear']"
-              :modes="['hex']"
-              class="span3"
-              placeholder="跟随主设置"
-            />
+          <!-- ============ 写错字 ============ -->
+          <div class="group-card">
+            <span class="group-legend">写错字</span>
+            <div class="field-row">
+              <span class="field-label">错字率</span>
+              <NInputNumber
+                v-model:value="miswriteRatePctProxy"
+                size="small"
+                :min="0"
+                :max="30"
+                :step="0.1"
+                :show-button="false"
+                placeholder="跟随主设置"
+                style="flex: 1"
+              >
+                <template #suffix>%</template>
+              </NInputNumber>
+            </div>
+            <div class="field-row" style="margin-bottom: 0">
+              <span class="field-label">涂改方式</span>
+              <NSelect
+                v-model:value="strikeoutProxy"
+                size="small"
+                :options="strikeoutOptions"
+                style="flex: 1"
+              />
+            </div>
+          </div>
+
+          <!-- ============ 文字颜色 ============ -->
+          <div class="group-card">
+            <span class="group-legend">文字颜色</span>
+            <div class="field-row" style="margin-bottom: 0">
+              <span class="field-label">文字颜色</span>
+              <NColorPicker
+                v-model:value="draft.fill"
+                :show-alpha="false"
+                size="small"
+                :actions="['clear']"
+                :modes="['hex']"
+                :swatches="['#000000', '#1a1a8c', '#8b0000', '#003366']"
+                style="width: 120px"
+              />
+              <NInput
+                :value="draft.fill ?? ''"
+                size="small"
+                placeholder="跟随主设置"
+                style="width: 110px"
+                @update:value="(v: string) => { if (draft) draft.fill = v.trim() ? v.trim() : null; }"
+              />
+              <NButton
+                v-if="draft.fill"
+                size="small"
+                @click="draft.fill = null"
+              >
+                重置跟随
+              </NButton>
+            </div>
+          </div>
+
+          <!-- ============ 边距 ============ -->
+          <div class="group-card" style="margin-bottom: 0">
+            <span class="group-legend">边距</span>
+            <div class="margin-grid">
+              <span></span>
+              <NInputNumber
+                v-model:value="draft.marginTop"
+                size="small"
+                :min="0"
+                :max="1000"
+                :show-button="false"
+                placeholder="0"
+              />
+              <span></span>
+
+              <NInputNumber
+                v-model:value="draft.marginLeft"
+                size="small"
+                :min="0"
+                :max="1000"
+                :show-button="false"
+                placeholder="0"
+              />
+              <span class="margin-center-mark">边距</span>
+              <NInputNumber
+                v-model:value="draft.marginRight"
+                size="small"
+                :min="0"
+                :max="1000"
+                :show-button="false"
+                placeholder="0"
+              />
+
+              <span></span>
+              <NInputNumber
+                v-model:value="draft.marginBottom"
+                size="small"
+                :min="0"
+                :max="1000"
+                :show-button="false"
+                placeholder="0"
+              />
+              <span></span>
+            </div>
+            <div class="hint-line" style="margin: 6px 0 0 0; text-align: center">
+              区域内边距，默认为 0（紧贴框选边界），可按需自定义留白。
+            </div>
           </div>
         </NCollapseItem>
       </NCollapse>
@@ -255,62 +460,68 @@ async function onConfirm(): Promise<void> {
 </template>
 
 <style scoped>
-/* 基础参数网格：固定标签列 + 弹性控件列，四行标签右对齐、控件左缘对齐 */
-.dlg-form {
+.dlg-body {
+  max-height: calc(85vh - 120px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+
+.dlg-basic-grid {
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr);
+  grid-template-columns: 60px 1fr;
   gap: 8px 10px;
   align-items: center;
   margin-top: 10px;
 }
 
-.dlg-label {
+.dlg-basic-grid .field-label {
   text-align: right;
   font-size: 12.5px;
   color: var(--text-main);
   white-space: nowrap;
 }
 
-.dlg-field {
+.field-control {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
 }
 
-.dlg-field :deep(.n-input) {
-  flex: 1;
-  min-width: 0;
+/* 覆盖项中的 group-card 样式（对齐右侧面板） */
+.group-card {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px 12px 10px;
+  margin-bottom: 12px;
+  margin-top: 6px;
 }
 
-.dlg-hint {
-  flex: 1;
-  margin: 0;
+.group-card > .group-legend {
+  position: absolute;
+  top: -9px;
+  left: 12px;
+  background: #fff;
+  padding: 0 6px;
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--accent);
 }
 
-/* 覆盖项网格：固定标签列 + 弹性输入列，两字段一行保持对齐 */
-.adv-grid {
+.sigma-grid {
   display: grid;
-  grid-template-columns: 68px minmax(0, 1fr) 68px minmax(0, 1fr);
-  gap: 10px 8px;
+  grid-template-columns: 78px 1fr 12px 1fr;
+  gap: 6px 4px;
   align-items: center;
 }
 
-.adv-label {
-  text-align: right;
+.sigma-grid .col-head {
+  text-align: center;
+  font-weight: 700;
   font-size: 12px;
-  color: var(--text-main);
-  white-space: nowrap;
-}
-
-.adv-grid :deep(.n-input-number),
-.adv-grid :deep(.n-select),
-.adv-grid :deep(.n-color-picker) {
-  width: 100%;
-}
-
-/* 涂改方式 / 文字颜色：输入区横跨右侧三列 */
-.span3 {
-  grid-column: 2 / -1;
+  color: var(--text-sub);
 }
 </style>

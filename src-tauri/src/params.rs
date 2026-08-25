@@ -45,12 +45,14 @@ pub struct UiRegion {
     pub printed: bool,
     /// 区域字号（0 = 跟随主设置）
     pub font_size: i32,
-    /// 起始页（1 基）
+    /// 所在页（1 基）
     pub page: i32,
     /// 对齐方式：0 左 / 1 中 / 2 右
     pub align: i32,
     /// 首行缩进（字符数 em）
     pub indent_em: f32,
+    /// 区域内各段落排版信息（各段独立设置对齐与缩进）
+    pub paragraphs: Vec<UiParagraph>,
 
     // ---- 逐区域覆盖项（None = 跟随主设置）----
     pub word_spacing: Option<f32>,
@@ -67,6 +69,14 @@ pub struct UiRegion {
     pub miswrite_strikeout_style_index: Option<i32>,
     /// 文字颜色 #RRGGBB；None = 跟随主设置
     pub fill: Option<String>,
+    /// 区域上边距
+    pub margin_top: Option<f32>,
+    /// 区域下边距
+    pub margin_bottom: Option<f32>,
+    /// 区域左边距
+    pub margin_left: Option<f32>,
+    /// 区域右边距
+    pub margin_right: Option<f32>,
 }
 
 fn strikeout_style_opt(idx: i32) -> Option<StrikeoutStyle> {
@@ -87,6 +97,23 @@ impl From<&TextRegion> for UiRegion {
             page: r.page,
             align: r.align,
             indent_em: r.indent_em,
+            paragraphs: r
+                .paragraphs
+                .iter()
+                .map(|p| UiParagraph {
+                    text: p.text.clone(),
+                    align: match p.align {
+                        Align::Center => 1,
+                        Align::Right => 2,
+                        _ => 0,
+                    },
+                    indent_em: if r.font_size > 0 {
+                        p.first_line_indent / r.font_size as f32
+                    } else {
+                        0.0
+                    },
+                })
+                .collect(),
             word_spacing: r.word_spacing,
             line_spacing: r.line_spacing,
             font_size_sigma: r.font_size_sigma,
@@ -105,6 +132,10 @@ impl From<&TextRegion> for UiRegion {
                     StrikeoutStyle::Cross => 3,
                 }),
             fill: r.fill.map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])),
+            margin_top: r.margin_top,
+            margin_bottom: r.margin_bottom,
+            margin_left: r.margin_left,
+            margin_right: r.margin_right,
         }
     }
 }
@@ -243,6 +274,17 @@ impl UiParams {
                     ),
                     _ => None,
                 };
+                let region_fs = if r.font_size > 0 { r.font_size as f32 } else { self.font_size };
+                let region_paras: Vec<Paragraph> = r
+                    .paragraphs
+                    .iter()
+                    .filter(|row| !clean_text(&row.text).trim().is_empty())
+                    .map(|row| Paragraph {
+                        text: clean_text(&row.text),
+                        align: align_of(row.align),
+                        first_line_indent: row.indent_em * region_fs,
+                    })
+                    .collect();
                 Ok(TextRegion {
                     x: r.x,
                     y: r.y,
@@ -255,6 +297,7 @@ impl UiParams {
                     page: r.page.max(1),
                     align: r.align,
                     indent_em: r.indent_em,
+                    paragraphs: region_paras,
                     word_spacing: r.word_spacing,
                     line_spacing: r.line_spacing,
                     font_size_sigma: r.font_size_sigma,
@@ -268,6 +311,10 @@ impl UiParams {
                         .miswrite_strikeout_style_index
                         .and_then(strikeout_style_opt),
                     fill,
+                    margin_top: r.margin_top,
+                    margin_bottom: r.margin_bottom,
+                    margin_left: r.margin_left,
+                    margin_right: r.margin_right,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;

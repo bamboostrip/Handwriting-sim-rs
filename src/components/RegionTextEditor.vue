@@ -1,49 +1,76 @@
 <script setup lang="ts">
-//! 区域文字编辑器（对话框内）：与主界面「待处理文本」一致的富文本观感——
-//! 每行一个 contenteditable（plaintext-only），对齐 / 首行缩进即刻可见，
+//! 区域文字编辑器（对话框内）：与主界面「待处理文本」（ParaEditor）一致的富文本多段模型——
+//! 每行一个 contenteditable（plaintext-only），支持每行独立的对齐（左/中/右）与首行缩进，
 //! 回车分行、段首退格并回上行、粘贴多行自动拆分。
 //!
-//! 与 ParaEditor 的差异：数据模型是单个多行字符串（draft.text，\n 分段），
-//! 对齐 / 缩进为区域级统一设置；组件内部维护行数组，输入即上抛拼接文本，
-//! 外部结构性修改（导入 docx）经 props.text 变化整树同步。
+//! 数据模型：paragraphs: UiParagraph[] ({ text, align, indentEm })
+//! 内部维护带稳定 id 的行列表，对齐/缩进即刻通过 CSS 生效，光标移动上抛当前行索引。
 
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { cleanText } from "../store";
+import type { UiParagraph } from "../types";
+
+export interface RegionParaRow {
+  id: number;
+  text: string;
+  align: 0 | 1 | 2;
+  indentEm: number;
+}
 
 const props = withDefaults(
   defineProps<{
-    /** 多行文本（\n 分段） */
-    text: string;
-    /** 0 左对齐 / 1 居中 / 2 右对齐 */
-    align?: number;
-    /** 首行缩进（字符数 em），按 13px/字 可视化 */
-    indentEm?: number;
+    /** 多段排版数据 */
+    paragraphs: UiParagraph[];
+    /** 当前聚焦行索引（0 基） */
+    curIndex?: number;
     placeholder?: string;
   }>(),
-  { align: 0, indentEm: 0, placeholder: "" },
+  { curIndex: 0, placeholder: "" },
 );
 
-const emit = defineEmits<{ "update:text": [value: string] }>();
+const emit = defineEmits<{
+  "update:paragraphs": [value: UiParagraph[]];
+  "update:curIndex": [value: number];
+}>();
 
 const ALIGN_CSS = ["left", "center", "right"] as const;
 /** 与主界面 ParaEditor 一致的缩进像素基准（13px 字号） */
 const INDENT_PX_PER_EM = 13;
 
-const lines = ref<string[]>(props.text === "" ? [""] : props.text.split("\n"));
+let rowSeq = 1;
+function toRow(p: UiParagraph): RegionParaRow {
+  return {
+    id: rowSeq++,
+    text: p.text ?? "",
+    align: (p.align as 0 | 1 | 2) ?? 0,
+    indentEm: p.indentEm ?? 0,
+  };
+}
 
-const isEmpty = computed(() => lines.value.length === 1 && lines.value[0] === "");
+function initRows(list: UiParagraph[]): RegionParaRow[] {
+  if (!list || list.length === 0) {
+    return [{ id: rowSeq++, text: "", align: 0, indentEm: 0 }];
+  }
+  return list.map(toRow);
+}
+
+const rows = ref<RegionParaRow[]>(initRows(props.paragraphs));
+
+const isEmpty = computed(
+  () => rows.value.length === 1 && rows.value[0]?.text.trim() === "",
+);
 
 // ---- 行元素注册 ----
 const rowEls = new Map<number, HTMLElement>();
-const setRowEl = (i: number) => (el: unknown) => {
-  if (el instanceof HTMLElement) rowEls.set(i, el);
-  else rowEls.delete(i);
+const setRowEl = (id: number) => (el: unknown) => {
+  if (el instanceof HTMLElement) rowEls.set(id, el);
+  else rowEls.delete(id);
 };
 
-function rowStyle(): Record<string, string> {
+function rowStyle(p: RegionParaRow): Record<string, string> {
   return {
-    textAlign: ALIGN_CSS[props.align] ?? "left",
-    textIndent: props.indentEm > 0 ? `${props.indentEm * INDENT_PX_PER_EM}px` : "0",
+    textAlign: ALIGN_CSS[p.align] ?? "left",
+    textIndent: p.indentEm > 0 ? `${p.indentEm * INDENT_PX_PER_EM}px` : "0",
   };
 }
 
@@ -105,48 +132,80 @@ function setCaret(el: HTMLElement, offset: number): void {
   sel?.addRange(rng);
 }
 
-/** 结构性修改后：重写各行 DOM 文本并把光标放到位 */
-async function resync(focusRow: number, caretAt: number): Promise<void> {
-  await nextTick();
-  for (let i = 0; i < lines.value.length; i++) {
-    const el = rowEls.get(i);
+/** 将当前 rows 状态同步回各行 DOM 节点的 innerText */
+function syncDom(): void {
+  for (let i = 0; i < rows.value.length; i++) {
+    const row = rows.value[i];
+    const el = rowEls.get(row.id);
     if (!el) continue;
     const shown = el.innerText.replace(/\n/g, "");
-    if (shown !== lines.value[i]) el.innerText = lines.value[i];
+    if (shown !== row.text) {
+      el.innerText = row.text;
+    }
   }
-  const target = rowEls.get(focusRow);
+}
+
+/** 结构性修改后：重写各行 DOM 文本并把光标放到位 */
+async function resync(focusRowId: number, caretAt: number): Promise<void> {
+  await nextTick();
+  syncDom();
+  const target = rowEls.get(focusRowId);
   if (target) setCaret(target, caretAt);
 }
 
 function commit(): void {
-  emit("update:text", lines.value.join("\n"));
+  emit(
+    "update:paragraphs",
+    rows.value.map((r) => ({
+      text: r.text,
+      align: r.align,
+      indentEm: r.indentEm,
+    })),
+  );
 }
 
-function onInput(i: number, e: Event): void {
+function onInput(r: RegionParaRow, e: Event): void {
   const el = e.target as HTMLElement;
   // Enter 已被拦截；防御性去掉可能混入的换行
-  lines.value[i] = el.innerText.replace(/\n/g, "");
+  r.text = el.innerText.replace(/\n/g, "");
   commit();
+}
+
+function onFocusRow(i: number): void {
+  emit("update:curIndex", i);
 }
 
 function onKeydown(i: number, e: KeyboardEvent): void {
   const el = e.currentTarget as HTMLElement;
+  const cur = rows.value[i];
+  if (!cur) return;
   if (e.key === "Enter" && !e.ctrlKey && !e.altKey && !e.metaKey) {
     e.preventDefault();
-    const pos = Math.max(0, Math.min(caretOffset(el), cpLen(lines.value[i])));
-    const chars = [...lines.value[i]];
+    const pos = Math.max(0, Math.min(caretOffset(el), cpLen(cur.text)));
+    const chars = [...cur.text];
     const before = chars.slice(0, pos).join("");
     const after = chars.slice(pos).join("");
-    lines.value.splice(i, 1, before, after);
+    cur.text = before;
+    const nextRow: RegionParaRow = {
+      id: rowSeq++,
+      text: after,
+      align: cur.align,
+      indentEm: cur.indentEm,
+    };
+    rows.value.splice(i + 1, 0, nextRow);
+    emit("update:curIndex", i + 1);
     commit();
-    void resync(i + 1, 0);
+    void resync(nextRow.id, 0);
   } else if (e.key === "Backspace" && caretCollapsedAtStart(el)) {
     e.preventDefault();
     if (i === 0) return;
-    const joinedLen = cpLen(lines.value[i - 1]);
-    lines.value.splice(i - 1, 2, lines.value[i - 1] + lines.value[i]);
+    const prev = rows.value[i - 1];
+    const joinedLen = cpLen(prev.text);
+    prev.text = prev.text + cur.text;
+    rows.value.splice(i, 1);
+    emit("update:curIndex", i - 1);
     commit();
-    void resync(i - 1, joinedLen);
+    void resync(prev.id, joinedLen);
   }
 }
 
@@ -156,54 +215,86 @@ function onPaste(i: number, e: ClipboardEvent): void {
   e.preventDefault();
   const parts = text.split(/\r?\n/).map((s) => cleanText(s));
   if (parts.length <= 1) {
-    document.execCommand("insertText", false, parts[0]); // Chromium 支持，保留撤销栈
+    document.execCommand("insertText", false, parts[0]);
     return;
   }
+  const cur = rows.value[i];
+  if (!cur) return;
   const el = e.currentTarget as HTMLElement;
-  const off = Math.max(0, Math.min(caretOffset(el), cpLen(lines.value[i])));
-  const chars = [...lines.value[i]];
+  const off = Math.max(0, Math.min(caretOffset(el), cpLen(cur.text)));
+  const chars = [...cur.text];
   const head = chars.slice(0, off).join("");
   const tail = chars.slice(off).join("");
-  const inserted = [...parts];
-  inserted[0] = head + inserted[0];
-  inserted[inserted.length - 1] += tail;
-  lines.value.splice(i, 1, ...inserted);
+  cur.text = head + parts[0];
+
+  const newRows: RegionParaRow[] = [];
+  for (let k = 1; k < parts.length; k++) {
+    const isLast = k === parts.length - 1;
+    newRows.push({
+      id: rowSeq++,
+      text: parts[k] + (isLast ? tail : ""),
+      align: cur.align,
+      indentEm: cur.indentEm,
+    });
+  }
+  rows.value.splice(i + 1, 0, ...newRows);
+  const lastTarget = newRows[newRows.length - 1];
+  emit("update:curIndex", i + newRows.length);
   commit();
-  void resync(i + inserted.length - 1, cpLen(tail));
+  void resync(lastTarget.id, cpLen(tail));
 }
 
-/** 外部结构性修改（导入 docx / 确定前清空）：按 id 同步文本 */
+onMounted(() => {
+  void nextTick(() => {
+    syncDom();
+  });
+});
+
+/** 外部结构性修改（如父组件修改对齐/缩进、导入 docx 或切换草稿） */
 watch(
-  () => props.text,
-  (t) => {
-    const joined = lines.value.join("\n");
-    if (t === joined) return;
-    lines.value = t === "" ? [""] : t.split("\n");
-    void nextTick(() => {
-      for (let i = 0; i < lines.value.length; i++) {
-        const el = rowEls.get(i);
-        if (!el) continue;
-        const shown = el.innerText.replace(/\n/g, "");
-        if (shown !== lines.value[i]) el.innerText = lines.value[i];
+  () => props.paragraphs,
+  async (newParas) => {
+    if (!newParas || newParas.length === 0) return;
+    const sameLength = newParas.length === rows.value.length;
+    let textChanged = !sameLength;
+    if (sameLength) {
+      for (let k = 0; k < newParas.length; k++) {
+        if (newParas[k].text !== rows.value[k].text) {
+          textChanged = true;
+          break;
+        }
       }
-    });
+    }
+    if (textChanged) {
+      rows.value = newParas.map((p) => toRow(p));
+      await nextTick();
+      syncDom();
+    } else {
+      // 仅 align / indentEm 变动，直接更新行属性（CSS 自动响应）
+      for (let k = 0; k < newParas.length; k++) {
+        rows.value[k].align = (newParas[k].align as 0 | 1 | 2) ?? 0;
+        rows.value[k].indentEm = newParas[k].indentEm ?? 0;
+      }
+    }
   },
+  { deep: true },
 );
 </script>
 
 <template>
   <div class="rte" :class="{ 'is-empty': isEmpty }">
     <div
-      v-for="(_, i) in lines"
-      :key="i"
+      v-for="(p, i) in rows"
+      :key="p.id"
       class="rte-row"
       contenteditable="plaintext-only"
       spellcheck="false"
-      :ref="setRowEl(i)"
-      :style="rowStyle()"
-      @input="onInput(i, $event)"
+      :ref="setRowEl(p.id)"
+      :style="rowStyle(p)"
+      @input="onInput(p, $event)"
       @keydown="onKeydown(i, $event)"
       @paste="onPaste(i, $event)"
+      @focusin="onFocusRow(i)"
     ></div>
     <div v-if="isEmpty && placeholder" class="rte-placeholder">{{ placeholder }}</div>
   </div>

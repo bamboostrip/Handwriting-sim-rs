@@ -98,6 +98,13 @@ fn scaled_params_for(params: &HandwritingParams, src_w: u32) -> HandwritingParam
         if r.font_size > 0 {
             r.font_size = ((r.font_size as f64 * scale as f64).round() as i32).max(1);
         }
+        for p in r.paragraphs.iter_mut() {
+            p.first_line_indent *= scale;
+        }
+        if let Some(m) = r.margin_top.as_mut() { *m *= scale; }
+        if let Some(m) = r.margin_bottom.as_mut() { *m *= scale; }
+        if let Some(m) = r.margin_left.as_mut() { *m *= scale; }
+        if let Some(m) = r.margin_right.as_mut() { *m *= scale; }
     }
     scaled
 }
@@ -240,18 +247,21 @@ impl DefaultEngine {
         rp.text = region.text.clone();
         rp.paragraphs = Vec::new();
         rp.regions = Vec::new();
-        rp.left_margin = 0.0;
-        rp.right_margin = 0.0;
-        rp.top_margin = 0.0;
-        rp.bottom_margin = 0.0;
+        rp.left_margin = region.margin_left.unwrap_or(0.0);
+        rp.right_margin = region.margin_right.unwrap_or(0.0);
+        rp.top_margin = region.margin_top.unwrap_or(0.0);
+        rp.bottom_margin = region.margin_bottom.unwrap_or(0.0);
         if !region.font_path.is_empty() {
             rp.font_path = region.font_path.clone();
         }
         if region.font_size > 0 {
             rp.font_size = region.font_size as f32;
         }
-        // 对齐 / 首行缩进：转成单段落路径复用主排版逻辑（缩进按区域字号换算）
-        if region.align != 0 || region.indent_em > 0.0 {
+        // 段落/对齐/首行缩进：
+        if !region.paragraphs.is_empty() {
+            rp.paragraphs = region.paragraphs.clone();
+            rp.text.clear();
+        } else if region.align != 0 || region.indent_em > 0.0 {
             rp.paragraphs = vec![Paragraph {
                 text: region.text.clone(),
                 align: match region.align {
@@ -261,6 +271,16 @@ impl DefaultEngine {
                 },
                 first_line_indent: region.indent_em * rp.font_size,
             }];
+        } else if region.text.contains('\n') {
+            rp.paragraphs = region
+                .text
+                .split('\n')
+                .map(|t| Paragraph {
+                    text: t.to_string(),
+                    align: Align::Left,
+                    first_line_indent: 0.0,
+                })
+                .collect();
         } else {
             rp.text = region.text.clone();
         }
@@ -372,16 +392,16 @@ impl DefaultEngine {
     }
 }
 
-/// 一个框选区域的预计算条目：局部参数、页面偏移/尺寸、逐页掩码、全局起始页。
+/// 一个框选区域的预计算条目：局部参数、页面偏移/尺寸、单页掩码、目标页。
 struct RegionEntry {
     local_params: HandwritingParams,
     ox: usize,
     oy: usize,
     rw: usize,
     rh: usize,
-    masks: Vec<Vec<bool>>,
-    /// 全局起始页索引（0 基）。
-    start_page: usize,
+    mask: Vec<bool>,
+    /// 目标渲染页索引（0 基）。
+    target_page: usize,
 }
 
 /// 统一的多页生成器：预览（降采样参数 + 缩略底图）与导出（原始参数 +
@@ -423,25 +443,16 @@ fn generate_pages_with(
         let font_r = FontFace::load(Path::new(&rp.font_path), rp.font_size)
             .map_err(EngineError::Font)?;
         let rrand = &mut StdRng::seed_from_u64(DefaultEngine::region_seed(seed, index));
-        // 对齐/缩进 → 单段落路径（layout_paragraphs 内部处理分页）；否则纯文本流式
-        let masks: Vec<Vec<bool>> = if region.align != 0 || region.indent_em > 0.0 {
+        // 区域排版：仅排版在所属单页内（超出框选区域的内容直接截断不跨页延伸）
+        let mask: Vec<bool> = if !rp.paragraphs.is_empty() {
             layout::layout_paragraphs(&rp, &font_r, rrand, &rp.paragraphs, rw, rh)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| vec![false; rw * rh])
         } else {
-            let total_chars = region.text.chars().count();
-            let mut masks: Vec<Vec<bool>> = Vec::new();
-            let mut start = 0usize;
-            loop {
-                let prev = start;
-                let result =
-                    layout::layout_text(&rp, &font_r, rrand, &region.text, start, rw, rh, true);
-                start = result.consumed;
-                masks.push(result.mask);
-                // 文字排完，或区域矮到一行都放不下（start 不再推进）时结束，避免死循环
-                if start >= total_chars || start == prev {
-                    break;
-                }
-            }
-            masks
+            let result =
+                layout::layout_text(&rp, &font_r, rrand, &region.text, 0, rw, rh, true);
+            result.mask
         };
         drop(font_r);
         entries.push(RegionEntry {
@@ -450,16 +461,16 @@ fn generate_pages_with(
             oy,
             rw,
             rh,
-            masks,
-            start_page: region.page.max(1) as usize - 1,
+            mask,
+            target_page: region.page.max(1) as usize - 1,
         });
     }
 
-    // ---- 总页数 = 主文字 / 背景页数 / 各区域所需末页的最大值（至少 1 页） ----
+    // ---- 总页数 = 主文字 / 背景页数 / 各区域所在页的最大值（至少 1 页） ----
     let n_pages = main_masks
         .len()
         .max(params.background_pages.len())
-        .max(entries.iter().map(|e| e.start_page + e.masks.len()).max().unwrap_or(0))
+        .max(entries.iter().map(|e| e.target_page + 1).max().unwrap_or(0))
         .max(1);
 
     let perturb_rng = &mut StdRng::seed_from_u64(DefaultEngine::perturb_seed(seed));
@@ -468,14 +479,13 @@ fn generate_pages_with(
     for page_index in 0..n_pages {
         let bg = page_background(page_index)?;
         let mut canvas = bg.as_raw().clone();
-        // 区域先合成（重叠时主文字在上）
+        // 区域先合成（仅在指定 target_page 渲染，重叠时主文字在上）
         for e in &entries {
-            let local = match page_index.checked_sub(e.start_page) {
-                Some(l) if l < e.masks.len() => l,
-                _ => continue,
-            };
+            if page_index != e.target_page {
+                continue;
+            }
             perturb::perturb_region_into(
-                &e.masks[local],
+                &e.mask,
                 e.rw,
                 e.rh,
                 &e.local_params,
@@ -1308,6 +1318,24 @@ mod tests {
     }
 
     #[test]
+    fn region_multi_paragraph_alignment() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = region_test_params(&font, &dir);
+        params.regions = vec![TextRegion {
+            x: 40, y: 40, w: 300, h: 200,
+            text: "你好\n张三".into(),
+            paragraphs: vec![
+                Paragraph { text: "你好".into(), align: Align::Center, first_line_indent: 0.0 },
+                Paragraph { text: "张三".into(), align: Align::Right, first_line_indent: 0.0 },
+            ],
+            ..TextRegion::default()
+        }];
+        let img = render_preview(&params, 42).unwrap();
+        assert!(region_ink_mask(&img).iter().any(|&b| b), "多段区域应成功渲染");
+    }
+
+    #[test]
     fn region_overrides_change_output() {
         // 同 seed 下，设置了覆盖项（字距/颜色/错字率）的区域输出应与默认不同；
         // 打印体 + 扰动覆盖应保持零扰动语义（与不带覆盖的打印体一致）。
@@ -1379,7 +1407,7 @@ mod tests {
     }
 
     #[test]
-    fn region_multi_page_flows_to_next_page() {
+    fn region_overflow_does_not_create_extra_pages() {
         let Some(font) = system_font() else { return };
         let dir = tempfile::tempdir().unwrap();
         let mut params = region_test_params(&font, &dir);
@@ -1390,15 +1418,30 @@ mod tests {
             ..TextRegion::default()
         }];
         let pages = render_all_pages_preview(&params, 7).unwrap();
-        assert!(pages.len() >= 2, "区域文字应跨页，实际 {} 页", pages.len());
-        for page in &pages {
-            let ink = region_ink_mask(page);
-            assert!(ink.iter().any(|&b| b));
-            assert!(
-                inner_ink(&ink, 400, bx, by, bw, bh) > 0,
-                "每页同一矩形内都应有延续的区域墨迹"
-            );
-        }
+        assert_eq!(pages.len(), 1, "超出的区域文字直接截断，不应创建额外页面");
+        let ink = region_ink_mask(&pages[0]);
+        assert!(inner_ink(&ink, 400, bx, by, bw, bh) > 0, "第一页框内应有墨迹");
+    }
+
+    #[test]
+    fn region_margin_shifts_text() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut p1 = region_test_params(&font, &dir);
+        p1.regions = vec![TextRegion {
+            x: 40, y: 40, w: 300, h: 100, text: "边距测试文本".into(),
+            margin_left: Some(0.0), ..TextRegion::default()
+        }];
+        let img1 = render_preview(&p1, 42).unwrap();
+        let mut p2 = region_test_params(&font, &dir);
+        p2.regions = vec![TextRegion {
+            x: 40, y: 40, w: 300, h: 100, text: "边距测试文本".into(),
+            margin_left: Some(50.0), ..TextRegion::default()
+        }];
+        let img2 = render_preview(&p2, 42).unwrap();
+        let m1 = region_ink_mask(&img1);
+        let m2 = region_ink_mask(&img2);
+        assert_ne!(m1, m2, "设置左边距后墨迹分布应发生改变");
     }
 
     #[test]

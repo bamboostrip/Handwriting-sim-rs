@@ -531,7 +531,11 @@ export function regionHasOverrides(r: Region): boolean {
     r.perturbThetaSigma != null ||
     r.miswriteRate != null ||
     r.miswriteStrikeoutStyleIndex != null ||
-    r.fill != null
+    r.fill != null ||
+    (r.marginTop != null && r.marginTop > 0) ||
+    (r.marginBottom != null && r.marginBottom > 0) ||
+    (r.marginLeft != null && r.marginLeft > 0) ||
+    (r.marginRight != null && r.marginRight > 0)
   );
 }
 
@@ -585,6 +589,11 @@ const defaultRegionDraft = (page: number): Region => ({
   page: Math.max(1, page),
   align: 0,
   indentEm: 0,
+  paragraphs: [{ text: "", align: 0, indentEm: 0 }],
+  marginTop: null,
+  marginBottom: null,
+  marginLeft: null,
+  marginRight: null,
 });
 
 /** 草稿有效字号（区域字号 > 主设置），供缩进换算与 docx 导入。 */
@@ -605,7 +614,21 @@ export function openEditRegionDialog(index: number): void {
   const r = store.regions[index];
   if (!r) return;
   store.dialogTargetIndex = index;
-  store.dialogDraft = { ...r };
+  const draft: Region = { ...r };
+  if (!draft.paragraphs || draft.paragraphs.length === 0) {
+    if (draft.text) {
+      draft.paragraphs = draft.text.split("\n").map((line) => ({
+        text: line,
+        align: draft.align ?? 0,
+        indentEm: draft.indentEm ?? 0,
+      }));
+    } else {
+      draft.paragraphs = [{ text: "", align: draft.align ?? 0, indentEm: draft.indentEm ?? 0 }];
+    }
+  } else {
+    draft.paragraphs = draft.paragraphs.map((p) => ({ ...p }));
+  }
+  store.dialogDraft = draft;
   store.dialogOpen = true;
 }
 
@@ -619,6 +642,11 @@ export function cancelRegionDialog(): void {
 export function confirmRegionDialog(): void {
   const d = store.dialogDraft;
   if (!d) return;
+  if (d.paragraphs && d.paragraphs.length > 0) {
+    d.text = d.paragraphs.map((p) => cleanText(p.text)).join("\n");
+    d.align = d.paragraphs[0]?.align ?? 0;
+    d.indentEm = d.paragraphs[0]?.indentEm ?? 0;
+  }
   const text = d.text.trim();
   if (text === "") {
     cancelRegionDialog();
@@ -651,7 +679,7 @@ export async function chooseRegionFont(): Promise<void> {
   if (typeof p === "string") d.fontPath = p;
 }
 
-/** 导入 docx 到对话框草稿：拼接段落文本，对齐取首个非左对齐值。 */
+/** 导入 docx 到对话框草稿：保留各段独立对齐与缩进。 */
 export async function importDocxToDraft(): Promise<void> {
   const d = store.dialogDraft;
   if (!d) return;
@@ -660,9 +688,15 @@ export async function importDocxToDraft(): Promise<void> {
   try {
     const rows = await api.importDocx(p, draftFontSize(d));
     if (!rows.length) throw new Error("文档为空");
-    d.text = rows.map(([t]) => cleanText(t)).join("\n");
-    const aligned = rows.find(([, align]) => align !== 0);
-    if (aligned) d.align = aligned[1];
+    const fs = draftFontSize(d);
+    d.paragraphs = rows.map(([t, align, indentPx]) => ({
+      text: cleanText(t),
+      align: align as 0 | 1 | 2,
+      indentEm: fs > 0 ? indentPx / fs : 0,
+    }));
+    d.text = d.paragraphs.map((r) => r.text).join("\n");
+    d.align = d.paragraphs[0]?.align ?? 0;
+    d.indentEm = d.paragraphs[0]?.indentEm ?? 0;
     store.status = `已导入 ${rows.length} 个段落到区域`;
   } catch (e) {
     store.status = `区域导入 docx 失败：${e}`;
