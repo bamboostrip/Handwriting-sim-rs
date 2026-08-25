@@ -77,6 +77,12 @@ export const store = reactive({
   highlightIndex: -1,
   selectedRegionIndex: -1,
 
+  // ---- 区域对话框（草稿模式：打开时拷贝，确定时写回）----
+  pendingRect: null as [number, number, number, number] | null,
+  dialogOpen: false,
+  dialogTargetIndex: -1, // -1 = 新建
+  dialogDraft: null as Region | null,
+
   docPages: null as string[] | null, // 文档底图逐页 PNG 路径
   docStatus: "",
 
@@ -566,69 +572,98 @@ export function setRegionMode(on: boolean): void {
   if (on) store.editingIndex = -1;
 }
 
-/** 新框选完成 → 立即创建空区域并选中，配置在右侧「文字区域」卡片内联完成。 */
-export function createRegionFromRect(rect: [number, number, number, number]): void {
-  store.regions.push({
-    x: rect[0],
-    y: rect[1],
-    w: rect[2],
-    h: rect[3],
-    text: "",
-    fontPath: "",
-    printed: false,
-    fontSize: 0,
-    page: store.pageIndex + 1,
-    align: 0,
-    indentEm: 0,
-  });
-  const idx = store.regions.length - 1;
-  store.selectedRegionIndex = idx;
-  store.editingIndex = idx;
-  store.status = `已创建区域 ${idx + 1}：在右侧「文字区域」卡片中输入文字与配置`;
+/** 区域对话框草稿默认值。 */
+const defaultRegionDraft = (page: number): Region => ({
+  x: 0,
+  y: 0,
+  w: 0,
+  h: 0,
+  text: "",
+  fontPath: "",
+  printed: false,
+  fontSize: 0,
+  page: Math.max(1, page),
+  align: 0,
+  indentEm: 0,
+});
+
+/** 草稿有效字号（区域字号 > 主设置），供缩进换算与 docx 导入。 */
+function draftFontSize(d: Region): number {
+  return d.fontSize > 0 ? d.fontSize : num(store.fontSize, 36);
 }
 
-export async function chooseRegionFont(index: number): Promise<void> {
+/** 新框选完成 → 暂存矩形并打开属性对话框（起始页 = 当前查看页）。 */
+export function openNewRegionDialog(rect: [number, number, number, number]): void {
+  store.pendingRect = rect;
+  store.dialogTargetIndex = -1;
+  store.dialogDraft = defaultRegionDraft(store.pageIndex + 1);
+  store.dialogOpen = true;
+}
+
+/** 双击/编辑区域 → 打开对话框并回填现有值。 */
+export function openEditRegionDialog(index: number): void {
   const r = store.regions[index];
   if (!r) return;
+  store.dialogTargetIndex = index;
+  store.dialogDraft = { ...r };
+  store.dialogOpen = true;
+}
+
+export function cancelRegionDialog(): void {
+  store.dialogOpen = false;
+  store.pendingRect = null;
+  store.dialogDraft = null;
+}
+
+/** 确定对话框：新建（用暂存矩形）或写回草稿；文字为空则放弃该区域。 */
+export function confirmRegionDialog(): void {
+  const d = store.dialogDraft;
+  if (!d) return;
+  const text = d.text.trim();
+  if (text === "") {
+    cancelRegionDialog();
+    store.status = "区域文字为空，已放弃该区域";
+    return;
+  }
+  d.text = text.trim();
+  d.fontPath = d.fontPath.trim();
+  d.fontSize = Math.round(num(d.fontSize, 0));
+  d.page = Math.max(1, Math.round(num(d.page, 1)));
+  if (store.dialogTargetIndex < 0) {
+    const rect = store.pendingRect;
+    if (rect) {
+      [d.x, d.y, d.w, d.h] = rect;
+      store.regions.push({ ...d });
+    }
+  } else {
+    const r = store.regions[store.dialogTargetIndex];
+    if (r) Object.assign(r, { ...d });
+  }
+  cancelRegionDialog();
+  scheduleRender();
+}
+
+/** 对话框内选择打印字体。 */
+export async function chooseRegionFont(): Promise<void> {
+  const d = store.dialogDraft;
+  if (!d) return;
   const p = await dialogs.pickFont();
-  if (typeof p === "string") r.fontPath = p;
+  if (typeof p === "string") d.fontPath = p;
 }
 
-/** 当前活动区域的有效字号（区域覆盖 > 主设置），供缩进换算与 docx 导入。 */
-export function activeRegionFontSize(r: Region): number {
-  return r.fontSize > 0 ? r.fontSize : num(store.fontSize, 36);
-}
-
-/** 区域对齐：作用于区域整体（0 左 / 1 中 / 2 右）。 */
-export function setRegionAlign(index: number, align: number): void {
-  const r = store.regions[index];
-  if (!r) return;
-  r.align = Math.max(0, Math.min(2, align));
-  scheduleRender();
-}
-
-/** 区域首行缩进开关（2 字符，随主面板语义）。 */
-export function toggleRegionIndent(index: number, on: boolean): void {
-  const r = store.regions[index];
-  if (!r) return;
-  r.indentEm = on ? 2.0 : 0.0;
-  scheduleRender();
-}
-
-/** 导入 docx 到区域：拼接全部段落文本，对齐取第一段的非左对齐值。 */
-export async function importDocxToRegion(index: number): Promise<void> {
-  const r = store.regions[index];
-  if (!r) return;
+/** 导入 docx 到对话框草稿：拼接段落文本，对齐取首个非左对齐值。 */
+export async function importDocxToDraft(): Promise<void> {
+  const d = store.dialogDraft;
+  if (!d) return;
   const p = await dialogs.pickDocx();
   if (!p) return;
   try {
-    const rows = await api.importDocx(p, activeRegionFontSize(r));
+    const rows = await api.importDocx(p, draftFontSize(d));
     if (!rows.length) throw new Error("文档为空");
-    r.text = rows.map(([t]) => cleanText(t)).join("\n");
+    d.text = rows.map(([t]) => cleanText(t)).join("\n");
     const aligned = rows.find(([, align]) => align !== 0);
-    r.align = aligned ? (aligned[1] as 0 | 1 | 2) : 0;
-    store.status = `已导入 ${rows.length} 个段落到区域 ${index + 1}`;
-    scheduleRender();
+    if (aligned) d.align = aligned[1];
+    store.status = `已导入 ${rows.length} 个段落到区域`;
   } catch (e) {
     store.status = `区域导入 docx 失败：${e}`;
     appDialog.error({ title: "区域导入 docx 失败", content: String(e), positiveText: "知道了" });

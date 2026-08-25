@@ -29,6 +29,7 @@ const themeOverrides: GlobalThemeOverrides = {
 // 自动预览：任意参数/段落/区域变化后防抖 300ms 渲染（对齐 README 承诺的行为）
 const paramSnapshot = computed(() => JSON.stringify(buildParams()));
 watch(paramSnapshot, () => {
+  if (store.dialogOpen) return; // 对话框编辑中不触发（草稿未写回）
   scheduleRender();
 });
 
