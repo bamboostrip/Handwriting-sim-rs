@@ -116,6 +116,12 @@ pub struct TextRegion {
     /// 起始页（1 基）；1 = 第一页。
     #[serde(default)]
     pub page: i32,
+    /// 对齐方式：0 左 / 1 居中 / 2 右（应用于区域整体文本）。
+    #[serde(default)]
+    pub align: i32,
+    /// 首行缩进（字符数 em；0 = 无）。渲染时 × 区域字号换算像素。
+    #[serde(default)]
+    pub indent_em: f32,
 
     // ---- 逐区域排版/扰动覆盖项（None = 跟随主设置）----
     /// 字水平间距。
@@ -162,6 +168,8 @@ impl Default for TextRegion {
             printed: false,
             font_size: 0,
             page: 1,
+            align: 0,
+            indent_em: 0.0,
             word_spacing: None,
             line_spacing: None,
             font_size_sigma: None,

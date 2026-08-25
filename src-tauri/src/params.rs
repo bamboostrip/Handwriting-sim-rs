@@ -47,6 +47,10 @@ pub struct UiRegion {
     pub font_size: i32,
     /// 起始页（1 基）
     pub page: i32,
+    /// 对齐方式：0 左 / 1 中 / 2 右
+    pub align: i32,
+    /// 首行缩进（字符数 em）
+    pub indent_em: f32,
 
     // ---- 逐区域覆盖项（None = 跟随主设置）----
     pub word_spacing: Option<f32>,
@@ -81,6 +85,8 @@ impl From<&TextRegion> for UiRegion {
             printed: r.printed,
             font_size: r.font_size,
             page: r.page,
+            align: r.align,
+            indent_em: r.indent_em,
             word_spacing: r.word_spacing,
             line_spacing: r.line_spacing,
             font_size_sigma: r.font_size_sigma,
@@ -247,6 +253,8 @@ impl UiParams {
                     printed: r.printed,
                     font_size: r.font_size,
                     page: r.page.max(1),
+                    align: r.align,
+                    indent_em: r.indent_em,
                     word_spacing: r.word_spacing,
                     line_spacing: r.line_spacing,
                     font_size_sigma: r.font_size_sigma,

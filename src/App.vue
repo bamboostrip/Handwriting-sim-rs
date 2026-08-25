@@ -29,7 +29,6 @@ const themeOverrides: GlobalThemeOverrides = {
 // 自动预览：任意参数/段落/区域变化后防抖 300ms 渲染（对齐 README 承诺的行为）
 const paramSnapshot = computed(() => JSON.stringify(buildParams()));
 watch(paramSnapshot, () => {
-  if (store.dialogOpen) return; // 对话框编辑中不触发
   scheduleRender();
 });
 
@@ -38,12 +37,15 @@ onMounted(() => {
   loadBgDimensions(store.backgroundPath);
 });
 
-// Esc：退出区域调整态（对话框打开时交给对话框自身）
+// Esc：退出区域调整态（正在输入框/编辑器里打字时不劫持）
 function onKeydown(e: KeyboardEvent): void {
-  if (e.key === "Escape" && !store.dialogOpen && store.editingIndex >= 0) {
-    cancelRegionEdit();
-    e.preventDefault();
+  if (e.key !== "Escape" || store.editingIndex < 0) return;
+  const el = e.target as HTMLElement | null;
+  if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) {
+    return;
   }
+  cancelRegionEdit();
+  e.preventDefault();
 }
 window.addEventListener("keydown", onKeydown);
 onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));

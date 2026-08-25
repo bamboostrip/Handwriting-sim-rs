@@ -14,7 +14,7 @@ use rand::{rngs::StdRng, SeedableRng};
 
 use crate::core::font::FontFace;
 use crate::core::layout;
-use crate::core::models::{HandwritingParams, ParamsError, TextRegion};
+use crate::core::models::{Align, HandwritingParams, ParamsError, Paragraph, TextRegion};
 use crate::core::perturb;
 
 /// 引擎错误。
@@ -250,6 +250,20 @@ impl DefaultEngine {
         if region.font_size > 0 {
             rp.font_size = region.font_size as f32;
         }
+        // 对齐 / 首行缩进：转成单段落路径复用主排版逻辑（缩进按区域字号换算）
+        if region.align != 0 || region.indent_em > 0.0 {
+            rp.paragraphs = vec![Paragraph {
+                text: region.text.clone(),
+                align: match region.align {
+                    1 => Align::Center,
+                    2 => Align::Right,
+                    _ => Align::Left,
+                },
+                first_line_indent: region.indent_em * rp.font_size,
+            }];
+        } else {
+            rp.text = region.text.clone();
+        }
         // ---- 逐区域覆盖项（None = 跟随主设置，即 clone 自全局的现值） ----
         if let Some(v) = region.word_spacing {
             rp.word_spacing = v;
@@ -409,20 +423,26 @@ fn generate_pages_with(
         let font_r = FontFace::load(Path::new(&rp.font_path), rp.font_size)
             .map_err(EngineError::Font)?;
         let rrand = &mut StdRng::seed_from_u64(DefaultEngine::region_seed(seed, index));
-        let total_chars = region.text.chars().count();
-        let mut masks: Vec<Vec<bool>> = Vec::new();
-        let mut start = 0usize;
-        loop {
-            let prev = start;
-            let result =
-                layout::layout_text(&rp, &font_r, rrand, &region.text, start, rw, rh, true);
-            start = result.consumed;
-            masks.push(result.mask);
-            // 文字排完，或区域矮到一行都放不下（start 不再推进）时结束，避免死循环
-            if start >= total_chars || start == prev {
-                break;
+        // 对齐/缩进 → 单段落路径（layout_paragraphs 内部处理分页）；否则纯文本流式
+        let masks: Vec<Vec<bool>> = if region.align != 0 || region.indent_em > 0.0 {
+            layout::layout_paragraphs(&rp, &font_r, rrand, &rp.paragraphs, rw, rh)
+        } else {
+            let total_chars = region.text.chars().count();
+            let mut masks: Vec<Vec<bool>> = Vec::new();
+            let mut start = 0usize;
+            loop {
+                let prev = start;
+                let result =
+                    layout::layout_text(&rp, &font_r, rrand, &region.text, start, rw, rh, true);
+                start = result.consumed;
+                masks.push(result.mask);
+                // 文字排完，或区域矮到一行都放不下（start 不再推进）时结束，避免死循环
+                if start >= total_chars || start == prev {
+                    break;
+                }
             }
-        }
+            masks
+        };
         drop(font_r);
         entries.push(RegionEntry {
             local_params: rp,
@@ -1257,6 +1277,34 @@ mod tests {
         }];
         let image = render_preview(&params, 42).unwrap();
         assert!(region_ink_mask(&image).iter().any(|&b| b), "手写体区域应有前景");
+    }
+
+    #[test]
+    fn region_align_changes_layout() {
+        // 同 seed 同文本：居中区域与左对齐区域的墨迹水平质心应明显不同
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let ink_centroid_x = |align: i32| -> f32 {
+            let mut params = region_test_params(&font, &dir);
+            params.regions = vec![TextRegion {
+                x: 40, y: 40, w: 300, h: 120, text: "对齐测试".into(),
+                align, ..TextRegion::default()
+            }];
+            let img = render_preview(&params, 42).unwrap();
+            let mask = region_ink_mask(&img);
+            let (mut sum, mut n) = (0.0f64, 0usize);
+            for (i, &b) in mask.iter().enumerate() {
+                if b { sum += (i % 400) as f64; n += 1; }
+            }
+            assert!(n > 0, "应有墨迹");
+            (sum / n as f64) as f32
+        };
+        let left = ink_centroid_x(0);
+        let center = ink_centroid_x(1);
+        assert!(
+            (center - left).abs() > 10.0,
+            "居中与左对齐的墨迹质心应不同：left={left} center={center}"
+        );
     }
 
     #[test]

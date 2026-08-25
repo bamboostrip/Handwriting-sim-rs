@@ -5,9 +5,13 @@
 //! 渲染代次守卫：renderSeq 只采纳最新一次请求结果，过期响应直接丢弃。
 
 import { reactive, watch } from "vue";
+import { createDiscreteApi } from "naive-ui";
 import { useDebounceFn } from "@vueuse/core";
 import { api, assetUrl, dialogs } from "./api";
 import type { UiParams, UiRegion } from "./types";
+
+/** 组件树外的离散弹窗（store 层的阻断性错误提示用） */
+const { dialog: appDialog } = createDiscreteApi(["dialog"]);
 
 // ---------------------------------------------------------------- 数据模型
 
@@ -19,37 +23,6 @@ export interface Para {
 }
 
 export type Region = UiRegion;
-
-/** 区域对话框的逐区域覆盖项编辑状态（null/-1 = 跟随主设置） */
-export interface RegionAdv {
-  wordSpacing: number | null;
-  lineSpacing: number | null;
-  wordSpacingSigma: number | null;
-  lineSpacingSigma: number | null;
-  fontSizeSigma: number | null;
-  perturbXSigma: number | null;
-  perturbYSigma: number | null;
-  perturbThetaSigma: number | null;
-  /** 错字率（百分比 0~30 显示用） */
-  miswriteRatePct: number | null;
-  /** 涂改方式索引；-1 = 跟随主设置 */
-  strikeoutIndex: number;
-  fill: string | null;
-}
-
-const emptyRegionAdv = (): RegionAdv => ({
-  wordSpacing: null,
-  lineSpacing: null,
-  wordSpacingSigma: null,
-  lineSpacingSigma: null,
-  fontSizeSigma: null,
-  perturbXSigma: null,
-  perturbYSigma: null,
-  perturbThetaSigma: null,
-  miswriteRatePct: null,
-  strikeoutIndex: -1,
-  fill: null,
-});
 
 let paraSeq = 1;
 export const newPara = (text = "", align: 0 | 1 | 2 = 0, indentEm = 0): Para => ({
@@ -99,18 +72,10 @@ export const store = reactive({
   // ---- 框选文字区域 ----
   regionMode: false,
   regions: [] as Region[],
+  /** 当前内嵌编辑的区域索引（-1 = 无；预览上的调整框与右侧编辑卡片共用） */
   editingIndex: -1,
   highlightIndex: -1,
   selectedRegionIndex: -1,
-  pendingRect: null as [number, number, number, number] | null, // 背景像素
-  dialogOpen: false,
-  dialogTargetIndex: -1,
-  dialogText: "",
-  dialogStyleIndex: 0,
-  dialogPage: 1,
-  dialogFontPath: "",
-  dialogFontSize: 0,
-  dialogAdv: emptyRegionAdv(),
 
   docPages: null as string[] | null, // 文档底图逐页 PNG 路径
   docStatus: "",
@@ -312,6 +277,12 @@ export async function importDocument(): Promise<void> {
   } catch (e) {
     store.docStatus = "";
     store.status = `导入文档失败：${e}`;
+    // DOCX 转 PDF 需要本机 Word/LibreOffice 之类，用户必须看到这个提示
+    appDialog.error({
+      title: "导入文档失败",
+      content: String(e),
+      positiveText: "知道了",
+    });
   }
 }
 
@@ -542,7 +513,7 @@ export function focusPara(id: number, offset = 0): void {
 // ---------------------------------------------------------------- 框选区域
 
 /** 区域是否有逐区域覆盖项（对齐 core TextRegion::has_overrides）。 */
-function regionHasOverrides(r: Region): boolean {
+export function regionHasOverrides(r: Region): boolean {
   return (
     r.wordSpacing != null ||
     r.lineSpacing != null ||
@@ -595,111 +566,73 @@ export function setRegionMode(on: boolean): void {
   if (on) store.editingIndex = -1;
 }
 
-/** 新框选完成 → 暂存矩形并弹出属性对话框（默认起始页=当前页）。 */
-export function openNewRegionDialog(rect: [number, number, number, number]): void {
-  store.pendingRect = rect;
-  openRegionDialog(null, store.pageIndex + 1);
+/** 新框选完成 → 立即创建空区域并选中，配置在右侧「文字区域」卡片内联完成。 */
+export function createRegionFromRect(rect: [number, number, number, number]): void {
+  store.regions.push({
+    x: rect[0],
+    y: rect[1],
+    w: rect[2],
+    h: rect[3],
+    text: "",
+    fontPath: "",
+    printed: false,
+    fontSize: 0,
+    page: store.pageIndex + 1,
+    align: 0,
+    indentEm: 0,
+  });
+  const idx = store.regions.length - 1;
+  store.selectedRegionIndex = idx;
+  store.editingIndex = idx;
+  store.status = `已创建区域 ${idx + 1}：在右侧「文字区域」卡片中输入文字与配置`;
 }
 
-export function openEditRegionDialog(index: number): void {
-  openRegionDialog(index, store.regions[index]?.page ?? 1);
+export async function chooseRegionFont(index: number): Promise<void> {
+  const r = store.regions[index];
+  if (!r) return;
+  const p = await dialogs.pickFont();
+  if (typeof p === "string") r.fontPath = p;
 }
 
-function openRegionDialog(index: number | null, defaultPage: number): void {
-  const r = index != null ? store.regions[index] : null;
-  store.dialogTargetIndex = index ?? -1;
-  store.dialogText = r?.text ?? "";
-  store.dialogStyleIndex = r?.printed ? 1 : 0;
-  store.dialogPage = r?.page || Math.max(1, defaultPage);
-  store.dialogFontPath = r?.fontPath ?? "";
-  store.dialogFontSize = r?.fontSize ?? 0;
-  // 覆盖项回填（错字率换算为百分比显示）
-  const a = store.dialogAdv;
-  if (r) {
-    a.wordSpacing = r.wordSpacing ?? null;
-    a.lineSpacing = r.lineSpacing ?? null;
-    a.wordSpacingSigma = r.wordSpacingSigma ?? null;
-    a.lineSpacingSigma = r.lineSpacingSigma ?? null;
-    a.fontSizeSigma = r.fontSizeSigma ?? null;
-    a.perturbXSigma = r.perturbXSigma ?? null;
-    a.perturbYSigma = r.perturbYSigma ?? null;
-    a.perturbThetaSigma = r.perturbThetaSigma ?? null;
-    a.miswriteRatePct =
-      r.miswriteRate != null ? Math.round(r.miswriteRate * 1000) / 10 : null;
-    a.strikeoutIndex = r.miswriteStrikeoutStyleIndex ?? -1;
-    a.fill = r.fill ?? null;
-  } else {
-    Object.assign(a, emptyRegionAdv());
-  }
-  store.dialogOpen = true;
+/** 当前活动区域的有效字号（区域覆盖 > 主设置），供缩进换算与 docx 导入。 */
+export function activeRegionFontSize(r: Region): number {
+  return r.fontSize > 0 ? r.fontSize : num(store.fontSize, 36);
 }
 
-export function cancelRegionDialog(): void {
-  store.dialogOpen = false;
-  store.pendingRect = null;
-}
-
-export function confirmRegionDialog(): void {
-  const d = store;
-  const text = d.dialogText.trim();
-  if (text === "") {
-    d.pendingRect = null;
-    d.dialogOpen = false;
-    d.status = "区域文字为空，已放弃该区域";
-    return;
-  }
-  const fontPath = d.dialogFontPath.trim();
-  // 覆盖项收集（空值 → null = 跟随主设置；间距/位移类取整与主面板一致）
-  const a = d.dialogAdv;
-  const overrides: Partial<Region> = {
-    wordSpacing: a.wordSpacing != null ? Math.round(a.wordSpacing) : null,
-    lineSpacing: a.lineSpacing != null ? Math.round(a.lineSpacing) : null,
-    wordSpacingSigma: a.wordSpacingSigma != null ? Math.round(a.wordSpacingSigma) : null,
-    lineSpacingSigma: a.lineSpacingSigma != null ? Math.round(a.lineSpacingSigma) : null,
-    fontSizeSigma: a.fontSizeSigma != null ? Math.round(a.fontSizeSigma) : null,
-    perturbXSigma: a.perturbXSigma != null ? Math.round(a.perturbXSigma) : null,
-    perturbYSigma: a.perturbYSigma != null ? Math.round(a.perturbYSigma) : null,
-    perturbThetaSigma: a.perturbThetaSigma,
-    miswriteRate:
-      a.miswriteRatePct != null ? num(a.miswriteRatePct, 0) / 100 : null,
-    miswriteStrikeoutStyleIndex: a.strikeoutIndex >= 0 ? a.strikeoutIndex : null,
-    fill: a.fill ?? null,
-  };
-  if (d.dialogTargetIndex < 0) {
-    const rect = d.pendingRect;
-    if (rect) {
-      d.regions.push({
-        x: rect[0],
-        y: rect[1],
-        w: rect[2],
-        h: rect[3],
-        text,
-        fontPath,
-        printed: d.dialogStyleIndex === 1,
-        fontSize: Math.round(num(d.dialogFontSize, 0)),
-        page: Math.max(1, Math.round(num(d.dialogPage, 1))),
-        ...overrides,
-      });
-    }
-  } else {
-    const r = d.regions[d.dialogTargetIndex];
-    if (r) {
-      r.text = text;
-      r.printed = d.dialogStyleIndex === 1;
-      r.fontPath = fontPath;
-      r.fontSize = Math.round(num(d.dialogFontSize, 0));
-      r.page = Math.max(1, Math.round(num(d.dialogPage, 1)));
-      Object.assign(r, overrides);
-    }
-  }
-  d.pendingRect = null;
-  d.dialogOpen = false;
+/** 区域对齐：作用于区域整体（0 左 / 1 中 / 2 右）。 */
+export function setRegionAlign(index: number, align: number): void {
+  const r = store.regions[index];
+  if (!r) return;
+  r.align = Math.max(0, Math.min(2, align));
   scheduleRender();
 }
 
-export async function chooseRegionFont(): Promise<void> {
-  const p = await dialogs.pickFont();
-  if (typeof p === "string") store.dialogFontPath = p;
+/** 区域首行缩进开关（2 字符，随主面板语义）。 */
+export function toggleRegionIndent(index: number, on: boolean): void {
+  const r = store.regions[index];
+  if (!r) return;
+  r.indentEm = on ? 2.0 : 0.0;
+  scheduleRender();
+}
+
+/** 导入 docx 到区域：拼接全部段落文本，对齐取第一段的非左对齐值。 */
+export async function importDocxToRegion(index: number): Promise<void> {
+  const r = store.regions[index];
+  if (!r) return;
+  const p = await dialogs.pickDocx();
+  if (!p) return;
+  try {
+    const rows = await api.importDocx(p, activeRegionFontSize(r));
+    if (!rows.length) throw new Error("文档为空");
+    r.text = rows.map(([t]) => cleanText(t)).join("\n");
+    const aligned = rows.find(([, align]) => align !== 0);
+    r.align = aligned ? (aligned[1] as 0 | 1 | 2) : 0;
+    store.status = `已导入 ${rows.length} 个段落到区域 ${index + 1}`;
+    scheduleRender();
+  } catch (e) {
+    store.status = `区域导入 docx 失败：${e}`;
+    appDialog.error({ title: "区域导入 docx 失败", content: String(e), positiveText: "知道了" });
+  }
 }
 
 /** 二次调整写回（rect 已按背景坐标钳制）。 */

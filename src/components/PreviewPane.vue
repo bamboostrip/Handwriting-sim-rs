@@ -17,8 +17,8 @@ import { NButton, NTooltip } from "naive-ui";
 import {
   clampRect,
   cancelRegionEdit,
+  createRegionFromRect,
   nextPage,
-  openNewRegionDialog,
   prevPage,
   setRegionMode,
   store,
@@ -313,7 +313,7 @@ function onUp(e: PointerEvent): void {
     // 过滤误触：按控件坐标判断拖动距离（阈值 4 显示像素）
     if (rb.w < 4 || rb.h < 4) return;
     const rect = finishRect({ ...rb });
-    if (rect) openNewRegionDialog(rect);
+    if (rect) createRegionFromRect(rect);
   }
 }
 
