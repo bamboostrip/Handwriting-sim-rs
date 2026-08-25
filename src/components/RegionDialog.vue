@@ -74,7 +74,7 @@ async function onConfirm(): Promise<void> {
     :show="store.dialogOpen"
     preset="card"
     :title="store.dialogTargetIndex >= 0 ? '编辑文字区域' : '添加文字区域'"
-    style="width: 480px"
+    style="width: 540px"
     :mask-closable="false"
     :z-index="1000"
     @update:show="(v: boolean) => (v ? undefined : cancelRegionDialog())"
@@ -152,26 +152,26 @@ async function onConfirm(): Promise<void> {
           留空即跟随左侧全局设置；打印体下扰动 / 错字类覆盖不生效。
         </div>
         <div class="adv-grid">
-          <span class="field-label" style="width: auto">水平间距</span>
-          <NInputNumber v-model:value="store.dialogAdv.wordSpacing" size="small" :min="0" :max="100" :show-button="false" placeholder="跟随" />
-          <span class="field-label" style="width: auto">σ</span>
-          <NInputNumber v-model:value="store.dialogAdv.wordSpacingSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随" />
+          <span class="adv-label">水平间距</span>
+          <NInputNumber v-model:value="store.dialogAdv.wordSpacing" size="small" :min="0" :max="100" :show-button="false" placeholder="跟随主设置" />
+          <span class="adv-label">间距 σ</span>
+          <NInputNumber v-model:value="store.dialogAdv.wordSpacingSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
 
-          <span class="field-label" style="width: auto">竖直间距</span>
-          <NInputNumber v-model:value="store.dialogAdv.lineSpacing" size="small" :min="0" :max="200" :show-button="false" placeholder="跟随" />
-          <span class="field-label" style="width: auto">σ</span>
-          <NInputNumber v-model:value="store.dialogAdv.lineSpacingSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随" />
+          <span class="adv-label">竖直间距</span>
+          <NInputNumber v-model:value="store.dialogAdv.lineSpacing" size="small" :min="0" :max="200" :show-button="false" placeholder="跟随主设置" />
+          <span class="adv-label">间距 σ</span>
+          <NInputNumber v-model:value="store.dialogAdv.lineSpacingSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
 
-          <span class="field-label" style="width: auto">字号 σ</span>
-          <NInputNumber v-model:value="store.dialogAdv.fontSizeSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随" />
+          <span class="adv-label">字号 σ</span>
+          <NInputNumber v-model:value="store.dialogAdv.fontSizeSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
           <span></span>
 
-          <span class="field-label" style="width: auto">水平位移</span>
-          <NInputNumber v-model:value="store.dialogAdv.perturbXSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随" />
-          <span class="field-label" style="width: auto">竖直位移</span>
-          <NInputNumber v-model:value="store.dialogAdv.perturbYSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随" />
+          <span class="adv-label">水平位移</span>
+          <NInputNumber v-model:value="store.dialogAdv.perturbXSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
+          <span class="adv-label">竖直位移</span>
+          <NInputNumber v-model:value="store.dialogAdv.perturbYSigma" size="small" :min="0" :max="20" :show-button="false" placeholder="跟随主设置" />
 
-          <span class="field-label" style="width: auto">笔画旋转</span>
+          <span class="adv-label">笔画旋转</span>
           <NInputNumber
             v-model:value="store.dialogAdv.perturbThetaSigma"
             size="small"
@@ -179,21 +179,28 @@ async function onConfirm(): Promise<void> {
             :max="2"
             :step="0.01"
             :precision="3"
-            placeholder="跟随"
+            placeholder="跟随主设置"
           />
-          <span class="field-label" style="width: auto">错字率%</span>
-          <NInputNumber v-model:value="store.dialogAdv.miswriteRatePct" size="small" :min="0" :max="30" :step="0.1" placeholder="跟随" />
+          <span class="adv-label">错字率 %</span>
+          <NInputNumber v-model:value="store.dialogAdv.miswriteRatePct" size="small" :min="0" :max="30" :step="0.1" placeholder="跟随主设置" />
 
-          <span class="field-label" style="width: auto">涂改方式</span>
-          <NSelect v-model:value="store.dialogAdv.strikeoutIndex" size="small" :options="strikeoutOptions" />
-          <span class="field-label" style="width: auto">文字颜色</span>
+          <span class="adv-label">涂改方式</span>
+          <NSelect
+            v-model:value="store.dialogAdv.strikeoutIndex"
+            size="small"
+            :options="strikeoutOptions"
+            class="span3"
+          />
+
+          <span class="adv-label">文字颜色</span>
           <NColorPicker
             v-model:value="store.dialogAdv.fill"
             :show-alpha="false"
             size="small"
             :actions="['clear']"
             :modes="['hex']"
-            placeholder="跟随"
+            class="span3"
+            placeholder="跟随主设置"
           />
         </div>
       </NCollapseItem>
@@ -209,13 +216,29 @@ async function onConfirm(): Promise<void> {
 </template>
 
 <style scoped>
+/* 覆盖项网格：固定标签列 + 弹性输入列，两字段一行保持对齐 */
 .adv-grid {
   display: grid;
-  grid-template-columns: 64px 1fr 64px 1fr;
-  gap: 8px 6px;
+  grid-template-columns: 68px minmax(0, 1fr) 68px minmax(0, 1fr);
+  gap: 10px 8px;
   align-items: center;
 }
-.adv-grid .field-label {
+
+.adv-label {
   text-align: right;
+  font-size: 12px;
+  color: var(--text-main);
+  white-space: nowrap;
+}
+
+.adv-grid :deep(.n-input-number),
+.adv-grid :deep(.n-select),
+.adv-grid :deep(.n-color-picker) {
+  width: 100%;
+}
+
+/* 涂改方式 / 文字颜色：输入区横跨右侧三列 */
+.span3 {
+  grid-column: 2 / -1;
 }
 </style>
