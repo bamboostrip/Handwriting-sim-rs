@@ -1,13 +1,27 @@
 {
   "name": "handwrite-sim",
   "private": true,
+  "version": "0.1.0",
+  "type": "module",
   "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
     "tauri": "tauri",
-    "dev": "tauri dev",
-    "build": "tauri build",
     "test": "cargo test --workspace"
   },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@vueuse/core": "^14",
+    "naive-ui": "^2.43",
+    "vue": "^3.5"
+  },
   "devDependencies": {
-    "@tauri-apps/cli": "^2"
+    "@tauri-apps/cli": "^2",
+    "@vitejs/plugin-vue": "^6",
+    "typescript": "~5.9",
+    "vite": "^7",
+    "vue-tsc": "^3"
   }
 }

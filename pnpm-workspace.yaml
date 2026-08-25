@@ -1,5 +1,2 @@
-packages:
-  - web
-
 allowBuilds:
   esbuild: true

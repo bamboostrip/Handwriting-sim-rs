@@ -1,47 +1,8 @@
+# Tauri 工作区：crates/core 为渲染引擎核心库，src-tauri 为桌面应用壳。
+# 前端（Vue 3）位于仓库根目录，符合 create-tauri-app 标准布局。
 [workspace]
-members = ["src-tauri"]
+members = ["crates/core", "src-tauri"]
 resolver = "2"
-
-[package]
-name = "handwrite-sim"
-version = "0.1.0"
-edition = "2021"
-description = "手写模拟器（Rust 版）- 自研笔画扰动渲染引擎核心（GUI：Tauri 2 + Vue，见 src-tauri/ 与 web/）"
-license = "MIT"
-authors = ["bamboostrip"]
-repository = "https://github.com/bamboostrip/handwrite-sim"
-
-# ---------------------------------------------------------------------------
-# 依赖说明
-# - ab_glyph: 字体光栅化（替代 Python 版 PIL FreeType 黑盒）
-# - image: 图像加载/保存（PNG/webp 背景、导出）
-# - rand/rand_distr: 笔画扰动随机数（正态分布）
-# - serde: 预设 JSON 持久化
-# ---------------------------------------------------------------------------
-[dependencies]
-ab_glyph = "0.2"
-image = "0.25"
-rand = "0.9"
-rand_distr = "0.5"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-# docx 导入：手写解析（zip + quick-xml），完整对齐 Python 版 docx_io.py 语义，
-# 避免第三方 docx 库读取 API 限制
-zip = "8"
-quick-xml = "0.41"
-# PDF 导出：位图层方案（MIT；禁用默认 html feature 避开 azul 依赖树）
-printpdf = { version = "0.12", default-features = false, features = ["images"] }
-lopdf = "0.44.0"
-# 预览降采样：SIMD 加速重采样（image::imageops::resize 对千万像素级输入极慢，
-# 32MP 背景 Lanczos3 实测 80s；本库同滤镜毫秒级）。rayon 开启多线程。
-fast_image_resize = { version = "6", features = ["rayon"] }
-# PDF 底图栅格化（对应 Python 版 pypdfium2）：运行时需 pdfium 动态库
-# （exe 旁 pdfium.dll 或系统 PATH；缺失时导入 PDF 给出明确提示）。
-pdfium-render = "0.8"
-
-[dev-dependencies]
-tempfile = "3"
 
 [profile.release]
 opt-level = 3

@@ -34,7 +34,7 @@
 | --- | --- |
 | 语言 | Rust（edition 2021，MSRV 1.92+）+ TypeScript |
 | 桌面框架 | Tauri 2（系统 WebView：Windows WebView2 / macOS WKWebView / Linux WebKitGTK） |
-| 前端 | Vue 3 + Vite + Naive UI + VueUse（`web/`） |
+| 前端 | Vue 3 + Vite + Naive UI + VueUse（仓库根目录，create-tauri-app 标准布局） |
 | 命令层 | Tauri commands：参数校验、后台渲染调度、文件 IO（`src-tauri/`） |
 | 渲染引擎 | ab_glyph（字体光栅化）+ 自研笔画扰动（连通域 + 旋转平移） |
 | 图像处理 | image（PNG/webp/bmp 背景与导出） |
@@ -89,10 +89,22 @@ Windows 本地一键打包：`pwsh scripts/package-win.ps1`。
 
 ## 目录结构
 
+布局对齐 [create-tauri-app](https://tauri.app/zh-cn/start/create-project/) 标准结构：
+前端（Vue 3）在仓库根目录，Rust 桌面壳在 `src-tauri/`，核心引擎作为工作区成员
+crate 放在 `crates/core`。
+
 ```
-src/
-├── lib.rs             # 库入口（core）
-├── core/              # 渲染引擎（纯 Rust，无 GUI 依赖）
+index.html / vite.config.ts / src/   # Vue 3 前端（Tauri 标准：前端在根目录）
+└── src/
+    ├── store.ts       # 全局状态：参数收集、防抖渲染、段落/区域操作
+    ├── api.ts         # Tauri IPC 封装
+    └── components/    # 参数面板 / 逐段编辑器 / 预览框选 overlay / 区域对话框
+src-tauri/            # Tauri 2 桌面壳
+├── src/main.rs       # 命令层：render_preview / export / import / presets
+├── src/params.rs     # 前端 ↔ 引擎参数转换（camelCase 镜像）
+└── tauri.conf.json   # 窗口/安全/打包配置（asset 协议、resources）
+crates/core/          # 渲染引擎（纯 Rust，无 GUI 依赖；workspace 成员）
+├── src/
 │   ├── models.rs      # 参数模型 + 校验（对齐 Python 版默认值）
 │   ├── font.rs        # 字体光栅化（ab_glyph，字形轮廓缓存）
 │   ├── layout.rs      # 排版 + 错字模拟（对齐/缩进/换行规则/划掉重写）
@@ -101,25 +113,17 @@ src/
 │   ├── doc_render.rs  # PDF/DOCX 文档底图栅格化（pdfium）
 │   ├── presets.rs     # 预设读写（JSON v2 + 便携相对路径）
 │   └── docx_io.rs     # docx 解析（zip + quick-xml）
-src-tauri/            # Tauri 2 桌面壳
-├── src/main.rs        # 命令层：render_preview / export / import / presets
-├── src/params.rs      # 前端 ↔ 引擎参数转换（camelCase 镜像）
-└── tauri.conf.json    # 窗口/安全/打包配置（asset 协议、resources）
-web/                  # Vue 3 前端
-└── src/
-    ├── store.ts       # 全局状态：参数收集、防抖渲染、段落/区域操作
-    └── components/    # 参数面板 / 逐段编辑器 / 预览框选 overlay / 区域对话框
+└── tests/             # 引擎集成测试
 backgrounds/           # 内置背景素材（原创，随仓库分发）
 presets/               # 内置预设示例（JSON v2，相对路径引用资源）
 packaging/             # 打包辅助（fonts-README.txt）
-scripts/               # 图标生成、Windows 打包脚本
-tests/                 # 集成测试
+scripts/               # 图标源、Windows 打包脚本
 docs/                  # 架构 / 迁移计划 / 许可策略
 ```
 
 ### 分层约定
 
-- `core/` 不依赖任何 GUI 模块；Tauri 命令层只做参数校验与任务调度
+- `crates/core` 不依赖任何 GUI 模块；Tauri 命令层只做参数校验与任务调度
 - 数据流：Vue 表单 → `invoke` → `UiParams` 转换校验 → 引擎 → PNG 缓存 → asset 协议回显
 - 渲染/导出在命令线程执行；前端以请求序号做代次守卫，只采纳最新结果；
   参数改动防抖 300ms 自动预览

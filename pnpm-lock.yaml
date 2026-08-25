@@ -7,12 +7,6 @@ settings:
 importers:
 
   .:
-    devDependencies:
-      '@tauri-apps/cli':
-        specifier: ^2
-        version: 2.11.4
-
-  web:
     dependencies:
       '@tauri-apps/api':
         specifier: ^2

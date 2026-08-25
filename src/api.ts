@@ -25,6 +25,9 @@ export const api = {
     invoke<void>("save_preset", { params, path }),
   defaultPresetDir: () => invoke<string>("default_preset_dir"),
   pathExists: (path: string) => invoke<boolean>("path_exists", { path }),
+  /** 只读图片文件头，返回 [宽, 高]；失败为 null（框选坐标换算用） */
+  imageDimensions: (path: string) =>
+    invoke<[number, number] | null>("image_dimensions", { path }),
 };
 
 const filters = {

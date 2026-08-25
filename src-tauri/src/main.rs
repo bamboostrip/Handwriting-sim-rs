@@ -265,6 +265,21 @@ fn path_exists(path: String) -> bool {
     !path.trim().is_empty() && Path::new(path.trim()).is_file()
 }
 
+/// 读取图片尺寸（只读文件头不完整解码）。返回 [宽, 高]；失败返回 null。
+///
+/// 供前端做框选坐标换算（背景原始像素 ↔ 显示像素）。
+/// 不走 asset 协议：用户可选任意磁盘路径的背景，不受 assetProtocol scope 限制。
+#[tauri::command]
+fn image_dimensions(path: String) -> Option<[u32; 2]> {
+    if path.trim().is_empty() {
+        return None;
+    }
+    image::ImageReader::open(path.trim())
+        .ok()
+        .and_then(|r| r.into_dimensions().ok())
+        .map(|(w, h)| [w, h])
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -281,7 +296,8 @@ pub fn run() {
             load_preset,
             save_preset,
             default_preset_dir,
-            path_exists
+            path_exists,
+            image_dimensions
         ])
         .run(tauri::generate_context!())
         .expect("手写模拟器启动失败");

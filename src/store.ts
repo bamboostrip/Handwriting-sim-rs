@@ -197,23 +197,24 @@ export function togglePreviewBg(): void {
 
 // ---------------------------------------------------------------- 背景尺寸与文档底图
 
-/** 后台加载背景自然尺寸（供框选坐标换算），不阻塞渲染。 */
-export function loadBgDimensions(path: string): void {
+/** 加载背景自然尺寸（供框选坐标换算）。
+ *
+ *  走后端 image_dimensions 只读图片头——不依赖 asset 协议，
+ *  任意磁盘路径的背景都能拿到尺寸（asset scope 仅覆盖预览缓存目录）。 */
+export async function loadBgDimensions(path: string): Promise<void> {
   if (!path) {
     store.bgNatW = 0;
     store.bgNatH = 0;
     return;
   }
-  const img = new Image();
-  img.onload = () => {
-    store.bgNatW = img.naturalWidth;
-    store.bgNatH = img.naturalHeight;
-  };
-  img.onerror = () => {
+  try {
+    const dims = await api.imageDimensions(path);
+    store.bgNatW = dims?.[0] ?? 0;
+    store.bgNatH = dims?.[1] ?? 0;
+  } catch {
     store.bgNatW = 0;
     store.bgNatH = 0;
-  };
-  img.src = assetUrl(path);
+  }
 }
 
 /** 手动改走背景路径时使文档底图失效。 */
