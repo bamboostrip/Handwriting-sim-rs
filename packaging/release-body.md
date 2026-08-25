@@ -22,7 +22,7 @@
 
 ## Linux 运行依赖
 
-Slint 界面需要 xcb/xkbcommon/fontconfig 运行时库（主流发行版默认已装）：
+Tauri 2 界面需要 WebKitGTK 4.1 运行时库（主流发行版通常已自带）：
 ```bash
-sudo apt install libxcb-shape0 libxcb-xfixes0 libxkbcommon0 libfontconfig1
+sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2
 ```
