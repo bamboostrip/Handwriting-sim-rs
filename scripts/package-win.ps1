@@ -25,12 +25,10 @@ $ZipName = "handwrite-sim-windows-x86_64.zip"
 
 # ---- 1. release 构建（Tauri CLI：先构建前端再编译，嵌入 WebView 资源） ----
 if (-not $SkipBuild) {
-    Write-Host "[1/4] tauri build --no-bundle ..."
+    Write-Host "[1/4] pnpm tauri build --no-bundle ..."
     Push-Location $Root
     try {
-        $Tauri = Join-Path $Root "web\node_modules\.bin\tauri.CMD"
-        if (-not (Test-Path $Tauri)) { throw "未找到 $Tauri，请先执行 pnpm --dir web install" }
-        & $Tauri build --no-bundle
+        pnpm tauri build --no-bundle
         if ($LASTEXITCODE -ne 0) { throw "tauri build 失败（exit $LASTEXITCODE）" }
     } finally {
         Pop-Location

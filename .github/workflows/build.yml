@@ -18,15 +18,12 @@ jobs:
           - os: windows-latest
             artifact: handwrite-sim-windows-x86_64
             exe_name: handwrite-sim.exe
-            tauri_bin: web/node_modules/.bin/tauri.CMD
           - os: ubuntu-latest
             artifact: handwrite-sim-linux-x86_64
             exe_name: handwrite-sim
-            tauri_bin: web/node_modules/.bin/tauri
           - os: macos-latest
             artifact: handwrite-sim-macos-arm64
             exe_name: handwrite-sim
-            tauri_bin: web/node_modules/.bin/tauri
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -56,8 +53,8 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
-      - name: Install frontend dependencies
-        run: pnpm --dir web install
+      - name: Install dependencies（根 workspace，含 web 前端）
+        run: pnpm install
 
       - name: Run tests
         run: cargo test --workspace
@@ -65,8 +62,7 @@ jobs:
       # --no-bundle：不做安装器，只产出裸二进制（便携 zip 分发模式）。
       # beforeBuildCommand 自动执行 vue-tsc + vite build 并嵌入前端。
       - name: Build (release, Tauri)
-        run: '& "${{ matrix.tauri_bin }}" build --no-bundle'
-        shell: pwsh
+        run: pnpm tauri build --no-bundle
 
       # macOS 可执行文件需 ad-hoc 签名，否则 Gatekeeper 会拦截
       - name: Ad-hoc sign (macOS)

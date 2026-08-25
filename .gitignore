@@ -3,7 +3,8 @@
 /src-tauri/target
 **/*.rs.bk
 
-# 前端（Tauri 2 + Vue）
+# 前端（Tauri 2 + Vue，根目录为 pnpm workspace）
+/node_modules
 /web/node_modules
 /web/dist
 /src-tauri/gen

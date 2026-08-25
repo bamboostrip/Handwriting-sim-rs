@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.handwrite-sim.app",
   "build": {
-    "beforeDevCommand": "pnpm --dir ../web dev",
+    "beforeDevCommand": "pnpm --dir web dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "pnpm --dir ../web build",
+    "beforeBuildCommand": "pnpm --dir web build",
     "frontendDist": "../web/dist"
   },
   "app": {

@@ -48,17 +48,17 @@
 ## 快速开始
 
 ```bash
-# 安装前端依赖（Node 20+/22+，pnpm）
-pnpm --dir web install
+# 安装依赖（Node 20+/22+，pnpm；根目录即 pnpm workspace）
+pnpm install
 
-# 开发模式（Vite HMR + Rust 增量编译）
-web/node_modules/.bin/tauri dev      # Windows 为 web\node_modules\.bin\tauri.CMD dev
+# 开发模式（= Vite HMR + cargo run，官方标准入口）
+pnpm tauri dev
 
 # 运行全部测试（核心引擎）
 cargo test --workspace
 
 # 发布构建（vue-tsc + vite 构建前端并嵌入，LTO + strip）
-web/node_modules/.bin/tauri build --no-bundle
+pnpm tauri build --no-bundle
 ```
 
 产物在 `target/release/handwrite-sim(.exe)`，exe 为便携模式：把 exe 放进任意目录，同目录下的
