@@ -47,6 +47,26 @@ pub struct UiRegion {
     pub font_size: i32,
     /// 起始页（1 基）
     pub page: i32,
+
+    // ---- 逐区域覆盖项（None = 跟随主设置）----
+    pub word_spacing: Option<f32>,
+    pub line_spacing: Option<f32>,
+    pub font_size_sigma: Option<f32>,
+    pub word_spacing_sigma: Option<f32>,
+    pub line_spacing_sigma: Option<f32>,
+    pub perturb_x_sigma: Option<f32>,
+    pub perturb_y_sigma: Option<f32>,
+    pub perturb_theta_sigma: Option<f32>,
+    /// 错字率 0~1
+    pub miswrite_rate: Option<f32>,
+    /// 涂改方式索引（0 单横线 / 1 双横线 / 2 斜线 / 3 叉号）；None = 跟随主设置
+    pub miswrite_strikeout_style_index: Option<i32>,
+    /// 文字颜色 #RRGGBB；None = 跟随主设置
+    pub fill: Option<String>,
+}
+
+fn strikeout_style_opt(idx: i32) -> Option<StrikeoutStyle> {
+    (idx >= 0).then(|| strikeout_style_of(idx))
 }
 
 impl From<&TextRegion> for UiRegion {
@@ -61,6 +81,24 @@ impl From<&TextRegion> for UiRegion {
             printed: r.printed,
             font_size: r.font_size,
             page: r.page,
+            word_spacing: r.word_spacing,
+            line_spacing: r.line_spacing,
+            font_size_sigma: r.font_size_sigma,
+            word_spacing_sigma: r.word_spacing_sigma,
+            line_spacing_sigma: r.line_spacing_sigma,
+            perturb_x_sigma: r.perturb_x_sigma,
+            perturb_y_sigma: r.perturb_y_sigma,
+            perturb_theta_sigma: r.perturb_theta_sigma,
+            miswrite_rate: r.miswrite_rate,
+            miswrite_strikeout_style_index: r
+                .miswrite_strikeout_style
+                .map(|s| match s {
+                    StrikeoutStyle::Line => 0,
+                    StrikeoutStyle::DoubleLine => 1,
+                    StrikeoutStyle::Slash => 2,
+                    StrikeoutStyle::Cross => 3,
+                }),
+            fill: r.fill.map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])),
         }
     }
 }
@@ -188,17 +226,43 @@ impl UiParams {
         if !p.paragraphs.is_empty() {
             p.text.clear(); // 段落模式优先
         }
-        p.regions = self.regions.iter().map(|r| TextRegion {
-            x: r.x,
-            y: r.y,
-            w: r.w,
-            h: r.h,
-            text: r.text.trim().to_string(),
-            font_path: r.font_path.trim().to_string(),
-            printed: r.printed,
-            font_size: r.font_size,
-            page: r.page.max(1),
-        }).collect();
+        p.regions = self
+            .regions
+            .iter()
+            .map(|r| -> Result<TextRegion, String> {
+                let fill = match &r.fill {
+                    Some(hex) if !hex.trim().is_empty() => Some(
+                        models::parse_color(hex.trim())
+                            .map_err(|e| format!("区域文字颜色：{e}"))?,
+                    ),
+                    _ => None,
+                };
+                Ok(TextRegion {
+                    x: r.x,
+                    y: r.y,
+                    w: r.w,
+                    h: r.h,
+                    text: r.text.trim().to_string(),
+                    font_path: r.font_path.trim().to_string(),
+                    printed: r.printed,
+                    font_size: r.font_size,
+                    page: r.page.max(1),
+                    word_spacing: r.word_spacing,
+                    line_spacing: r.line_spacing,
+                    font_size_sigma: r.font_size_sigma,
+                    word_spacing_sigma: r.word_spacing_sigma,
+                    line_spacing_sigma: r.line_spacing_sigma,
+                    perturb_x_sigma: r.perturb_x_sigma,
+                    perturb_y_sigma: r.perturb_y_sigma,
+                    perturb_theta_sigma: r.perturb_theta_sigma,
+                    miswrite_rate: r.miswrite_rate,
+                    miswrite_strikeout_style: r
+                        .miswrite_strikeout_style_index
+                        .and_then(strikeout_style_opt),
+                    fill,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         p.font_size = self.font_size;
         p.word_spacing = self.word_spacing;
         p.line_spacing = self.line_spacing;

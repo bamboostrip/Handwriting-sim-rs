@@ -116,15 +116,82 @@ pub struct TextRegion {
     /// 起始页（1 基）；1 = 第一页。
     #[serde(default)]
     pub page: i32,
+
+    // ---- 逐区域排版/扰动覆盖项（None = 跟随主设置）----
+    /// 字水平间距。
+    #[serde(default)]
+    pub word_spacing: Option<f32>,
+    /// 字竖直间距。
+    #[serde(default)]
+    pub line_spacing: Option<f32>,
+    /// 字号随机扰动 σ。
+    #[serde(default)]
+    pub font_size_sigma: Option<f32>,
+    /// 字水平间距扰动 σ。
+    #[serde(default)]
+    pub word_spacing_sigma: Option<f32>,
+    /// 字竖直间距扰动 σ。
+    #[serde(default)]
+    pub line_spacing_sigma: Option<f32>,
+    /// 水平笔画位移 σ。
+    #[serde(default)]
+    pub perturb_x_sigma: Option<f32>,
+    /// 竖直笔画位移 σ。
+    #[serde(default)]
+    pub perturb_y_sigma: Option<f32>,
+    /// 笔画旋转 σ。
+    #[serde(default)]
+    pub perturb_theta_sigma: Option<f32>,
+    /// 错字率（0..=1）；None = 跟随主设置。
+    #[serde(default)]
+    pub miswrite_rate: Option<f32>,
+    /// 错字涂改方式覆盖。
+    #[serde(default)]
+    pub miswrite_strikeout_style: Option<StrikeoutStyle>,
+    /// 文字颜色覆盖（#RRGGBB 解析后的 RGB）。
+    #[serde(default)]
+    pub fill: Option<[u8; 3]>,
 }
 
 impl Default for TextRegion {
     fn default() -> Self {
-        Self { x: 0, y: 0, w: 0, h: 0, text: String::new(), font_path: String::new(), printed: false, font_size: 0, page: 1 }
+        Self {
+            x: 0, y: 0, w: 0, h: 0,
+            text: String::new(),
+            font_path: String::new(),
+            printed: false,
+            font_size: 0,
+            page: 1,
+            word_spacing: None,
+            line_spacing: None,
+            font_size_sigma: None,
+            word_spacing_sigma: None,
+            line_spacing_sigma: None,
+            perturb_x_sigma: None,
+            perturb_y_sigma: None,
+            perturb_theta_sigma: None,
+            miswrite_rate: None,
+            miswrite_strikeout_style: None,
+            fill: None,
+        }
     }
 }
 
 impl TextRegion {
+    /// 是否设置了任意一项逐区域覆盖（列表摘要标记用）。
+    pub fn has_overrides(&self) -> bool {
+        self.word_spacing.is_some()
+            || self.line_spacing.is_some()
+            || self.font_size_sigma.is_some()
+            || self.word_spacing_sigma.is_some()
+            || self.line_spacing_sigma.is_some()
+            || self.perturb_x_sigma.is_some()
+            || self.perturb_y_sigma.is_some()
+            || self.perturb_theta_sigma.is_some()
+            || self.miswrite_rate.is_some()
+            || self.miswrite_strikeout_style.is_some()
+            || self.fill.is_some()
+    }
     /// 区域列表里的一行摘要（对齐 Python 版 `TextRegion.label`）。
     pub fn label(&self, index: usize) -> String {
         let style = if self.printed { "打印" } else { "手写" };

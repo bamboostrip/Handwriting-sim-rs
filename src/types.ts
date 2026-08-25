@@ -19,6 +19,22 @@ export interface UiRegion {
   printed: boolean;
   fontSize: number;
   page: number;
+
+  // ---- 逐区域覆盖项（null = 跟随主设置）----
+  wordSpacing?: number | null;
+  lineSpacing?: number | null;
+  fontSizeSigma?: number | null;
+  wordSpacingSigma?: number | null;
+  lineSpacingSigma?: number | null;
+  perturbXSigma?: number | null;
+  perturbYSigma?: number | null;
+  perturbThetaSigma?: number | null;
+  /** 错字率 0~1 */
+  miswriteRate?: number | null;
+  /** 涂改方式索引；null = 跟随主设置 */
+  miswriteStrikeoutStyleIndex?: number | null;
+  /** 文字颜色 #RRGGBB；null = 跟随主设置 */
+  fill?: string | null;
 }
 
 export interface UiParams {

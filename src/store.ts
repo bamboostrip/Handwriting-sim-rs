@@ -20,6 +20,37 @@ export interface Para {
 
 export type Region = UiRegion;
 
+/** 区域对话框的逐区域覆盖项编辑状态（null/-1 = 跟随主设置） */
+export interface RegionAdv {
+  wordSpacing: number | null;
+  lineSpacing: number | null;
+  wordSpacingSigma: number | null;
+  lineSpacingSigma: number | null;
+  fontSizeSigma: number | null;
+  perturbXSigma: number | null;
+  perturbYSigma: number | null;
+  perturbThetaSigma: number | null;
+  /** 错字率（百分比 0~30 显示用） */
+  miswriteRatePct: number | null;
+  /** 涂改方式索引；-1 = 跟随主设置 */
+  strikeoutIndex: number;
+  fill: string | null;
+}
+
+const emptyRegionAdv = (): RegionAdv => ({
+  wordSpacing: null,
+  lineSpacing: null,
+  wordSpacingSigma: null,
+  lineSpacingSigma: null,
+  fontSizeSigma: null,
+  perturbXSigma: null,
+  perturbYSigma: null,
+  perturbThetaSigma: null,
+  miswriteRatePct: null,
+  strikeoutIndex: -1,
+  fill: null,
+});
+
 let paraSeq = 1;
 export const newPara = (text = "", align: 0 | 1 | 2 = 0, indentEm = 0): Para => ({
   id: paraSeq++,
@@ -79,6 +110,7 @@ export const store = reactive({
   dialogPage: 1,
   dialogFontPath: "",
   dialogFontSize: 0,
+  dialogAdv: emptyRegionAdv(),
 
   docPages: null as string[] | null, // 文档底图逐页 PNG 路径
   docStatus: "",
@@ -509,11 +541,29 @@ export function focusPara(id: number, offset = 0): void {
 
 // ---------------------------------------------------------------- 框选区域
 
-/** 区域列表摘要（对齐 models.rs TextRegion::label）。 */
+/** 区域是否有逐区域覆盖项（对齐 core TextRegion::has_overrides）。 */
+function regionHasOverrides(r: Region): boolean {
+  return (
+    r.wordSpacing != null ||
+    r.lineSpacing != null ||
+    r.fontSizeSigma != null ||
+    r.wordSpacingSigma != null ||
+    r.lineSpacingSigma != null ||
+    r.perturbXSigma != null ||
+    r.perturbYSigma != null ||
+    r.perturbThetaSigma != null ||
+    r.miswriteRate != null ||
+    r.miswriteStrikeoutStyleIndex != null ||
+    r.fill != null
+  );
+}
+
+/** 区域列表摘要（对齐 models.rs TextRegion::label；自定义过追加 ⚙ 标记）。 */
 export function regionLabel(r: Region, index: number): string {
   const style = r.printed ? "打印" : "手写";
   const page = r.page > 1 ? ` 第${r.page}页` : "";
-  return `${index}. ${style}${page} ${[...r.text].length}字 (${r.x},${r.y} ${r.w}×${r.h})`;
+  const custom = regionHasOverrides(r) ? " ⚙" : "";
+  return `${index}. ${style}${page} ${[...r.text].length}字 (${r.x},${r.y} ${r.w}×${r.h})${custom}`;
 }
 
 /** 把矩形钳制到背景范围并保证最小尺寸（对齐原 clamp_rect）。
@@ -563,6 +613,24 @@ function openRegionDialog(index: number | null, defaultPage: number): void {
   store.dialogPage = r?.page || Math.max(1, defaultPage);
   store.dialogFontPath = r?.fontPath ?? "";
   store.dialogFontSize = r?.fontSize ?? 0;
+  // 覆盖项回填（错字率换算为百分比显示）
+  const a = store.dialogAdv;
+  if (r) {
+    a.wordSpacing = r.wordSpacing ?? null;
+    a.lineSpacing = r.lineSpacing ?? null;
+    a.wordSpacingSigma = r.wordSpacingSigma ?? null;
+    a.lineSpacingSigma = r.lineSpacingSigma ?? null;
+    a.fontSizeSigma = r.fontSizeSigma ?? null;
+    a.perturbXSigma = r.perturbXSigma ?? null;
+    a.perturbYSigma = r.perturbYSigma ?? null;
+    a.perturbThetaSigma = r.perturbThetaSigma ?? null;
+    a.miswriteRatePct =
+      r.miswriteRate != null ? Math.round(r.miswriteRate * 1000) / 10 : null;
+    a.strikeoutIndex = r.miswriteStrikeoutStyleIndex ?? -1;
+    a.fill = r.fill ?? null;
+  } else {
+    Object.assign(a, emptyRegionAdv());
+  }
   store.dialogOpen = true;
 }
 
@@ -581,6 +649,22 @@ export function confirmRegionDialog(): void {
     return;
   }
   const fontPath = d.dialogFontPath.trim();
+  // 覆盖项收集（空值 → null = 跟随主设置；间距/位移类取整与主面板一致）
+  const a = d.dialogAdv;
+  const overrides: Partial<Region> = {
+    wordSpacing: a.wordSpacing != null ? Math.round(a.wordSpacing) : null,
+    lineSpacing: a.lineSpacing != null ? Math.round(a.lineSpacing) : null,
+    wordSpacingSigma: a.wordSpacingSigma != null ? Math.round(a.wordSpacingSigma) : null,
+    lineSpacingSigma: a.lineSpacingSigma != null ? Math.round(a.lineSpacingSigma) : null,
+    fontSizeSigma: a.fontSizeSigma != null ? Math.round(a.fontSizeSigma) : null,
+    perturbXSigma: a.perturbXSigma != null ? Math.round(a.perturbXSigma) : null,
+    perturbYSigma: a.perturbYSigma != null ? Math.round(a.perturbYSigma) : null,
+    perturbThetaSigma: a.perturbThetaSigma,
+    miswriteRate:
+      a.miswriteRatePct != null ? num(a.miswriteRatePct, 0) / 100 : null,
+    miswriteStrikeoutStyleIndex: a.strikeoutIndex >= 0 ? a.strikeoutIndex : null,
+    fill: a.fill ?? null,
+  };
   if (d.dialogTargetIndex < 0) {
     const rect = d.pendingRect;
     if (rect) {
@@ -594,6 +678,7 @@ export function confirmRegionDialog(): void {
         printed: d.dialogStyleIndex === 1,
         fontSize: Math.round(num(d.dialogFontSize, 0)),
         page: Math.max(1, Math.round(num(d.dialogPage, 1))),
+        ...overrides,
       });
     }
   } else {
@@ -602,8 +687,9 @@ export function confirmRegionDialog(): void {
       r.text = text;
       r.printed = d.dialogStyleIndex === 1;
       r.fontPath = fontPath;
-      r.fontSize = d.dialogFontSize;
-      r.page = Math.max(1, d.dialogPage);
+      r.fontSize = Math.round(num(d.dialogFontSize, 0));
+      r.page = Math.max(1, Math.round(num(d.dialogPage, 1)));
+      Object.assign(r, overrides);
     }
   }
   d.pendingRect = null;

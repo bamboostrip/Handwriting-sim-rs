@@ -232,7 +232,8 @@ impl DefaultEngine {
         image::imageops::resize(&img, width, height, image::imageops::FilterType::Lanczos3)
     }
 
-    /// 构造区域局部的渲染参数：独立字体/字号；打印体关闭全部扰动。
+    /// 构造区域局部的渲染参数：独立字体/字号；逐区域排版/扰动/错字覆盖项；
+    /// 打印体关闭全部扰动（覆盖项之后应用，打印语义始终占优）。
     /// 区域以矩形自身为界，不再叠加整页边距（对齐 Python 版 `_region_params`）。
     fn region_local_params(params: &HandwritingParams, region: &TextRegion) -> HandwritingParams {
         let mut rp = params.clone();
@@ -249,6 +250,41 @@ impl DefaultEngine {
         if region.font_size > 0 {
             rp.font_size = region.font_size as f32;
         }
+        // ---- 逐区域覆盖项（None = 跟随主设置，即 clone 自全局的现值） ----
+        if let Some(v) = region.word_spacing {
+            rp.word_spacing = v;
+        }
+        if let Some(v) = region.line_spacing {
+            rp.line_spacing = v;
+        }
+        if let Some(v) = region.word_spacing_sigma {
+            rp.word_spacing_sigma = v;
+        }
+        if let Some(v) = region.line_spacing_sigma {
+            rp.line_spacing_sigma = v;
+        }
+        if let Some(v) = region.font_size_sigma {
+            rp.font_size_sigma = v;
+        }
+        if let Some(v) = region.perturb_x_sigma {
+            rp.perturb_x_sigma = v;
+        }
+        if let Some(v) = region.perturb_y_sigma {
+            rp.perturb_y_sigma = v;
+        }
+        if let Some(v) = region.perturb_theta_sigma {
+            rp.perturb_theta_sigma = v;
+        }
+        if let Some(v) = region.miswrite_rate {
+            rp.miswrite_rate = v;
+        }
+        if let Some(s) = region.miswrite_strikeout_style {
+            rp.miswrite_strikeout_style = s;
+        }
+        if let Some(c) = region.fill {
+            rp.fill = c;
+        }
+        // ---- 打印体：零扰动、零错字（优先于任何覆盖项） ----
         if region.printed {
             rp.word_spacing_sigma = 0.0;
             rp.line_spacing_sigma = 0.0;
@@ -1221,6 +1257,59 @@ mod tests {
         }];
         let image = render_preview(&params, 42).unwrap();
         assert!(region_ink_mask(&image).iter().any(|&b| b), "手写体区域应有前景");
+    }
+
+    #[test]
+    fn region_overrides_change_output() {
+        // 同 seed 下，设置了覆盖项（字距/颜色/错字率）的区域输出应与默认不同；
+        // 打印体 + 扰动覆盖应保持零扰动语义（与不带覆盖的打印体一致）。
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut base = region_test_params(&font, &dir);
+        base.regions = vec![TextRegion {
+            x: 40, y: 40, w: 300, h: 200, text: "覆盖测试文字内容".into(),
+            font_size: 28, ..TextRegion::default()
+        }];
+        let base_img = render_preview(&base, 42).unwrap();
+
+        let mut overridden = region_test_params(&font, &dir);
+        overridden.regions = vec![TextRegion {
+            x: 40, y: 40, w: 300, h: 200, text: "覆盖测试文字内容".into(),
+            font_size: 28,
+            word_spacing: Some(24.0),
+            line_spacing: Some(64.0),
+            perturb_theta_sigma: Some(0.3),
+            miswrite_rate: Some(0.5),
+            fill: Some([200, 30, 30]),
+            ..TextRegion::default()
+        }];
+        let over_img = render_preview(&overridden, 42).unwrap();
+
+        assert_ne!(
+            base_img.as_raw(), over_img.as_raw(),
+            "设置覆盖项后渲染结果应当不同"
+        );
+
+        // 打印体忽略扰动类覆盖：带扰动覆盖的打印体 == 不带覆盖的打印体
+        let mut printed_plain = region_test_params(&font, &dir);
+        printed_plain.regions = vec![TextRegion {
+            x: 40, y: 40, w: 300, h: 200, text: "打印体覆盖".into(),
+            printed: true, font_size: 28, ..TextRegion::default()
+        }];
+        let mut printed_overridden = region_test_params(&font, &dir);
+        printed_overridden.regions = vec![TextRegion {
+            x: 40, y: 40, w: 300, h: 200, text: "打印体覆盖".into(),
+            printed: true, font_size: 28,
+            perturb_theta_sigma: Some(0.5),
+            miswrite_rate: Some(0.9),
+            ..TextRegion::default()
+        }];
+        assert_eq!(
+            render_preview(&printed_plain, 42).unwrap().as_raw(),
+            render_preview(&printed_overridden, 42).unwrap().as_raw(),
+            "打印体应忽略扰动/错字类覆盖项"
+        );
     }
 
     #[test]
