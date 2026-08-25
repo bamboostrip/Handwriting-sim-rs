@@ -11,7 +11,11 @@ export default defineConfig({
   // 「重新优化依赖 → 整页 reload」，表现为启动后白屏很久。
   // （Vite 7 = esbuild 预打包；Vite 8 Rolldown 同样支持 include。）
   optimizeDeps: {
-    include: ["naive-ui", "@vueuse/core", "vue", "@tauri-apps/api", "@tauri-apps/plugin-dialog"],
+    // 注意：include 的 ID 必须与代码里的真实导入标识符完全一致。
+    // 前端导入的是子路径 "@tauri-apps/api/core"（不是包根 "@tauri-apps/api"），
+    // 写包根会导致每次冷启动页面加载时「发现新依赖 → 二次预打包 → 整页 reload」，
+    // 表现为窗口显示后长时间白屏。
+    include: ["naive-ui", "@vueuse/core", "vue", "@tauri-apps/api/core", "@tauri-apps/plugin-dialog"],
   },
   server: {
     port: 5173,

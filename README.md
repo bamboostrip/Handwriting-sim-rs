@@ -12,7 +12,7 @@
 
 ![手写模拟器界面](docs/screenshots/gui-main.png)
 
-左栏为参数面板（字体/背景选择、排版与扰动参数、写错字模拟、预设切换），右侧为多页预览区，停止输入 300ms 后自动渲染。
+右栏为参数面板（字体/背景选择、排版与扰动参数、写错字模拟、预设切换），左侧为多页预览区，停止输入 300ms 后自动渲染。
 
 ## 与 Python 版的差异
 
@@ -38,7 +38,7 @@
 | 命令层 | Tauri commands：参数校验、后台渲染调度、文件 IO（`src-tauri/`） |
 | 渲染引擎 | ab_glyph（字体光栅化）+ 自研笔画扰动（连通域 + 旋转平移） |
 | 图像处理 | image（PNG/webp/bmp 背景与导出） |
-| 文件对话框 | rfd（原生对话框，Linux 走 xdg-portal） |
+| 文件对话框 | tauri-plugin-dialog（系统原生对话框，前端经 `@tauri-apps/plugin-dialog` 调用） |
 | docx 解析 | zip + quick-xml |
 | PDF 导出 | printpdf + lopdf（300 DPI 位图层） |
 | 随机扰动 | rand / rand_distr（正态分布） |
@@ -102,9 +102,10 @@ index.html / vite.config.ts / src/   # Vue 3 前端（Tauri 标准：前端在�
 src-tauri/            # Tauri 2 桌面壳
 ├── src/main.rs       # 命令层：render_preview / export / import / presets
 ├── src/params.rs     # 前端 ↔ 引擎参数转换（camelCase 镜像）
+├── capabilities/      # Tauri 2 权限白名单（core API + dialog 插件 → 主窗口）
 └── tauri.conf.json   # 窗口/安全/打包配置（asset 协议、resources）
 crates/core/          # 渲染引擎（纯 Rust，无 GUI 依赖；workspace 成员）
-├── src/
+├── src/core/
 │   ├── models.rs      # 参数模型 + 校验（对齐 Python 版默认值）
 │   ├── font.rs        # 字体光栅化（ab_glyph，字形轮廓缓存）
 │   ├── layout.rs      # 排版 + 错字模拟（对齐/缩进/换行规则/划掉重写）
@@ -183,8 +184,13 @@ JSON v2，**与 Python 版完全互通**（只保存排版参数，不含文本�
 ### 本机构建
 
 ```bash
-cargo build --release
+# Tauri 标准入口：先由 beforeBuildCommand 执行 Vite 构建前端到 dist/，
+# 再编译 Rust 并把前端产物嵌入二进制
+pnpm tauri build --no-bundle
 ```
+
+> 不要直接 `cargo build --release`：`frontendDist` 指向 `../dist`，
+> 缺少前端产物时 Tauri 上下文生成会直接报错。
 
 便携包结构（手动组装）：
 
