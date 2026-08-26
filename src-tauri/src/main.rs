@@ -280,7 +280,53 @@ fn image_dimensions(path: String) -> Option<[u32; 2]> {
         .map(|(w, h)| [w, h])
 }
 
+/// 便携版 WebView2 固定运行时（Fixed Runtime）探测：
+/// 若 exe 同目录存在 `WebView2` / `WebView2Runtime` / `Microsoft.WebView2.*` 等
+/// 包含 `msedgewebview2.exe` 的子目录，则设为 `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER`，
+/// 使 wry/WebView2 优先加载该目录而非系统安装版，实现“解压即用、离线可用”。
+/// 参考：Tauri `fixedVersion` 模式 + Microsoft Fixed Runtime 文档。
+fn init_webview2_fixed_runtime() {
+    let exe_dir = match std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+    {
+        Some(d) => d,
+        None => return,
+    };
+    // 候选目录名（与 CI 打包脚本一致）
+    const CANDIDATES: &[&str] = &[
+        "WebView2",
+        "WebView2Runtime",
+        "msedgewebview2",
+        "Microsoft.WebView2.FixedVersionRuntime.128.0.2739.54.x64",
+    ];
+    for name in CANDIDATES {
+        let cand = exe_dir.join(name);
+        if cand.join("msedgewebview2.exe").exists()
+            || cand.join("msedge.dll").exists()
+            || cand.join("EBWebView").exists()
+        {
+            // WEBVIEW2_BROWSER_EXECUTABLE_FOLDER 需指向包含 msedgewebview2.exe 的目录
+            std::env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", &cand);
+            eprintln!("[WebView2] 使用便携固定运行时: {}", cand.display());
+            return;
+        }
+    }
+    // 兜底：遍历 exe 同目录一级子目录，任意包含 msedgewebview2.exe 即视为运行时
+    if let Ok(rd) = std::fs::read_dir(&exe_dir) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() && p.join("msedgewebview2.exe").exists() {
+                std::env::set_var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", &p);
+                eprintln!("[WebView2] 使用便携固定运行时: {}", p.display());
+                return;
+            }
+        }
+    }
+}
+
 pub fn run() {
+    init_webview2_fixed_runtime();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {

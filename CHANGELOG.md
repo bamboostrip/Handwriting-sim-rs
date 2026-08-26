@@ -10,6 +10,19 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-26
+
+### Fixed
+
+- **Windows WebView2 缺失提示**：部分用户（尤其是非管理员账户 / 精简系统 / 跨用户账户）启动便携版时提示 `Could not find the WebView2 Runtime`。本版本仅新增 **1 个便携免安装变体**（整体 4 文件：win 轻量 + win-webview2 + linux + macos，无安装包）：
+  - 便携 zip 仍保留 `handwrite-sim-windows-x86_64.zip`（轻量 ~10 MB，需系统已安装 WebView2，Win10/11 通常自带）
+  - **新增** `handwrite-sim-windows-x86_64-webview2.zip`（~150 MB，内置 Fixed Runtime `Microsoft.WebView2.FixedVersionRuntime.128.0.2739.54.x64`，exe 旁 `WebView2/` 目录，`src-tauri/src/main.rs:283` 启动前设 `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER`，解压即用，无需安装/联网/管理员，跨用户可用，适合小工具免安装分发）
+  - Release 页面已补充对照表：**报错/离线→下 webview2.zip，已有 WebView2→仍用轻量 zip**；Linux/macOS 不使用 WebView2（WebKitGTK/WKWebView），无需额外打包；暂不提供 NSIS/MSI 安装包
+
+### Changed
+
+- 升级版本号至 0.3.1，`src-tauri/src/main.rs` 新增 `init_webview2_fixed_runtime()` 探测，CI 新增 `portable-webview2`（Fixed Runtime 便携）任务，便携双版本共存
+
 ## [0.3.0] - 2026-08-25
 
 ### Added

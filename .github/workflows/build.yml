@@ -12,8 +12,9 @@ permissions:
   contents: write
 
 jobs:
+  # ── 便携版（--no-bundle）：轻量 zip，需系统已装 WebView2 ──
   build:
-    name: Build (${{ matrix.os }})
+    name: Portable (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -64,7 +65,7 @@ jobs:
 
       # --no-bundle：不做安装器，只产出裸二进制（便携 zip 分发模式）。
       # beforeBuildCommand 自动执行 vue-tsc + vite build 并嵌入前端。
-      - name: Build (release, Tauri)
+      - name: Build (release, Tauri --no-bundle)
         run: pnpm tauri build --no-bundle
 
       # macOS 可执行文件需 ad-hoc 签名，否则 Gatekeeper 会拦截
@@ -105,10 +106,118 @@ jobs:
           path: ${{ matrix.artifact }}.zip
           if-no-files-found: error
 
+  # ── Windows 便携版（内置 WebView2 Fixed Runtime，解压即用，无需安装）──
+  # 原理：下载 Microsoft WebView2 Fixed Runtime (约 180 MB 解压)，随 exe 一起打进
+  # staging/WebView2/，Rust 启动时探测 exe 旁 WebView2 目录并设
+  # WEBVIEW2_BROWSER_EXECUTABLE_FOLDER，使 wry 优先加载该目录，离线/受限账户可用。
+  # 与轻量便携版共存：handwrite-sim-windows-x86_64.zip（~10 MB，需系统 WebView2）
+  #                handwrite-sim-windows-x86_64-webview2.zip（~150 MB，内置运行时）
+  portable-webview2:
+    name: Portable WebView2 (Windows fixed runtime)
+    runs-on: windows-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build (release, Tauri --no-bundle)
+        run: pnpm tauri build --no-bundle
+
+      - name: Download WebView2 Fixed Runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "128.0.2739.54"
+          $url = "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2.FixedVersionRuntime.$version"
+          $nupkg = "webview2.nupkg"
+          Write-Host "Downloading WebView2 Fixed Runtime $version from $url ..."
+          # 重试 3 次
+          for ($i=1; $i -le 3; $i++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $nupkg -UseBasicParsing
+              break
+            } catch {
+              Write-Host "Attempt $i failed: $_"
+              if ($i -eq 3) { throw }
+              Start-Sleep -Seconds 5
+            }
+          }
+          Write-Host "Extracting $nupkg ..."
+          if (Test-Path "webview2-extract") { Remove-Item -Recurse -Force "webview2-extract" }
+          Expand-Archive -Path $nupkg -DestinationPath webview2-extract -Force
+          Write-Host "Searching for msedgewebview2.exe ..."
+          $exe = Get-ChildItem -Recurse -Filter "msedgewebview2.exe" -Path webview2-extract | Select-Object -First 1
+          if (-not $exe) {
+            Write-Host "Directory tree:"
+            Get-ChildItem -Recurse webview2-extract | Select-Object FullName | Format-List | Out-String -Width 300 | Write-Host
+            throw "msedgewebview2.exe not found in extracted nupkg"
+          }
+          $runtimeDir = $exe.Directory.FullName
+          Write-Host "Found runtime dir: $runtimeDir"
+          Write-Host "Size: $((Get-ChildItem -Recurse $runtimeDir | Measure-Object -Property Length -Sum).Sum / 1MB) MB"
+          # 记录供下一步使用
+          "RUNTIME_DIR=$runtimeDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Package portable with WebView2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $runtimeDir = $env:RUNTIME_DIR
+          if (-not $runtimeDir -or -not (Test-Path $runtimeDir)) {
+            throw "RUNTIME_DIR not set or not found: $runtimeDir"
+          }
+          Write-Host "Assembling portable-webview2 staging ..."
+          if (Test-Path staging) { Remove-Item -Recurse -Force staging }
+          New-Item -ItemType Directory -Force "staging/fonts", "staging/backgrounds", "staging/presets" | Out-Null
+          Copy-Item -Recurse "backgrounds/*" "staging/backgrounds/"
+          Copy-Item -Recurse "presets/*" "staging/presets/"
+          Copy-Item "target/release/handwrite-sim.exe" "staging/"
+          Copy-Item "packaging/fonts-README.txt" "staging/fonts/README.txt"
+          Write-Host "Copying WebView2 runtime to staging/WebView2 ..."
+          Copy-Item -Recurse -Force $runtimeDir "staging/WebView2"
+          # 校验
+          if (-not (Test-Path "staging/WebView2/msedgewebview2.exe")) {
+            Get-ChildItem -Recurse staging/WebView2 | Select-Object FullName,Length | Format-List | Out-String -Width 300 | Write-Host
+            throw "staging/WebView2/msedgewebview2.exe missing after copy"
+          }
+          Write-Host "Staging content:"
+          Get-ChildItem -Recurse staging | Select-Object FullName,Length | Format-List | Out-String -Width 300 | Write-Host
+          $zip = "handwrite-sim-windows-x86_64-webview2.zip"
+          if (Test-Path $zip) { Remove-Item -Force $zip }
+          Compress-Archive -Path "staging/*" -DestinationPath $zip -Force
+          Write-Host "Created $zip : $((Get-Item $zip).Length / 1MB) MB"
+
+      - name: Upload portable WebView2
+        uses: actions/upload-artifact@v4
+        with:
+          name: handwrite-sim-windows-x86_64-webview2
+          path: handwrite-sim-windows-x86_64-webview2.zip
+          if-no-files-found: error
+
   release:
     name: Publish Release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, portable-webview2]
+    # portable-webview2 在 PR 时被跳过，needs 会导致 release 被跳过；用 always() 兼容
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success' && (needs.portable-webview2.result == 'success' || needs.portable-webview2.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
