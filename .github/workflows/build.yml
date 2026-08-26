@@ -146,35 +146,64 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $version = "128.0.2739.54"
-          $url = "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2.FixedVersionRuntime.$version"
-          $nupkg = "webview2.nupkg"
-          Write-Host "Downloading WebView2 Fixed Runtime $version from $url ..."
-          # 重试 3 次
-          for ($i=1; $i -le 3; $i++) {
-            try {
-              Invoke-WebRequest -Uri $url -OutFile $nupkg -UseBasicParsing
-              break
-            } catch {
-              Write-Host "Attempt $i failed: $_"
-              if ($i -eq 3) { throw }
-              Start-Sleep -Seconds 5
+          # 优先复用 runner 预装的 Edge WebView2（最快、无需外网、版本与系统一致）
+          $edgePaths = @(
+            "C:\Program Files (x86)\Microsoft\EdgeWebView\Application",
+            "C:\Program Files\Microsoft\EdgeWebView\Application"
+          )
+          $runtimeDir = $null
+          foreach ($p in $edgePaths) {
+            if (Test-Path $p) {
+              $latest = Get-ChildItem -Directory $p |
+                Where-Object { $_.Name -match "^\d+\.\d+" } |
+                Sort-Object { try { [version]$_.Name } catch { $_.Name } } -Descending |
+                Select-Object -First 1
+              if ($latest -and (Test-Path (Join-Path $latest.FullName "msedgewebview2.exe"))) {
+                $runtimeDir = $latest.FullName
+                Write-Host "Found preinstalled WebView2 at $runtimeDir"
+                break
+              }
             }
           }
-          Write-Host "Extracting $nupkg ..."
-          if (Test-Path "webview2-extract") { Remove-Item -Recurse -Force "webview2-extract" }
-          Expand-Archive -Path $nupkg -DestinationPath webview2-extract -Force
-          Write-Host "Searching for msedgewebview2.exe ..."
-          $exe = Get-ChildItem -Recurse -Filter "msedgewebview2.exe" -Path webview2-extract | Select-Object -First 1
-          if (-not $exe) {
-            Write-Host "Directory tree:"
-            Get-ChildItem -Recurse webview2-extract | Select-Object FullName | Format-List | Out-String -Width 300 | Write-Host
-            throw "msedgewebview2.exe not found in extracted nupkg"
+          if (-not $runtimeDir) {
+            Write-Host "Preinstalled runtime not found, fallback to NuGet/CAB download..."
+            $version = "128.0.2739.54"
+            $urls = @(
+              "https://globalcdn.nuget.org/packages/microsoft.web.webview2.fixedversionruntime.$version.nupkg",
+              "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2.FixedVersionRuntime/$version",
+              "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2.fixedversionruntime/$version/microsoft.web.webview2.fixedversionruntime.$version.nupkg"
+            )
+            $nupkg = "webview2.nupkg"
+            $downloaded = $false
+            foreach ($url in $urls) {
+              try {
+                Write-Host "Trying $url"
+                Invoke-WebRequest -Uri $url -OutFile $nupkg -UseBasicParsing -TimeoutSec 60
+                $downloaded = $true
+                Write-Host "Downloaded from $url"
+                break
+              } catch { Write-Host "Failed $url : $_" }
+            }
+            if (-not $downloaded) { throw "Failed to download Fixed Runtime and no preinstalled runtime found" }
+            Write-Host "Extracting $nupkg ..."
+            if (Test-Path "webview2-extract") { Remove-Item -Recurse -Force "webview2-extract" }
+            Expand-Archive -Path $nupkg -DestinationPath webview2-extract -Force
+            Write-Host "Searching for msedgewebview2.exe ..."
+            $exe = Get-ChildItem -Recurse -Filter "msedgewebview2.exe" -Path webview2-extract | Select-Object -First 1
+            if (-not $exe) {
+              Write-Host "Directory tree:"
+              Get-ChildItem -Recurse webview2-extract | Select-Object FullName | Format-List | Out-String -Width 300 | Write-Host
+              throw "msedgewebview2.exe not found in extracted nupkg"
+            }
+            $runtimeDir = $exe.Directory.FullName
+            Write-Host "Found runtime dir from nupkg: $runtimeDir"
           }
-          $runtimeDir = $exe.Directory.FullName
-          Write-Host "Found runtime dir: $runtimeDir"
-          Write-Host "Size: $((Get-ChildItem -Recurse $runtimeDir | Measure-Object -Property Length -Sum).Sum / 1MB) MB"
-          # 记录供下一步使用
+          Write-Host "Runtime dir: $runtimeDir"
+          Write-Host "Size: $([math]::Round((Get-ChildItem -Recurse $runtimeDir | Measure-Object -Property Length -Sum).Sum / 1MB, 1)) MB"
+          # 校验关键文件
+          if (-not (Test-Path (Join-Path $runtimeDir "msedgewebview2.exe"))) {
+            throw "msedgewebview2.exe missing in $runtimeDir"
+          }
           "RUNTIME_DIR=$runtimeDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Package portable with WebView2
