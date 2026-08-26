@@ -115,7 +115,9 @@ jobs:
   portable-webview2:
     name: Portable WebView2 (Windows fixed runtime)
     runs-on: windows-latest
-    if: github.event_name != 'pull_request'
+    # 仅在打 tag 时构建（~150MB，需复制运行时，耗时），master 分支推送不跑以省资源；
+    # PR 也不跑。master 的轻量 3 平台构建已足够做 CI 校验。
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
 
