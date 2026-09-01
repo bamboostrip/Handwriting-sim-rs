@@ -115,30 +115,99 @@ fn clear_stale_pages(out_dir: &Path, prefix: &str) {
     }
 }
 
-/// 打开 pdfium 动态库：优先 exe 目录下的 `pdfium.dll`，再尝试系统库。
+/// 嵌入在二进制中的各平台 pdfium 动态库（在编译期由 build.rs 注入）
+const EMBEDDED_PDFIUM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/embedded_pdfium.bin"));
+
+/// 获取运行时自解压的目标路径
+fn get_runtime_extracted_pdfium_path() -> Option<PathBuf> {
+    let filename = if cfg!(target_os = "windows") {
+        "pdfium.dll"
+    } else if cfg!(target_os = "macos") {
+        "libpdfium.dylib"
+    } else {
+        "libpdfium.so"
+    };
+
+    let base_dir = std::env::temp_dir().join("handwrite_sim_runtime");
+    if std::fs::create_dir_all(&base_dir).is_err() {
+        return None;
+    }
+    Some(base_dir.join(filename))
+}
+
+/// 打开 pdfium 动态库：
+/// 1. 优先使用 exe 目录或当前工作目录下的外部动态库（若用户手动放入）；
+/// 2. 尝试系统已安装的共享库；
+/// 3. 若均无，自动解压内置编译的 64 位 pdfium 动态库到系统临时目录并透明加载！
 fn open_pdfium(
 ) -> Result<pdfium_render::prelude::Pdfium, DocRenderError> {
     use pdfium_render::prelude::*;
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+
+    let mut load_errors: Vec<String> = Vec::new();
+
+    // 1. 外部候选路径探测（exe 同级目录与当前工作目录）
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(dir) = exe_dir {
-        candidates.push(dir.join("pdfium.dll"));
-        candidates.push(dir.join("libpdfium.so"));
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(dir) = exe_path.parent() {
+            candidates.push(dir.join("pdfium.dll"));
+            candidates.push(dir.join("libpdfium.so"));
+            candidates.push(dir.join("libpdfium.dylib"));
+        }
     }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("pdfium.dll"));
+        candidates.push(cwd.join("libpdfium.so"));
+        candidates.push(cwd.join("libpdfium.dylib"));
+    }
+
     for candidate in candidates {
         if candidate.is_file() {
-            if let Ok(bindings) = Pdfium::bind_to_library(&candidate) {
-                return Ok(Pdfium::new(bindings));
+            match Pdfium::bind_to_library(&candidate) {
+                Ok(bindings) => return Ok(Pdfium::new(bindings)),
+                Err(e) => {
+                    load_errors.push(format!("加载外部库 {} 失败: {e}", candidate.display()));
+                }
             }
         }
     }
-    match Pdfium::bind_to_system_library() {
-        Ok(bindings) => Ok(Pdfium::new(bindings)),
-        Err(e) => Err(DocRenderError::PdfiumUnavailable(e.to_string())),
+
+    // 2. 尝试系统默认库
+    if let Ok(bindings) = Pdfium::bind_to_system_library() {
+        return Ok(Pdfium::new(bindings));
     }
+
+    // 3. 自动自解压内置的 64 位 pdfium 动态库
+    if !EMBEDDED_PDFIUM.is_empty() {
+        if let Some(target_path) = get_runtime_extracted_pdfium_path() {
+            // 如果已存在且大小一致，直接复用；否则写入
+            let need_write = match std::fs::metadata(&target_path) {
+                Ok(meta) => meta.len() != EMBEDDED_PDFIUM.len() as u64,
+                Err(_) => true,
+            };
+
+            if need_write {
+                let _ = std::fs::write(&target_path, EMBEDDED_PDFIUM);
+            }
+
+            if target_path.is_file() {
+                match Pdfium::bind_to_library(&target_path) {
+                    Ok(bindings) => return Ok(Pdfium::new(bindings)),
+                    Err(e) => {
+                        load_errors.push(format!("加载内置自解压库 {} 失败: {e}", target_path.display()));
+                    }
+                }
+            }
+        }
+    }
+
+    let detail = if load_errors.is_empty() {
+        "未找到可用的 pdfium 动态库".to_string()
+    } else {
+        load_errors.join("；")
+    };
+    Err(DocRenderError::PdfiumUnavailable(detail))
 }
+
 
 /// 把 DOCX 转成 PDF（Word COM 优先，LibreOffice 兜底）。对齐 Python 版 `docx_to_pdf`。
 pub fn docx_to_pdf(docx_path: &Path, out_dir: &Path) -> Result<PathBuf, DocRenderError> {

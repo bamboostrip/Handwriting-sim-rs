@@ -3,7 +3,6 @@ name: Build and Release
 on:
   push:
     tags: ["v*"]
-    branches: ["master", "main"]
   pull_request:
     branches: ["master", "main"]
   workflow_dispatch:
@@ -57,6 +56,33 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev pkg-config
 
+      # 准备各平台官方 pdfium 二进制（用于编译期直接内嵌进二进制）
+      - name: Prepare pdfium (Windows x64)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz" -OutFile "pdfium.tgz"
+          tar -xzf pdfium.tgz
+          Copy-Item "bin/pdfium.dll" "pdfium.dll"
+
+      - name: Prepare pdfium (Linux x64)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          curl -L -o pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-x64.tgz"
+          tar -xzf pdfium.tgz
+          mkdir -p crates/core/assets
+          cp lib/libpdfium.so crates/core/assets/
+
+      - name: Prepare pdfium (macOS arm64)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          curl -L -o pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-mac-arm64.tgz"
+          tar -xzf pdfium.tgz
+          mkdir -p crates/core/assets
+          cp lib/libpdfium.dylib crates/core/assets/
+
       - name: Install dependencies（根 workspace，含 web 前端）
         run: pnpm install
 
@@ -67,6 +93,7 @@ jobs:
       # beforeBuildCommand 自动执行 vue-tsc + vite build 并嵌入前端。
       - name: Build (release, Tauri --no-bundle)
         run: pnpm tauri build --no-bundle
+
 
       # macOS 可执行文件需 ad-hoc 签名，否则 Gatekeeper 会拦截
       - name: Ad-hoc sign (macOS)
@@ -138,11 +165,19 @@ jobs:
         with:
           workspaces: .
 
+      - name: Prepare pdfium (Windows x64)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz" -OutFile "pdfium.tgz"
+          tar -xzf pdfium.tgz
+          Copy-Item "bin/pdfium.dll" "pdfium.dll"
+
       - name: Install dependencies
         run: pnpm install
 
       - name: Build (release, Tauri --no-bundle)
         run: pnpm tauri build --no-bundle
+
 
       - name: Download WebView2 Fixed Runtime
         shell: pwsh
