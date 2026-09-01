@@ -8,12 +8,39 @@ import { reactive, watch } from "vue";
 import { createDiscreteApi } from "naive-ui";
 import { useDebounceFn } from "@vueuse/core";
 import { api, assetUrl, dialogs } from "./api";
-import type { UiParams, UiRegion } from "./types";
+import type { UiParams, UiRegion, UpdateInfo } from "./types";
+
+/** 当前版本号与开源仓库地址 */
+export const APP_VERSION = "0.3.2";
+
+export const PYTHON_REPO_URL = "https://github.com/bamboostrip/Handwriting-simulator";
+export const RUST_REPO_URL = "https://github.com/bamboostrip/Handwriting-sim-rs";
+
+const KEY_AUTO_CHECK = "handwritesim_auto_check";
+const KEY_SKIPPED_VERSION = "handwritesim_skipped_version";
+
+export function isAutoCheckEnabled(): boolean {
+  try {
+    const v = localStorage.getItem(KEY_AUTO_CHECK);
+    return v === null ? true : v === "true";
+  } catch {
+    return true;
+  }
+}
+
+export function getSkippedVersion(): string {
+  try {
+    return localStorage.getItem(KEY_SKIPPED_VERSION) || "";
+  } catch {
+    return "";
+  }
+}
 
 /** 组件树外的离散弹窗（store 层的阻断性错误提示用） */
-const { dialog: appDialog } = createDiscreteApi(["dialog"]);
+const { dialog: appDialog, message: appMessage } = createDiscreteApi(["dialog", "message"]);
 
 // ---------------------------------------------------------------- 数据模型
+
 
 export interface Para {
   id: number;
@@ -96,7 +123,17 @@ export const store = reactive({
   status: "就绪",
 
   presets: [] as { name: string; path: string }[],
+
+  // ---- 关于与版本更新 ----
+  aboutModalOpen: false,
+  updateModalOpen: false,
+  updateInfo: null as UpdateInfo | null,
+  checkingUpdate: false,
+  updateStatusText: "点击右侧按钮可主动联网检测最新版本",
+  autoCheckUpdate: isAutoCheckEnabled(),
+  skippedVersion: getSkippedVersion(),
 });
+
 
 // ---------------------------------------------------------------- 参数构建
 
@@ -744,3 +781,100 @@ export function clearRegions(): void {
   store.selectedRegionIndex = -1;
   scheduleRender();
 }
+
+// ---------------------------------------------------------------- 关于与更新
+
+export function openAboutModal(): void {
+  store.aboutModalOpen = true;
+}
+
+export function closeAboutModal(): void {
+  store.aboutModalOpen = false;
+}
+
+export function openUpdateModal(info?: UpdateInfo): void {
+  if (info) store.updateInfo = info;
+  store.updateModalOpen = true;
+}
+
+export function closeUpdateModal(skip = false): void {
+  store.updateModalOpen = false;
+  if (skip && store.updateInfo?.version) {
+    setSkippedVersion(store.updateInfo.version);
+  }
+}
+
+export function setAutoCheckUpdate(enabled: boolean): void {
+  store.autoCheckUpdate = enabled;
+  try {
+    localStorage.setItem(KEY_AUTO_CHECK, String(enabled));
+  } catch {}
+}
+
+export function setSkippedVersion(version: string): void {
+  store.skippedVersion = version;
+  try {
+    localStorage.setItem(KEY_SKIPPED_VERSION, version);
+  } catch {}
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  if (!url) return;
+  try {
+    await api.openUrl(url);
+  } catch (e) {
+    console.error("打开浏览器失败:", e);
+    // fallback window.open
+    window.open(url, "_blank");
+  }
+}
+
+/** 手动触发检查更新（在关于对话框中） */
+export async function manualCheckUpdate(): Promise<void> {
+  if (store.checkingUpdate) return;
+  store.checkingUpdate = true;
+  store.updateStatusText = "正在连接 GitHub 查询最新版本…";
+
+  try {
+    const info = await api.checkForUpdates(APP_VERSION);
+    store.updateInfo = info;
+
+    if (info.hasUpdate) {
+      store.updateStatusText = `🎉 发现新版本：v${info.version}`;
+      openUpdateModal(info);
+    } else {
+      store.updateStatusText = `✅ 当前已是最新版本 (v${APP_VERSION})`;
+      appMessage.success(`当前已是最新版本 (v${APP_VERSION})，无需更新。`);
+    }
+  } catch (e) {
+    store.updateStatusText = "❌ 查询失败，请检查网络连接";
+    appDialog.warning({
+      title: "检查更新失败",
+      content: `无法连接至 GitHub Releases API：${e}\n请检查网络连接或稍后重试。`,
+      positiveText: "知道了",
+    });
+  } finally {
+    store.checkingUpdate = false;
+  }
+}
+
+/** 软件启动时静默检查更新 */
+export async function startupCheckUpdate(): Promise<void> {
+  if (!store.autoCheckUpdate) return;
+
+  try {
+    const info = await api.checkForUpdates(APP_VERSION);
+    store.updateInfo = info;
+
+    if (info.hasUpdate) {
+      // 若用户未跳过此版本，则主动弹出更新提示
+      if (info.version !== store.skippedVersion) {
+        openUpdateModal(info);
+      }
+    }
+  } catch (e) {
+    // 启动静默检查失败时不打扰用户
+    console.warn("启动检查更新失败:", e);
+  }
+}
+

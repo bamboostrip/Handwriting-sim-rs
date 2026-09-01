@@ -274,6 +274,24 @@ body,
   text-overflow: ellipsis;
 }
 
+.status-bar .status-version {
+  cursor: pointer;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--accent);
+  transition: all 0.15s;
+  user-select: none;
+  font-family: inherit;
+  font-size: 11.5px;
+  margin-left: 8px;
+}
+
+.status-bar .status-version:hover {
+  background: var(--accent-soft);
+  text-decoration: underline;
+}
+
+
 /* ---------------- 逐段编辑器 ---------------- */
 .para-editor {
   height: 190px;

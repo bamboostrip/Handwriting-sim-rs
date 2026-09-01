@@ -31,6 +31,7 @@ import {
   setAlign,
   store,
   toggleIndent,
+  openAboutModal,
 } from "../store";
 
 const presetOptions = computed(() =>
@@ -42,7 +43,11 @@ const presetOptions = computed(() =>
   <aside class="params-col">
     <div class="params-scroll">
       <!-- ============ 待处理文本 ============ -->
-      <div class="section-title">待处理文本</div>
+      <div class="section-title" style="display: flex; justify-content: space-between; align-items: center">
+        <span>待处理文本</span>
+        <NButton size="tiny" secondary type="primary" @click="openAboutModal()">ℹ️ 关于 / 检查更新</NButton>
+      </div>
+
       <div class="field-row" style="flex-wrap: wrap">
         <NButton size="tiny" @click="setAlign(0)">左对齐</NButton>
         <NButton size="tiny" @click="setAlign(1)">居中</NButton>

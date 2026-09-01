@@ -1,16 +1,21 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, watch } from "vue";
-import { NConfigProvider, NMessageProvider } from "naive-ui";
+import { NConfigProvider, NDialogProvider, NMessageProvider } from "naive-ui";
 import type { GlobalThemeOverrides } from "naive-ui";
 import PreviewPane from "./components/PreviewPane.vue";
 import ParamsPanel from "./components/ParamsPanel.vue";
+import AboutModal from "./components/AboutModal.vue";
+import UpdateModal from "./components/UpdateModal.vue";
 import {
+  APP_VERSION,
   buildParams,
   cancelRegionEdit,
   doRender,
   loadBgDimensions,
+  openAboutModal,
   refreshPresets,
   scheduleRender,
+  startupCheckUpdate,
   store,
 } from "./store";
 
@@ -36,6 +41,7 @@ watch(paramSnapshot, () => {
 onMounted(() => {
   void refreshPresets();
   loadBgDimensions(store.backgroundPath);
+  void startupCheckUpdate();
 });
 
 // Esc：退出区域调整态（正在输入框/编辑器里打字时不劫持）
@@ -57,16 +63,25 @@ void doRender();
 
 <template>
   <NConfigProvider :theme-overrides="themeOverrides" abstract>
-    <NMessageProvider>
-      <div class="app-shell">
-        <div class="app-main">
-          <PreviewPane />
-          <ParamsPanel />
+    <NDialogProvider>
+      <NMessageProvider>
+        <div class="app-shell">
+          <div class="app-main">
+            <PreviewPane />
+            <ParamsPanel />
+          </div>
+          <footer class="status-bar">
+            <span class="status-text">{{ store.status }}</span>
+            <span class="status-version" @click="openAboutModal()" title="查看软件版本与开源项目">
+              v{{ APP_VERSION }} · 关于与更新
+            </span>
+          </footer>
         </div>
-        <footer class="status-bar">
-          <span class="status-text">{{ store.status }}</span>
-        </footer>
-      </div>
-    </NMessageProvider>
+
+        <AboutModal />
+        <UpdateModal />
+      </NMessageProvider>
+    </NDialogProvider>
   </NConfigProvider>
 </template>
+

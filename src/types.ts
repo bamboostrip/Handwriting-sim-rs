@@ -89,3 +89,22 @@ export interface PresetItem {
   name: string;
   path: string;
 }
+
+export interface UpdateInfo {
+  version: string;
+  tagName: string;
+  title: string;
+  body: string;
+  htmlUrl: string;
+  assetName: string;
+  assetUrl: string;
+  assetSize: number;
+  hasUpdate: boolean;
+}
+
+export interface DownloadProgressPayload {
+  received: number;
+  total: number;
+  percent: number;
+}
+

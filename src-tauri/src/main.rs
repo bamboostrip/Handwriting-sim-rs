@@ -10,6 +10,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod params;
+mod updater;
+
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -325,6 +327,30 @@ fn init_webview2_fixed_runtime() {
     }
 }
 
+/// 检查 GitHub 最新 Release 版本
+#[tauri::command]
+fn check_for_updates(current_version: String) -> Result<updater::UpdateInfo, String> {
+    updater::check_updates(&current_version)
+}
+
+/// 分块下载更新包
+#[tauri::command]
+fn download_update(app: AppHandle, url: String, file_name: Option<String>) -> Result<String, String> {
+    updater::download_update(&app, &url, file_name)
+}
+
+/// 应用便携版覆盖更新并自动重启
+#[tauri::command]
+fn apply_portable_update(new_file_path: String) -> Result<(), String> {
+    updater::apply_portable_update_and_restart(&new_file_path)
+}
+
+/// 使用系统默认浏览器打开 URL
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    updater::open_url_in_browser(&url)
+}
+
 pub fn run() {
     init_webview2_fixed_runtime();
     tauri::Builder::default()
@@ -343,7 +369,11 @@ pub fn run() {
             save_preset,
             default_preset_dir,
             path_exists,
-            image_dimensions
+            image_dimensions,
+            check_for_updates,
+            download_update,
+            apply_portable_update,
+            open_url
         ])
         // 页面真正加载完成后再显示窗口：dev 冷启动时 Vite 还在编译模块，
         // 提前显示只会让用户对着白屏等（对齐官方 splashscreen 模式）。
@@ -362,3 +392,4 @@ pub fn run() {
 fn main() {
     run()
 }
+
