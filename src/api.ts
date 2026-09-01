@@ -43,7 +43,14 @@ export const api = {
   /** 监听下载进度推送 */
   onDownloadProgress: (cb: (payload: DownloadProgressPayload) => void) =>
     listen<DownloadProgressPayload>("update-download-progress", (e) => cb(e.payload)),
+  /** 获取系统当前原生深浅色主题 */
+  getSystemTheme: () => invoke<string>("get_system_theme"),
+  /** 监听操作系统主题切换事件 */
+  onSystemThemeChanged: (cb: (theme: string) => void) =>
+    listen<string>("system-theme-changed", (e) => cb(e.payload)),
 };
+
+
 
 
 const filters = {

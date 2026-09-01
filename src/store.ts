@@ -170,16 +170,21 @@ export function setThemePreference(pref: ThemePreference): void {
   syncThemeClass();
 }
 
-/** 一键切换深浅色主题 */
-export function toggleTheme(): void {
-  if (isDarkActive()) {
+/** 循环切换主题偏好：自动跟随系统 ➔ 浅色模式 ➔ 深色模式 ➔ 自动跟随系统 */
+export function cycleThemePreference(): void {
+  if (store.themePreference === "auto") {
     setThemePreference("light");
-  } else {
+  } else if (store.themePreference === "light") {
     setThemePreference("dark");
+  } else {
+    setThemePreference("auto");
   }
 }
 
-/** 同步 html/body 的 dark 类 */
+/** 兼容旧的 toggleTheme 调用 */
+export const toggleTheme = cycleThemePreference;
+
+/** 同步 html/body 的 dark 类与 data-theme 属性 */
 export function syncThemeClass(): void {
   if (typeof document !== "undefined") {
     const dark = isDarkActive();
@@ -193,19 +198,52 @@ export function syncThemeClass(): void {
   }
 }
 
-// 监听系统深浅色变化
-if (typeof window !== "undefined" && window.matchMedia) {
-  const mq = window.matchMedia("(prefers-color-scheme: dark)");
-  mq.addEventListener("change", (e) => {
-    store.systemIsDark = e.matches;
-    if (store.themePreference === "auto") {
-      syncThemeClass();
+/** 初始化主题系统（注册 matchMedia 与 Tauri 原生系统主题变化监听） */
+export function initThemeSystem(): void {
+  // 1. Web mediaQuery 监听（支持现代 addEventListener 与旧版 addListener）
+  if (typeof window !== "undefined" && window.matchMedia) {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    store.systemIsDark = mq.matches;
+
+    const handler = (e: MediaQueryListEvent | { matches: boolean }) => {
+      store.systemIsDark = e.matches;
+      if (store.themePreference === "auto") {
+        syncThemeClass();
+      }
+    };
+
+    if (mq.addEventListener) {
+      mq.addEventListener("change", handler);
+    } else if ((mq as any).addListener) {
+      (mq as any).addListener(handler);
     }
-  });
+  }
+
+  // 2. Tauri 原生 OS 主题变化监听（Windows / macOS / Linux）
+  try {
+    api.getSystemTheme()
+      .then((theme) => {
+        store.systemIsDark = theme === "dark";
+        syncThemeClass();
+      })
+      .catch(() => {});
+
+    api.onSystemThemeChanged((theme) => {
+      store.systemIsDark = theme === "dark";
+      if (store.themePreference === "auto") {
+        syncThemeClass();
+      }
+    });
+  } catch (e) {
+    // 纯网页调试环境兼容
+  }
+
+  syncThemeClass();
 }
 
-// 模块加载时初始化同步主题 class
-syncThemeClass();
+// 模块加载时立即初始化一次
+initThemeSystem();
+
 
 
 

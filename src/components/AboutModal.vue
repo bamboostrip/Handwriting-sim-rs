@@ -8,6 +8,8 @@ import {
   NButton,
   NCheckbox,
   NModal,
+  NRadioButton,
+  NRadioGroup,
   NTag,
   NText,
 } from "naive-ui";
@@ -20,8 +22,10 @@ import {
   manualCheckUpdate,
   openExternalUrl,
   setAutoCheckUpdate,
+  setThemePreference,
   store,
 } from "../store";
+
 </script>
 
 <template>
@@ -87,6 +91,25 @@ import {
       </div>
 
 
+      <!-- 外观主题设置 -->
+      <div class="about-section">
+        <div class="section-heading">🎨 外观主题</div>
+        <div class="update-box">
+          <div style="display: flex; align-items: center; justify-content: space-between">
+            <span style="font-size: 12.5px; color: var(--text-main)">界面色彩模式：</span>
+            <NRadioGroup
+              :value="store.themePreference"
+              @update:value="(val: any) => setThemePreference(val)"
+              size="small"
+            >
+              <NRadioButton value="auto">🖥️ 跟随系统</NRadioButton>
+              <NRadioButton value="light">☀️ 浅色</NRadioButton>
+              <NRadioButton value="dark">🌙 深色</NRadioButton>
+            </NRadioGroup>
+          </div>
+        </div>
+      </div>
+
       <!-- 版本更新设置与主动检查 -->
       <div class="about-section">
         <div class="section-heading">🔄 版本更新</div>
@@ -115,6 +138,7 @@ import {
         </div>
       </div>
     </div>
+
 
     <template #footer>
       <div style="display: flex; justify-content: flex-end">

@@ -20,7 +20,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use handwrite_sim::core::{doc_render, docx_io, engine, models, presets};
 use params::UiParams;
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+
 
 /// 全局状态：随机种子计数器（每次预览 +1，导出复用当前值——对齐 Slint 版语义）。
 struct AppState {
@@ -351,6 +352,21 @@ fn open_url(url: String) -> Result<(), String> {
     updater::open_url_in_browser(&url)
 }
 
+/// 获取系统当前原生深浅色主题（Windows / macOS / Linux）
+#[tauri::command]
+fn get_system_theme(app: AppHandle) -> String {
+    if let Some(win) = app.get_webview_window("main") {
+        if let Ok(theme) = win.theme() {
+            return match theme {
+                tauri::Theme::Dark => "dark".to_string(),
+                tauri::Theme::Light => "light".to_string(),
+                _ => "light".to_string(),
+            };
+        }
+    }
+    "light".to_string()
+}
+
 pub fn run() {
     init_webview2_fixed_runtime();
     tauri::Builder::default()
@@ -373,8 +389,19 @@ pub fn run() {
             check_for_updates,
             download_update,
             apply_portable_update,
-            open_url
+            open_url,
+            get_system_theme
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::ThemeChanged(theme) = event {
+                let theme_str = match theme {
+                    tauri::Theme::Dark => "dark",
+                    tauri::Theme::Light => "light",
+                    _ => "light",
+                };
+                let _ = window.emit("system-theme-changed", theme_str);
+            }
+        })
         // 页面真正加载完成后再显示窗口：dev 冷启动时 Vite 还在编译模块，
         // 提前显示只会让用户对着白屏等（对齐官方 splashscreen 模式）。
         .on_page_load(|webview, payload| {
@@ -386,6 +413,7 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
+
         .expect("手写模拟器启动失败");
 }
 

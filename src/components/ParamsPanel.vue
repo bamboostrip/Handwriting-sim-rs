@@ -10,6 +10,7 @@ import {
   NColorPicker,
   NInput,
   NInputNumber,
+  NPopselect,
   NSelect,
   NSlider,
   NTooltip,
@@ -20,6 +21,7 @@ import RegionDialog from "./RegionDialog.vue";
 import {
   chooseBackground,
   chooseFont,
+  cycleThemePreference,
   doRender,
   exportFiles,
   exportPdf,
@@ -31,10 +33,16 @@ import {
   savePresetToDialog,
   selectPreset,
   setAlign,
+  setThemePreference,
   store,
   toggleIndent,
-  toggleTheme,
 } from "../store";
+
+const themeOptions = [
+  { label: "🖥️ 自动跟随系统", value: "auto" },
+  { label: "☀️ 浅色模式", value: "light" },
+  { label: "🌙 深色模式", value: "dark" },
+];
 
 const presetOptions = computed(() =>
   store.presets.map((p) => ({ label: p.name, value: p.path })),
@@ -48,25 +56,36 @@ const presetOptions = computed(() =>
       <div class="section-title" style="display: flex; justify-content: space-between; align-items: center">
         <span>待处理文本</span>
         <div style="display: flex; align-items: center; gap: 6px">
-          <NTooltip trigger="hover">
-            <template #trigger>
-              <NButton
-                size="tiny"
-                secondary
-                :type="isDarkActive() ? 'warning' : 'default'"
-                @click="toggleTheme()"
-                style="padding: 0 6px"
-              >
-                {{ isDarkActive() ? '🌙 深色' : '☀️ 浅色' }}
-              </NButton>
-            </template>
-            当前主题：{{ isDarkActive() ? '深色模式' : '浅色模式' }}（点击切换）
-          </NTooltip>
+          <NPopselect
+            :value="store.themePreference"
+            :options="themeOptions"
+            @update:value="(val: any) => setThemePreference(val)"
+            trigger="hover"
+          >
+            <NButton
+              size="tiny"
+              secondary
+              :type="store.themePreference === 'auto' ? 'primary' : isDarkActive() ? 'warning' : 'default'"
+              @click="cycleThemePreference()"
+              style="padding: 0 7px"
+            >
+              <template v-if="store.themePreference === 'auto'">
+                🖥️ 自动 ({{ isDarkActive() ? '深色' : '浅色' }})
+              </template>
+              <template v-else-if="store.themePreference === 'dark'">
+                🌙 深色
+              </template>
+              <template v-else>
+                ☀️ 浅色
+              </template>
+            </NButton>
+          </NPopselect>
           <NButton size="tiny" secondary type="primary" @click="openAboutModal()">
             ℹ️ 关于 / 检查更新
           </NButton>
         </div>
       </div>
+
 
 
       <div class="field-row" style="flex-wrap: wrap">

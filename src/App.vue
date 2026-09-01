@@ -11,6 +11,7 @@ import {
   buildParams,
   cancelRegionEdit,
   doRender,
+  initThemeSystem,
   isDarkActive,
   loadBgDimensions,
   openAboutModal,
@@ -19,6 +20,7 @@ import {
   startupCheckUpdate,
   store,
 } from "./store";
+
 
 // 浅色主题：国风青绿主色调
 const lightThemeOverrides: GlobalThemeOverrides = {
@@ -86,10 +88,12 @@ watch(paramSnapshot, () => {
 });
 
 onMounted(() => {
+  initThemeSystem();
   void refreshPresets();
   loadBgDimensions(store.backgroundPath);
   void startupCheckUpdate();
 });
+
 
 // Esc：退出区域调整态（正在输入框/编辑器里打字时不劫持）
 function onKeydown(e: KeyboardEvent): void {
