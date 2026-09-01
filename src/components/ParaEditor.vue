@@ -5,12 +5,12 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   cleanText,
-  focusEmptyArea,
   newPara,
   pendingFocus,
   store,
   updateParaStatus,
 } from "../store";
+
 import type { Para } from "../store";
 
 const ALIGN_CSS = ["left", "center", "right"] as const;
@@ -270,12 +270,21 @@ function onPaste(e: ClipboardEvent): void {
   syncDomToStore();
 }
 
-function onSelectionChange(): void {
-  if (
-    document.activeElement === editorRef.value ||
-    editorRef.value?.contains(document.activeElement)
-  ) {
-    updateCurrentParaFromSelection();
+function onEditorClick(e: MouseEvent): void {
+  const sel = window.getSelection();
+  // 若用户正在划选（非折叠光标），绝对不干预选区
+  if (sel && !sel.isCollapsed) return;
+
+  // 仅在直接点击编辑器底部空白区时，将光标定位到最后一行末尾
+  if (e.target === editorRef.value && editorRef.value) {
+    const lastRow = editorRef.value.querySelector<HTMLElement>(":scope > .para-row:last-child");
+    if (lastRow) {
+      const rng = document.createRange();
+      rng.selectNodeContents(lastRow);
+      rng.collapse(false);
+      sel?.removeAllRanges();
+      sel?.addRange(rng);
+    }
   }
 }
 
@@ -307,8 +316,18 @@ watch(
   },
 );
 
+function onSelectionChange(): void {
+  if (
+    document.activeElement === editorRef.value ||
+    editorRef.value?.contains(document.activeElement)
+  ) {
+    updateCurrentParaFromSelection();
+  }
+}
+
 onMounted(() => {
   document.addEventListener("selectionchange", onSelectionChange);
+
   syncStoreToDom(true);
 });
 
@@ -327,7 +346,8 @@ onBeforeUnmount(() => {
     @input="onInput()"
     @keydown="onKeydown($event)"
     @paste="onPaste($event)"
-    @click.self="focusEmptyArea()"
+    @click="onEditorClick($event)"
   ></div>
 </template>
+
 

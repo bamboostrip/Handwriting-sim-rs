@@ -329,6 +329,14 @@ body,
   overflow-y: auto;
   padding: 4px 18px 4px 8px;
   cursor: text;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.para-editor:focus,
+.para-editor:focus-within {
+  border-color: var(--accent);
 }
 
 .para-editor.is-empty::before {
@@ -353,11 +361,10 @@ body,
   word-break: break-all;
   border-bottom: 1px solid var(--row-border);
   padding: 0 2px 1px;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
-.para-row:focus {
-  background: var(--hover-bg);
-}
 
 /* ---------------- 区域列表 ---------------- */
 .region-list {
