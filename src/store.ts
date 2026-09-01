@@ -578,21 +578,67 @@ export function setParagraphs(list: Para[]): void {
   updateParaStatus();
 }
 
+/** 获取当前选区覆盖的段落 ID 列表（若未多选则返回当前聚焦段 ID） */
+export function getSelectedParaIds(): number[] {
+  if (typeof window === "undefined") return [];
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) {
+    const cur = store.paragraphs[curParaIndex()];
+    return cur ? [cur.id] : [];
+  }
+  const range = sel.getRangeAt(0);
+  const editor = document.querySelector(".para-editor");
+  if (!editor || !editor.contains(range.commonAncestorContainer)) {
+    const cur = store.paragraphs[curParaIndex()];
+    return cur ? [cur.id] : [];
+  }
+  const rows = Array.from(editor.querySelectorAll<HTMLElement>(".para-row"));
+  const selected: number[] = [];
+  for (const row of rows) {
+    if (sel.containsNode(row, true) || range.intersectsNode(row)) {
+      const id = Number(row.dataset.id);
+      if (id) selected.push(id);
+    }
+  }
+  if (selected.length > 0) return selected;
+  const cur = store.paragraphs[curParaIndex()];
+  return cur ? [cur.id] : [];
+}
+
 export function setAlign(align: number): void {
-  const row = store.paragraphs[curParaIndex()];
-  if (!row) return;
-  row.align = (Math.max(0, Math.min(2, align)) as 0 | 1 | 2);
+  const ids = getSelectedParaIds();
+  if (ids.length > 0) {
+    for (const id of ids) {
+      const row = store.paragraphs.find((p) => p.id === id);
+      if (row) {
+        row.align = (Math.max(0, Math.min(2, align)) as 0 | 1 | 2);
+      }
+    }
+  } else {
+    const row = store.paragraphs[curParaIndex()];
+    if (row) row.align = (Math.max(0, Math.min(2, align)) as 0 | 1 | 2);
+  }
   updateParaStatus();
   scheduleRender();
 }
 
 export function toggleIndent(on: boolean): void {
-  const row = store.paragraphs[curParaIndex()];
-  if (!row) return;
-  row.indentEm = on ? 2.0 : 0.0;
+  const ids = getSelectedParaIds();
+  if (ids.length > 0) {
+    for (const id of ids) {
+      const row = store.paragraphs.find((p) => p.id === id);
+      if (row) {
+        row.indentEm = on ? 2.0 : 0.0;
+      }
+    }
+  } else {
+    const row = store.paragraphs[curParaIndex()];
+    if (row) row.indentEm = on ? 2.0 : 0.0;
+  }
   updateParaStatus();
   scheduleRender();
 }
+
 
 export function splitPara(id: number, caretOffset: number): void {
   const idx = store.paragraphs.findIndex((p) => p.id === id);

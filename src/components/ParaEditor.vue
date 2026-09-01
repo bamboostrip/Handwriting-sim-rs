@@ -1,25 +1,13 @@
 <script setup lang="ts">
-//! 逐段编辑器：每段一个 contenteditable（plaintext-only）。
-//!
-//! 对齐原 Slint/Python 版交互：
-//! - 回车（无修饰键、光标未选区）→ 当前段在光标处拆分，后半段继承格式
-//! - 段首退格 → 并入上一段
-//! - 粘贴多行 → 按行拆成多段（继承当前段对齐/缩进）
-//! - 对齐方式即刻可见；首行缩进用 CSS text-indent 可视化（仅编辑区示意）
-//! - 底部空白点击聚焦最后一段
-//!
-//! Web 实现细节：段落 DOM 不受控（输入不重渲染），仅在外部结构性修改
-//! （导入 docx / 分段合并 / 预设）后按 id 同步文本。
+//! 逐段文本编辑器：支持跨段多选、批量选中删除、Ctrl+A 全选，
+//! 同时保留各段独立对齐（左/中/右）与首行缩进（textIndent）功能。
 
-import { nextTick, watch } from "vue";
-
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   cleanText,
   focusEmptyArea,
-  mergePrev,
-  pasteMulti,
+  newPara,
   pendingFocus,
-  splitPara,
   store,
   updateParaStatus,
 } from "../store";
@@ -27,160 +15,319 @@ import type { Para } from "../store";
 
 const ALIGN_CSS = ["left", "center", "right"] as const;
 
-const rowEls = new Map<number, HTMLElement>();
-const setRowEl = (id: number) => (el: unknown) => {
-  if (el instanceof HTMLElement) rowEls.set(id, el);
-  else rowEls.delete(id);
-};
-
-// ---- 光标工具（以 Unicode 码点计数，与 store 的 [...text] 拆分一致）----
-const cpLen = (s: string): number => [...s].length;
-
-function caretOffset(el: HTMLElement): number {
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0) return 0;
-  const range = sel.getRangeAt(0);
-  if (!el.contains(range.startContainer)) return 0;
-  const pre = range.cloneRange();
-  pre.selectNodeContents(el);
-  try {
-    pre.setEnd(range.startContainer, range.startOffset);
-  } catch {
-    return 0;
-  }
-  return cpLen(pre.toString());
-}
-
-function caretCollapsedAtStart(el: HTMLElement): boolean {
-  const sel = window.getSelection();
-  if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return false;
-  const range = sel.getRangeAt(0);
-  return el.contains(range.startContainer) && caretOffset(el) === 0;
-}
-
-function setCaret(el: HTMLElement, offset: number): void {
-  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-  let remaining = Math.max(0, offset);
-  let last: Text | null = null;
-  let node = walker.nextNode() as Text | null;
-  while (node) {
-    const len = cpLen(node.data);
-    if (remaining <= len) {
-      let u16 = 0;
-      const chars = [...node.data];
-      for (let i = 0; i < remaining && i < chars.length; i++) u16 += chars[i].length;
-      const sel = window.getSelection();
-      const rng = document.createRange();
-      rng.setStart(node, u16);
-      rng.collapse(true);
-      sel?.removeAllRanges();
-      sel?.addRange(rng);
-      return;
-    }
-    remaining -= len;
-    last = node;
-    node = walker.nextNode() as Text | null;
-  }
-  const sel = window.getSelection();
-  const rng = document.createRange();
-  if (last) rng.setStart(last, last.data.length);
-  else rng.selectNodeContents(el);
-  rng.collapse(true);
-  sel?.removeAllRanges();
-  sel?.addRange(rng);
-}
-
-/** 结构性修改后同步各行文本（导入 docx / 分段 / 合并 / 粘贴 / 初始挂载）。
- *  必须先于焦点 watcher 注册：先重写文本，再由焦点请求放置光标。
- *  纯打字路径不会触发重写（onInput 已把 p.text 同步为 DOM 内容）。 */
-watch(
-  () => store.paragraphs.map((p) => `${p.id}:${p.text}`).join("\u0001"),
-  () => {
-    void nextTick(() => {
-      for (const p of store.paragraphs) {
-        const el = rowEls.get(p.id);
-        if (!el) continue;
-        const shown = el.innerText.replace(/\n/g, "");
-        if (shown !== p.text) el.innerText = p.text;
-      }
-    });
-  },
-  { immediate: true },
-);
-
-/** 外部焦点请求（分段/合并/导入后） */
-watch(
-  () => pendingFocus.nonce,
-  () => {
-    void nextTick(() => {
-      const el = rowEls.get(pendingFocus.id);
-      if (!el) return;
-      setCaret(el, pendingFocus.offset);
-      el.scrollIntoView({ block: "nearest" });
-    });
-  },
-);
-
-function onInput(p: Para, e: Event): void {
-  const el = e.target as HTMLElement;
-  // Enter 已被拦截；防御性去掉可能混入的换行
-  p.text = el.innerText.replace(/\n/g, "");
-  updateParaStatus();
-}
-
-function onKeydown(p: Para, e: KeyboardEvent): void {
-  const el = e.currentTarget as HTMLElement;
-  if (e.key === "Enter" && !e.ctrlKey && !e.altKey && !e.metaKey) {
-    e.preventDefault();
-    splitPara(p.id, caretOffset(el));
-  } else if (e.key === "Backspace" && caretCollapsedAtStart(el)) {
-    e.preventDefault();
-    mergePrev(p.id);
-  }
-}
-
-function onPaste(p: Para, e: ClipboardEvent): void {
-  const text = e.clipboardData?.getData("text/plain") ?? "";
-  if (!text) return;
-  e.preventDefault();
-  const el = e.currentTarget as HTMLElement;
-  if (/\r?\n/.test(text)) {
-    pasteMulti(p.id, caretOffset(el), text);
-  } else {
-    document.execCommand("insertText", false, text); // Chromium 支持，保留撤销栈
-  }
-}
-
-function onFocusRow(p: Para): void {
-  store.curParaId = p.id;
-  updateParaStatus();
-}
+const editorRef = ref<HTMLDivElement | null>(null);
+let isInternalSync = false;
 
 function isEmpty(): boolean {
   return (
     store.paragraphs.length === 1 && cleanText(store.paragraphs[0]?.text ?? "").trim() === ""
   );
 }
+
+/** 将 store.paragraphs 完整同步到编辑器 DOM */
+function syncStoreToDom(force = false): void {
+  if (!editorRef.value || (isInternalSync && !force)) return;
+  const editor = editorRef.value;
+
+  const domRows = Array.from(editor.querySelectorAll<HTMLElement>(":scope > .para-row"));
+  const domTexts = domRows.map((r) => r.innerText.replace(/\r?\n$/, ""));
+  const storeTexts = store.paragraphs.map((p) => p.text);
+
+  const isSame =
+    domRows.length === store.paragraphs.length &&
+    domTexts.every((t, i) => t === storeTexts[i]);
+
+  if (isSame && !force) {
+    domRows.forEach((r, i) => {
+      const p = store.paragraphs[i];
+      if (p) {
+        r.dataset.id = String(p.id);
+        r.style.textAlign = ALIGN_CSS[p.align];
+        r.style.textIndent = p.indentEm > 0 ? `${p.indentEm * 13}px` : "0";
+      }
+    });
+    return;
+  }
+
+  editor.innerHTML = "";
+
+  for (const p of store.paragraphs) {
+    const row = document.createElement("div");
+    row.className = "para-row";
+    row.dataset.id = String(p.id);
+    row.style.textAlign = ALIGN_CSS[p.align];
+    row.style.textIndent = p.indentEm > 0 ? `${p.indentEm * 13}px` : "0";
+    if (p.text) {
+      row.textContent = p.text;
+    } else {
+      row.innerHTML = "<br>";
+    }
+    editor.appendChild(row);
+  }
+}
+
+/** 从当前 DOM 提取全部段落并更新 store.paragraphs */
+function syncDomToStore(): void {
+  if (!editorRef.value) return;
+  isInternalSync = true;
+  const editor = editorRef.value;
+
+  // 规范化子节点：确保所有顶级内容都在 .para-row 中
+  const childNodes = Array.from(editor.childNodes);
+  const rows: HTMLElement[] = [];
+
+  for (const node of childNodes) {
+    if (node instanceof HTMLElement && node.classList.contains("para-row")) {
+      rows.push(node);
+    } else if (node instanceof HTMLElement && node.tagName === "DIV") {
+      node.classList.add("para-row");
+      rows.push(node);
+    } else if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "para-row";
+      wrapper.textContent = node.textContent;
+      editor.replaceChild(wrapper, node);
+      rows.push(wrapper);
+    }
+  }
+
+  if (rows.length === 0) {
+    const emptyRow = document.createElement("div");
+    emptyRow.className = "para-row";
+    emptyRow.innerHTML = "<br>";
+    const np = newPara("");
+    emptyRow.dataset.id = String(np.id);
+    editor.appendChild(emptyRow);
+    store.paragraphs = [np];
+    store.curParaId = np.id;
+    updateParaStatus();
+    isInternalSync = false;
+    return;
+  }
+
+  const newParas: Para[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const el = rows[i];
+    let rawText = el.innerText.replace(/\r?\n$/, "");
+    if (rawText === "\n") rawText = "";
+
+    const existingId = Number(el.dataset?.id);
+    const existingPara = store.paragraphs.find((p) => p.id === existingId);
+
+    const align = existingPara ? existingPara.align : 0;
+    const indentEm = existingPara ? existingPara.indentEm : 0;
+
+    el.style.textAlign = ALIGN_CSS[align];
+    el.style.textIndent = indentEm > 0 ? `${indentEm * 13}px` : "0";
+
+    const para: Para = existingPara
+      ? { ...existingPara, text: rawText }
+      : { id: existingId || Math.floor(Math.random() * 10000000) + 1, text: rawText, align, indentEm };
+
+    el.dataset.id = String(para.id);
+    newParas.push(para);
+  }
+
+  store.paragraphs = newParas;
+  updateCurrentParaFromSelection();
+  isInternalSync = false;
+}
+
+function updateCurrentParaFromSelection(): void {
+  const sel = window.getSelection();
+  if (!sel || !sel.anchorNode || !editorRef.value) return;
+  let node: Node | null = sel.anchorNode;
+  while (node && node !== editorRef.value) {
+    if (node instanceof HTMLElement && node.classList.contains("para-row")) {
+      const id = Number(node.dataset.id);
+      if (id) {
+        store.curParaId = id;
+        updateParaStatus();
+        return;
+      }
+    }
+    node = node.parentNode;
+  }
+}
+
+function onInput(): void {
+  syncDomToStore();
+}
+
+function onKeydown(e: KeyboardEvent): void {
+  if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    e.preventDefault();
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || !editorRef.value) return;
+    const range = sel.getRangeAt(0);
+    range.deleteContents();
+
+    let curRow: HTMLElement | null = null;
+    let node: Node | null = range.startContainer;
+    while (node && node !== editorRef.value) {
+      if (node instanceof HTMLElement && node.classList.contains("para-row")) {
+        curRow = node;
+        break;
+      }
+      node = node.parentNode;
+    }
+
+    const newRow = document.createElement("div");
+    newRow.className = "para-row";
+    newRow.dataset.id = String(Math.floor(Math.random() * 10000000) + 1);
+
+    if (curRow) {
+      const subRange = document.createRange();
+      subRange.setStart(range.startContainer, range.startOffset);
+      subRange.setEndAfter(curRow.lastChild || curRow);
+      const extracted = subRange.extractContents();
+      newRow.appendChild(extracted);
+      if (!newRow.textContent) newRow.innerHTML = "<br>";
+      if (!curRow.textContent) curRow.innerHTML = "<br>";
+
+      newRow.style.textAlign = curRow.style.textAlign;
+      newRow.style.textIndent = curRow.style.textIndent;
+      curRow.after(newRow);
+    } else {
+      newRow.innerHTML = "<br>";
+      editorRef.value.appendChild(newRow);
+    }
+
+    const newRange = document.createRange();
+    newRange.setStart(newRow, 0);
+    newRange.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(newRange);
+
+    syncDomToStore();
+  }
+}
+
+function onPaste(e: ClipboardEvent): void {
+  const text = e.clipboardData?.getData("text/plain");
+  if (!text) return;
+  e.preventDefault();
+
+  const lines = text.split(/\r?\n/);
+  if (lines.length === 1) {
+    document.execCommand("insertText", false, text);
+    syncDomToStore();
+    return;
+  }
+
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || !editorRef.value) return;
+  const range = sel.getRangeAt(0);
+  range.deleteContents();
+
+  let curRow: HTMLElement | null = null;
+  let node: Node | null = range.startContainer;
+  while (node && node !== editorRef.value) {
+    if (node instanceof HTMLElement && node.classList.contains("para-row")) {
+      curRow = node;
+      break;
+    }
+    node = node.parentNode;
+  }
+
+  const align = curRow ? curRow.style.textAlign : "left";
+  const indent = curRow ? curRow.style.textIndent : "0";
+
+  if (curRow) {
+    const textNode = document.createTextNode(lines[0]);
+    range.insertNode(textNode);
+    range.setStartAfter(textNode);
+    range.collapse(true);
+  }
+
+  let insertAfter = curRow;
+  for (let i = curRow ? 1 : 0; i < lines.length; i++) {
+    const newRow = document.createElement("div");
+    newRow.className = "para-row";
+    newRow.dataset.id = String(Math.floor(Math.random() * 10000000) + 1);
+    newRow.style.textAlign = align;
+    newRow.style.textIndent = indent;
+    newRow.textContent = lines[i] || "";
+    if (!lines[i]) newRow.innerHTML = "<br>";
+
+    if (insertAfter && insertAfter.parentNode) {
+      insertAfter.after(newRow);
+      insertAfter = newRow;
+    } else {
+      editorRef.value.appendChild(newRow);
+      insertAfter = newRow;
+    }
+  }
+
+  if (insertAfter) {
+    const newRange = document.createRange();
+    newRange.selectNodeContents(insertAfter);
+    newRange.collapse(false);
+    sel.removeAllRanges();
+    sel.addRange(newRange);
+  }
+
+  syncDomToStore();
+}
+
+function onSelectionChange(): void {
+  if (
+    document.activeElement === editorRef.value ||
+    editorRef.value?.contains(document.activeElement)
+  ) {
+    updateCurrentParaFromSelection();
+  }
+}
+
+// 监听外部数据变更（如导入 docx / 加载预设）
+watch(
+  () => store.paragraphs.map((p) => `${p.id}:${p.align}:${p.indentEm}:${p.text}`).join("\u0001"),
+  () => {
+    syncStoreToDom();
+  },
+  { immediate: true },
+);
+
+// 外部焦点请求（聚焦到某段某偏移）
+watch(
+  () => pendingFocus.nonce,
+  () => {
+    void nextTick(() => {
+      if (!editorRef.value) return;
+      const target = editorRef.value.querySelector<HTMLElement>(`[data-id="${pendingFocus.id}"]`);
+      if (!target) return;
+      const sel = window.getSelection();
+      const rng = document.createRange();
+      rng.selectNodeContents(target);
+      rng.collapse(true);
+      sel?.removeAllRanges();
+      sel?.addRange(rng);
+      target.scrollIntoView({ block: "nearest" });
+    });
+  },
+);
+
+onMounted(() => {
+  document.addEventListener("selectionchange", onSelectionChange);
+  syncStoreToDom(true);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener("selectionchange", onSelectionChange);
+});
 </script>
 
 <template>
-  <div class="para-editor" :class="{ 'is-empty': isEmpty() }">
-    <div
-      v-for="p in store.paragraphs"
-      :key="p.id"
-      class="para-row"
-      contenteditable="plaintext-only"
-      spellcheck="false"
-      :ref="setRowEl(p.id)"
-      :style="{
-        textAlign: ALIGN_CSS[p.align],
-        textIndent: p.indentEm > 0 ? `${p.indentEm * 13}px` : '0',
-      }"
-      @input="onInput(p, $event)"
-      @keydown="onKeydown(p, $event)"
-      @paste="onPaste(p, $event)"
-      @focusin="onFocusRow(p)"
-    ></div>
-    <div style="min-height: 30px" @click="focusEmptyArea()"></div>
-  </div>
+  <div
+    ref="editorRef"
+    class="para-editor"
+    :class="{ 'is-empty': isEmpty() }"
+    contenteditable="true"
+    spellcheck="false"
+    @input="onInput()"
+    @keydown="onKeydown($event)"
+    @paste="onPaste($event)"
+    @click.self="focusEmptyArea()"
+  ></div>
 </template>
+
