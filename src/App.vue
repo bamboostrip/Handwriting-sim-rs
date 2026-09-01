@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, watch } from "vue";
-import { NConfigProvider, NDialogProvider, NMessageProvider } from "naive-ui";
+import { darkTheme, NConfigProvider, NDialogProvider, NMessageProvider } from "naive-ui";
 import type { GlobalThemeOverrides } from "naive-ui";
 import PreviewPane from "./components/PreviewPane.vue";
 import ParamsPanel from "./components/ParamsPanel.vue";
@@ -11,6 +11,7 @@ import {
   buildParams,
   cancelRegionEdit,
   doRender,
+  isDarkActive,
   loadBgDimensions,
   openAboutModal,
   refreshPresets,
@@ -19,8 +20,8 @@ import {
   store,
 } from "./store";
 
-// 主题：延续原版的青绿主色调，按 Web 标准重制
-const themeOverrides: GlobalThemeOverrides = {
+// 浅色主题：国风青绿主色调
+const lightThemeOverrides: GlobalThemeOverrides = {
   common: {
     primaryColor: "#2e7d74",
     primaryColorHover: "#3d948a",
@@ -30,6 +31,52 @@ const themeOverrides: GlobalThemeOverrides = {
     fontSize: "13px",
   },
 };
+
+// 深色主题：对齐 Python 原版墨绿暗色调
+const darkThemeOverrides: GlobalThemeOverrides = {
+  common: {
+    primaryColor: "#5ea84d",
+    primaryColorHover: "#72c761",
+    primaryColorPressed: "#438536",
+    primaryColorSuppl: "#5ea84d",
+    bodyColor: "#181c19",
+    cardColor: "#232b26",
+    modalColor: "#232b26",
+    popoverColor: "#232b26",
+    tableColor: "#232b26",
+    inputColor: "#232b26",
+    borderColor: "#38453d",
+    textColorBase: "#e8f0eb",
+    textColor1: "#e8f0eb",
+    textColor2: "#dce5df",
+    textColor3: "#8e9e95",
+    borderRadius: "6px",
+    fontSize: "13px",
+  },
+  Card: {
+    color: "#232b26",
+    borderColor: "#38453d",
+    textColor: "#e8f0eb",
+  },
+  Modal: {
+    color: "#232b26",
+    textColor: "#e8f0eb",
+  },
+  Input: {
+    color: "#232b26",
+    colorFocus: "#232b26",
+    border: "1px solid #38453d",
+    borderFocus: "1px solid #5ea84d",
+    textColor: "#e8f0eb",
+    placeholderColor: "#6c7d74",
+  },
+};
+
+const activeTheme = computed(() => (isDarkActive() ? darkTheme : null));
+const activeOverrides = computed(() =>
+  isDarkActive() ? darkThemeOverrides : lightThemeOverrides
+);
+
 
 // 自动预览：任意参数/段落/区域变化后防抖 300ms 渲染（对齐 README 承诺的行为）
 const paramSnapshot = computed(() => JSON.stringify(buildParams()));
@@ -62,8 +109,9 @@ void doRender();
 </script>
 
 <template>
-  <NConfigProvider :theme-overrides="themeOverrides" abstract>
+  <NConfigProvider :theme="activeTheme" :theme-overrides="activeOverrides" abstract>
     <NDialogProvider>
+
       <NMessageProvider>
         <div class="app-shell">
           <div class="app-main">

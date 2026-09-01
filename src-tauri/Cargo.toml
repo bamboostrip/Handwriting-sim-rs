@@ -1,6 +1,7 @@
 [package]
 name = "handwrite-sim-tauri"
-version = "0.3.2"
+version = "0.3.3"
+
 
 edition = "2021"
 description = "手写模拟器桌面端（Tauri 2）：复用 crates/core 渲染引擎，Vue 前端位于仓库根目录"

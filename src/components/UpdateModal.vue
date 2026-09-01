@@ -19,10 +19,12 @@ import { api } from "../api";
 import {
   APP_VERSION,
   closeUpdateModal,
+  isDarkActive,
   openExternalUrl,
   setSkippedVersion,
   store,
 } from "../store";
+
 
 const dialog = useDialog();
 const message = useMessage();
@@ -166,9 +168,10 @@ async function startAutoUpdate(): Promise<void> {
           :percentage="downloadPercent"
           :indicator-placement="'inside'"
           processing
-          color="#2e7d74"
+          :color="isDarkActive() ? '#5ea84d' : '#2e7d74'"
         />
       </div>
+
     </div>
 
     <template #footer>
@@ -216,8 +219,8 @@ async function startAutoUpdate(): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  background: #f4f8f7;
-  border: 1px solid #dce8e5;
+  background: var(--accent-soft, #f4f8f7);
+  border: 1px solid var(--border, #dce8e5);
   border-radius: 6px;
   padding: 10px 12px;
 }
@@ -262,7 +265,7 @@ async function startAutoUpdate(): Promise<void> {
   max-height: 180px;
   min-height: 90px;
   overflow-y: auto;
-  background: #ffffff;
+  background: var(--card-bg, #ffffff);
   border: 1px solid var(--border, #d8e2df);
   border-radius: 6px;
   padding: 10px 12px;
@@ -286,11 +289,12 @@ async function startAutoUpdate(): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  background: #fbfdfc;
-  border: 1px solid #e1edea;
+  background: var(--card-bg, #fbfdfc);
+  border: 1px solid var(--border, #e1edea);
   border-radius: 6px;
   padding: 10px 12px;
 }
+
 
 .progress-status-text {
   font-size: 12px;

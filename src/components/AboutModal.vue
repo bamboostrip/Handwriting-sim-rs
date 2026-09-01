@@ -176,8 +176,8 @@ import {
   font-size: 12.5px;
   line-height: 1.6;
   color: var(--text-main, #24312e);
-  background: #fbfdfc;
-  border: 1px solid #eef3f1;
+  background: var(--card-bg, #fbfdfc);
+  border: 1px solid var(--border, #eef3f1);
   border-radius: 6px;
   padding: 8px 12px;
 }
@@ -206,7 +206,7 @@ import {
   justify-content: space-between;
   gap: 10px;
   padding: 10px 12px;
-  background: #ffffff;
+  background: var(--card-bg, #ffffff);
   border: 1px solid var(--border, #d8e2df);
   border-radius: 6px;
   cursor: pointer;
@@ -215,19 +215,19 @@ import {
 
 .repo-card:hover {
   border-color: var(--accent, #2e7d74);
-  background: #f6faf9;
+  background: var(--hover-bg, #f6faf9);
   transform: translateY(-1px);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
 }
 
 .repo-card.is-rust {
-  border-color: #c9ded9;
-  background: #fafdfc;
+  border-color: var(--accent, #2e7d74);
+  background: var(--accent-soft, #fafdfc);
 }
 
 .repo-card.is-rust:hover {
-  border-color: var(--accent, #2e7d74);
-  background: #f0f7f5;
+  border-color: var(--accent-hover, #3d948a);
+  background: var(--hover-bg, #f0f7f5);
 }
 
 .repo-info {
@@ -272,10 +272,11 @@ import {
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px;
-  background: #ffffff;
+  background: var(--card-bg, #ffffff);
   border: 1px solid var(--border, #d8e2df);
   border-radius: 6px;
 }
+
 
 .update-action-row {
   display: flex;

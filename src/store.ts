@@ -11,13 +11,26 @@ import { api, assetUrl, dialogs } from "./api";
 import type { UiParams, UiRegion, UpdateInfo } from "./types";
 
 /** 当前版本号与开源仓库地址 */
-export const APP_VERSION = "0.3.2";
+export const APP_VERSION = "0.3.3";
 
 export const PYTHON_REPO_URL = "https://github.com/bamboostrip/Handwriting-simulator";
 export const RUST_REPO_URL = "https://github.com/bamboostrip/Handwriting-sim-rs";
 
 const KEY_AUTO_CHECK = "handwritesim_auto_check";
 const KEY_SKIPPED_VERSION = "handwritesim_skipped_version";
+const KEY_THEME_PREFERENCE = "handwritesim_theme_preference";
+
+export type ThemePreference = "auto" | "light" | "dark";
+
+export function getStoredThemePreference(): ThemePreference {
+  try {
+    const v = localStorage.getItem(KEY_THEME_PREFERENCE);
+    if (v === "light" || v === "dark" || v === "auto") return v;
+    return "auto";
+  } catch {
+    return "auto";
+  }
+}
 
 export function isAutoCheckEnabled(): boolean {
   try {
@@ -35,6 +48,7 @@ export function getSkippedVersion(): string {
     return "";
   }
 }
+
 
 /** 组件树外的离散弹窗（store 层的阻断性错误提示用） */
 const { dialog: appDialog, message: appMessage } = createDiscreteApi(["dialog", "message"]);
@@ -132,7 +146,67 @@ export const store = reactive({
   updateStatusText: "点击右侧按钮可主动联网检测最新版本",
   autoCheckUpdate: isAutoCheckEnabled(),
   skippedVersion: getSkippedVersion(),
+
+  // ---- 主题模式 ----
+  themePreference: getStoredThemePreference(),
+  systemIsDark: typeof window !== "undefined" && window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)").matches : false,
 });
+
+/** 当前是否实际生效深色模式 */
+export function isDarkActive(): boolean {
+  if (store.themePreference === "dark") return true;
+  if (store.themePreference === "light") return false;
+  return store.systemIsDark;
+}
+
+/** 设置主题偏好（'auto' | 'light' | 'dark'）并持久化 */
+export function setThemePreference(pref: ThemePreference): void {
+  store.themePreference = pref;
+  try {
+    localStorage.setItem(KEY_THEME_PREFERENCE, pref);
+  } catch (e) {
+    console.error("保存主题配置失败:", e);
+  }
+  syncThemeClass();
+}
+
+/** 一键切换深浅色主题 */
+export function toggleTheme(): void {
+  if (isDarkActive()) {
+    setThemePreference("light");
+  } else {
+    setThemePreference("dark");
+  }
+}
+
+/** 同步 html/body 的 dark 类 */
+export function syncThemeClass(): void {
+  if (typeof document !== "undefined") {
+    const dark = isDarkActive();
+    if (dark) {
+      document.documentElement.classList.add("dark");
+      document.documentElement.setAttribute("data-theme", "dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  }
+}
+
+// 监听系统深浅色变化
+if (typeof window !== "undefined" && window.matchMedia) {
+  const mq = window.matchMedia("(prefers-color-scheme: dark)");
+  mq.addEventListener("change", (e) => {
+    store.systemIsDark = e.matches;
+    if (store.themePreference === "auto") {
+      syncThemeClass();
+    }
+  });
+}
+
+// 模块加载时初始化同步主题 class
+syncThemeClass();
+
 
 
 // ---------------------------------------------------------------- 参数构建

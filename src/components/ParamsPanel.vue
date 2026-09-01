@@ -25,13 +25,15 @@ import {
   exportPdf,
   importDocx,
   importDocument,
+  isDarkActive,
   loadPresetFromDialog,
+  openAboutModal,
   savePresetToDialog,
   selectPreset,
   setAlign,
   store,
   toggleIndent,
-  openAboutModal,
+  toggleTheme,
 } from "../store";
 
 const presetOptions = computed(() =>
@@ -45,8 +47,27 @@ const presetOptions = computed(() =>
       <!-- ============ 待处理文本 ============ -->
       <div class="section-title" style="display: flex; justify-content: space-between; align-items: center">
         <span>待处理文本</span>
-        <NButton size="tiny" secondary type="primary" @click="openAboutModal()">ℹ️ 关于 / 检查更新</NButton>
+        <div style="display: flex; align-items: center; gap: 6px">
+          <NTooltip trigger="hover">
+            <template #trigger>
+              <NButton
+                size="tiny"
+                secondary
+                :type="isDarkActive() ? 'warning' : 'default'"
+                @click="toggleTheme()"
+                style="padding: 0 6px"
+              >
+                {{ isDarkActive() ? '🌙 深色' : '☀️ 浅色' }}
+              </NButton>
+            </template>
+            当前主题：{{ isDarkActive() ? '深色模式' : '浅色模式' }}（点击切换）
+          </NTooltip>
+          <NButton size="tiny" secondary type="primary" @click="openAboutModal()">
+            ℹ️ 关于 / 检查更新
+          </NButton>
+        </div>
       </div>
+
 
       <div class="field-row" style="flex-wrap: wrap">
         <NButton size="tiny" @click="setAlign(0)">左对齐</NButton>

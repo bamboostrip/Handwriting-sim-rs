@@ -3,6 +3,7 @@
 
 :root {
   --accent: #2e7d74;
+  --accent-hover: #3d948a;
   --accent-soft: #e3efed;
   --danger: #e5484d;
   --edit-blue: #2f7df6;
@@ -11,7 +12,32 @@
   --text-sub: #6b7a76;
   --border: #d8e2df;
   --panel-bg: #f7faf9;
+  --card-bg: #ffffff;
+  --input-bg: #ffffff;
+  --hover-bg: #f0f5ee;
+  --select-bg: #e3efe6;
+  --row-border: #eef2ee;
+  --placeholder-color: #9aa8a4;
   --kaiti: "KaiTi", "楷体", "STKaiti", serif;
+}
+
+html.dark {
+  --accent: #5ea84d;
+  --accent-hover: #72c761;
+  --accent-soft: #28362d;
+  --danger: #ff6b6b;
+  --edit-blue: #5397ff;
+  --rubber-blue: #6ba7ff;
+  --text-main: #e8f0eb;
+  --text-sub: #8e9e95;
+  --border: #38453d;
+  --panel-bg: #181c19;
+  --card-bg: #232b26;
+  --input-bg: #232b26;
+  --hover-bg: #2c3630;
+  --select-bg: #35453b;
+  --row-border: #2d3831;
+  --placeholder-color: #6c7d74;
 }
 
 * {
@@ -26,8 +52,10 @@ body,
   overflow: hidden;
   font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
   color: var(--text-main);
+  background: var(--panel-bg);
   font-size: 13px;
 }
+
 
 .app-shell {
   height: 100%;
@@ -197,7 +225,7 @@ body,
   position: relative;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--card-bg);
   padding: 14px 12px 10px;
   margin-bottom: 10px;
 }
@@ -263,7 +291,7 @@ body,
   color: var(--text-sub);
   font-family: var(--kaiti);
   font-size: 12.5px;
-  background: #fff;
+  background: var(--card-bg);
   flex-shrink: 0;
 }
 
@@ -297,7 +325,7 @@ body,
   height: 190px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--input-bg);
   overflow-y: auto;
   padding: 4px 18px 4px 8px;
   cursor: text;
@@ -308,7 +336,7 @@ body,
   position: sticky;
   top: 0;
   display: block;
-  color: #9aa8a4;
+  color: var(--placeholder-color);
   font-size: 12px;
   pointer-events: none;
   float: left;
@@ -323,12 +351,12 @@ body,
   outline: none;
   white-space: pre-wrap;
   word-break: break-all;
-  border-bottom: 1px solid #eef2ee;
+  border-bottom: 1px solid var(--row-border);
   padding: 0 2px 1px;
 }
 
 .para-row:focus {
-  background: #fbfdfb;
+  background: var(--hover-bg);
 }
 
 /* ---------------- 区域列表 ---------------- */
@@ -336,7 +364,7 @@ body,
   height: 96px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--input-bg);
   overflow-y: auto;
   padding: 4px;
 }
@@ -356,12 +384,13 @@ body,
 }
 
 .region-item:hover {
-  background: #f0f5ee;
+  background: var(--hover-bg);
 }
 
 .region-item.is-selected {
-  background: #e3efe6;
+  background: var(--select-bg);
 }
+
 
 .region-empty {
   color: var(--text-sub);
