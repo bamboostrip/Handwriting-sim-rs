@@ -6,9 +6,11 @@ resolver = "2"
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 strip = true
+panic = "abort"
+
 
 [profile.dev]
 debug = 1
