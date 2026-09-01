@@ -8,8 +8,6 @@ fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=assets");
-    println!("cargo:rerun-if-changed=../../pdfium.dll");
 
     let mut found_source: Option<PathBuf> = None;
 
@@ -38,12 +36,21 @@ fn main() {
     }
 
     if let Some(src) = found_source {
-        println!("cargo:warning=Embedding pdfium library from: {}", src.display());
-        if let Ok(_) = fs::copy(&src, &out_path) {
-            println!("cargo:rustc-cfg=has_embedded_pdfium");
-            return;
+        println!("cargo:rerun-if-changed={}", src.display());
+        let should_copy = match (fs::metadata(&src), fs::metadata(&out_path)) {
+            (Ok(src_meta), Ok(out_meta)) => src_meta.len() != out_meta.len(),
+            _ => true,
+        };
+
+        if should_copy {
+            let _ = fs::copy(&src, &out_path);
         }
+        println!("cargo:rustc-cfg=has_embedded_pdfium");
+        return;
     }
 
-    let _ = fs::write(&out_path, b"");
+    if !out_path.exists() {
+        let _ = fs::write(&out_path, b"");
+    }
 }
+
