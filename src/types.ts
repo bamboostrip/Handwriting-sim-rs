@@ -20,6 +20,11 @@ export interface DocxImportOutput {
   docFontFamily?: string | null;
 }
 
+export interface DocumentImportResult {
+  pages: string[];
+  regions: UiRegion[];
+}
+
 export interface UiParagraph {
   text: string;
   /** 0 左对齐 / 1 居中 / 2 右对齐 */

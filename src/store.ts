@@ -605,6 +605,7 @@ export async function doRender(): Promise<void> {
 
 const debouncedRender = useDebounceFn(doRender, 300);
 export const scheduleRender = (): void => void debouncedRender();
+export const triggerPreview = scheduleRender;
 
 export function prevPage(): void {
   if (store.pageIndex > 0) store.pageIndex -= 1;
@@ -914,14 +915,20 @@ export async function importDocument(): Promise<void> {
   if (!p) return;
   store.status = "正在渲染文档底图…";
   try {
-    const pages = await api.importDocument(p);
-    if (!pages.length) throw new Error("未得到任何页面");
-    store.docPages = pages; // 先写 docPages 再切背景，避免 syncDocState 误清
-    store.docStatus = `已导入 ${pages.length} 页，可逐页框选`;
-    store.backgroundPath = pages[0];
-    loadBgDimensions(pages[0]);
-    store.status = `已导入文档底图（${pages.length} 页）；在目标页开启「框选」即可填写`;
-    scheduleRender();
+    const res = await api.importDocument(p);
+    if (!res.pages.length) throw new Error("未得到任何页面");
+    store.docPages = res.pages; // 先写 docPages 再切背景，避免 syncDocState 误清
+    store.docStatus = `已导入 ${res.pages.length} 页，可逐页框选`;
+    store.backgroundPath = res.pages[0];
+    loadBgDimensions(res.pages[0]);
+    if (res.regions.length > 0) {
+      store.regions = res.regions;
+      store.selectedRegionIndex = 0;
+      store.status = `已导入文档底图（共 ${res.pages.length} 页），并自动识别提取了 ${res.regions.length} 处手写填空区域！`;
+    } else {
+      store.status = `已导入文档底图（共 ${res.pages.length} 页）`;
+    }
+    triggerPreview();
   } catch (e) {
     store.docStatus = "";
     store.status = `导入文档失败：${e}`;

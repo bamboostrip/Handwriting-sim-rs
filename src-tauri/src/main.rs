@@ -190,16 +190,18 @@ fn import_docx(path: String, font_size: f32) -> Result<params::DocxImportOutput,
     })
 }
 
-/// 导入 PDF/DOCX 文档底图：后台栅格化为 200 DPI 逐页 PNG，返回路径列表。
+/// 导入 PDF/DOCX 文档底图：后台栅格化为 200 DPI 逐页 PNG 并自动识别提取 TextRegion 区域列表。
 #[tauri::command]
-fn import_document(app: AppHandle, path: String) -> Result<Vec<String>, String> {
+fn import_document(app: AppHandle, path: String) -> Result<params::DocumentImportResult, String> {
     let out_dir = doc_cache_dir(&app)?;
-    let pages = doc_render::document_to_page_images(Path::new(path.trim()), &out_dir, 200)
+    let (pages, regions) = doc_render::document_to_page_images_with_regions(Path::new(path.trim()), &out_dir, 200)
         .map_err(|e| format!("导入文档失败：{e}"))?;
-    Ok(pages
-        .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect())
+    let page_strings = pages.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let ui_regions = regions.iter().map(params::UiRegion::from).collect();
+    Ok(params::DocumentImportResult {
+        pages: page_strings,
+        regions: ui_regions,
+    })
 }
 
 /// 扫描资产根 presets/ 目录（exe 旁或仓库根），按文件名排序。

@@ -5,7 +5,16 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import type { DocxImportOutput, DownloadProgressPayload, PngPage, PresetItem, SystemFontItem, UiParams, UpdateInfo } from "./types";
+import type {
+  DocxImportOutput,
+  DocumentImportResult,
+  DownloadProgressPayload,
+  PngPage,
+  PresetItem,
+  SystemFontItem,
+  UiParams,
+  UpdateInfo,
+} from "./types";
 
 /** 本地文件 → asset 协议 URL（需 tauri.conf.json assetProtocol scope 覆盖） */
 export const assetUrl = (path: string): string => convertFileSrc(path);
@@ -19,7 +28,7 @@ export const api = {
   /** 返回 DocxImportOutput（段落文本、对齐、首行缩进 em、富文本 Runs 与检测到的文档字体） */
   importDocx: (path: string, fontSize: number) =>
     invoke<DocxImportOutput>("import_docx", { path, fontSize }),
-  importDocument: (path: string) => invoke<string[]>("import_document", { path }),
+  importDocument: (path: string) => invoke<DocumentImportResult>("import_document", { path }),
   listPresets: () => invoke<PresetItem[]>("list_presets"),
   loadPreset: (path: string) => invoke<UiParams>("load_preset", { path }),
   savePreset: (params: UiParams, path: string) =>

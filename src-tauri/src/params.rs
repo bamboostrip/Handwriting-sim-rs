@@ -57,6 +57,13 @@ pub struct DocxImportOutput {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentImportResult {
+    pub pages: Vec<String>,
+    pub regions: Vec<UiRegion>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UiTextRun {
     pub text: String,
@@ -831,6 +838,55 @@ mod tests {
             ..UiParams::default()
         };
         assert!(ui_run_bad_color.to_handwriting_params().is_err());
+    }
+
+    #[test]
+    fn test_ui_region_from_text_region_and_document_import_result() {
+        let tr = TextRegion {
+            x: 10,
+            y: 20,
+            w: 100,
+            h: 50,
+            text: "测试填空".into(),
+            font_path: "fonts/test.ttf".into(),
+            printed: true,
+            font_size: 24,
+            page: 2,
+            align: 1,
+            indent_em: 1.5,
+            fill: Some([0x12, 0x34, 0x56]),
+            paragraphs: vec![Paragraph {
+                text: "测试填空".into(),
+                align: Align::Center,
+                first_line_indent: 36.0,
+                font_family: None,
+                runs: vec![],
+            }],
+            ..Default::default()
+        };
+
+        let ui_region = UiRegion::from(&tr);
+        assert_eq!(ui_region.x, 10);
+        assert_eq!(ui_region.y, 20);
+        assert_eq!(ui_region.w, 100);
+        assert_eq!(ui_region.h, 50);
+        assert_eq!(ui_region.text, "测试填空");
+        assert_eq!(ui_region.font_path, "fonts/test.ttf");
+        assert!(ui_region.printed);
+        assert_eq!(ui_region.font_size, 24);
+        assert_eq!(ui_region.page, 2);
+        assert_eq!(ui_region.align, 1);
+        assert_eq!(ui_region.indent_em, 1.5);
+        assert_eq!(ui_region.fill, Some("#123456".into()));
+        assert_eq!(ui_region.paragraphs.len(), 1);
+        assert_eq!(ui_region.paragraphs[0].indent_em, 1.5); // 36.0 / 24.0
+
+        let res = DocumentImportResult {
+            pages: vec!["page1.png".into(), "page2.png".into()],
+            regions: vec![ui_region],
+        };
+        assert_eq!(res.pages.len(), 2);
+        assert_eq!(res.regions.len(), 1);
     }
 }
 
