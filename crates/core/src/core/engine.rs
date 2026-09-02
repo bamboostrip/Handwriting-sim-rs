@@ -240,6 +240,7 @@ impl DefaultEngine {
     }
 
     /// 构造区域局部的渲染参数：独立字体/字号；逐区域排版/扰动/错字覆盖项；
+    /// 支持继承关联的 HandwritingRole 属性；
     /// 打印体关闭全部扰动（覆盖项之后应用，打印语义始终占优）。
     /// 区域以矩形自身为界，不再叠加整页边距（对齐 Python 版 `_region_params`）。
     fn region_local_params(params: &HandwritingParams, region: &TextRegion) -> HandwritingParams {
@@ -251,44 +252,91 @@ impl DefaultEngine {
         rp.right_margin = region.margin_right.unwrap_or(0.0);
         rp.top_margin = region.margin_top.unwrap_or(0.0);
         rp.bottom_margin = region.margin_bottom.unwrap_or(0.0);
+
+        // 默认行间距：区域内默认行间距为 0.0（单行紧凑排版），避免继承整页预设的大行距（如 97px）
+        if region.line_spacing.is_none() {
+            rp.line_spacing = 0.0;
+        }
+
+        let mut is_printed = region.printed;
+
+        // 1. 继承 HandwritingRole (匹配 region.role_id)
+        if let Some(role) = params.roles.iter().find(|r| r.id == region.role_id && r.id != 0) {
+            if !role.font_path.is_empty() && region.font_path.is_empty() {
+                rp.font_path = role.font_path.clone();
+            }
+            if let Some(fill) = role.fill {
+                if region.fill.is_none() {
+                    rp.fill = fill;
+                }
+            }
+            if role.printed || role.id == 1 {
+                is_printed = true;
+            }
+            if let Some(fs) = role.font_size {
+                if region.font_size == 0 {
+                    rp.font_size = fs;
+                }
+            }
+            if let Some(ws) = role.word_spacing {
+                if region.word_spacing.is_none() {
+                    rp.word_spacing = ws;
+                }
+            }
+            if let Some(ls) = role.line_spacing {
+                if region.line_spacing.is_none() {
+                    rp.line_spacing = ls;
+                }
+            }
+            if let Some(s) = role.font_size_sigma {
+                if region.font_size_sigma.is_none() {
+                    rp.font_size_sigma = s;
+                }
+            }
+            if let Some(s) = role.word_spacing_sigma {
+                if region.word_spacing_sigma.is_none() {
+                    rp.word_spacing_sigma = s;
+                }
+            }
+            if let Some(s) = role.line_spacing_sigma {
+                if region.line_spacing_sigma.is_none() {
+                    rp.line_spacing_sigma = s;
+                }
+            }
+            if let Some(s) = role.perturb_x_sigma {
+                if region.perturb_x_sigma.is_none() {
+                    rp.perturb_x_sigma = s;
+                }
+            }
+            if let Some(s) = role.perturb_y_sigma {
+                if region.perturb_y_sigma.is_none() {
+                    rp.perturb_y_sigma = s;
+                }
+            }
+            if let Some(s) = role.perturb_theta_sigma {
+                if region.perturb_theta_sigma.is_none() {
+                    rp.perturb_theta_sigma = s;
+                }
+            }
+            if let Some(r) = role.miswrite_rate {
+                if region.miswrite_rate.is_none() {
+                    rp.miswrite_rate = r;
+                }
+            }
+            if let Some(st) = role.miswrite_strikeout_style {
+                if region.miswrite_strikeout_style.is_none() {
+                    rp.miswrite_strikeout_style = st;
+                }
+            }
+        }
+
+        // 2. 应用区域级显式覆盖项
         if !region.font_path.is_empty() {
             rp.font_path = region.font_path.clone();
         }
         if region.font_size > 0 {
             rp.font_size = region.font_size as f32;
         }
-        // 段落/对齐/首行缩进：
-        if !region.paragraphs.is_empty() {
-            rp.paragraphs = region.paragraphs.clone();
-            rp.text.clear();
-        } else if region.align != 0 || region.indent_em > 0.0 {
-            rp.paragraphs = vec![Paragraph {
-                text: region.text.clone(),
-                align: match region.align {
-                    1 => Align::Center,
-                    2 => Align::Right,
-                    _ => Align::Left,
-                },
-                first_line_indent: region.indent_em * rp.font_size,
-                font_family: None,
-                runs: Vec::new(),
-            }];
-        } else if region.text.contains('\n') {
-            rp.paragraphs = region
-                .text
-                .split('\n')
-                .map(|t| Paragraph {
-                    text: t.to_string(),
-                    align: Align::Left,
-                    first_line_indent: 0.0,
-                    font_family: None,
-                    runs: Vec::new(),
-                })
-                .collect();
-        } else {
-            rp.text = region.text.clone();
-        }
-        // ---- 逐区域覆盖项（None = 跟随主设置，即 clone 自全局的现值） ----
         if let Some(v) = region.word_spacing {
             rp.word_spacing = v;
         }
@@ -322,8 +370,44 @@ impl DefaultEngine {
         if let Some(c) = region.fill {
             rp.fill = c;
         }
-        // ---- 打印体：零扰动、零错字（优先于任何覆盖项） ----
         if region.printed {
+            is_printed = true;
+        }
+
+        // 段落/对齐/首行缩进：
+        if !region.paragraphs.is_empty() {
+            rp.paragraphs = region.paragraphs.clone();
+            rp.text.clear();
+        } else if region.align != 0 || region.indent_em > 0.0 {
+            rp.paragraphs = vec![Paragraph {
+                text: region.text.clone(),
+                align: match region.align {
+                    1 => Align::Center,
+                    2 => Align::Right,
+                    _ => Align::Left,
+                },
+                first_line_indent: region.indent_em * rp.font_size,
+                font_family: None,
+                runs: Vec::new(),
+            }];
+        } else if region.text.contains('\n') {
+            rp.paragraphs = region
+                .text
+                .split('\n')
+                .map(|t| Paragraph {
+                    text: t.to_string(),
+                    align: Align::Left,
+                    first_line_indent: 0.0,
+                    font_family: None,
+                    runs: Vec::new(),
+                })
+                .collect();
+        } else {
+            rp.text = region.text.clone();
+        }
+
+        // 打印体：零扰动、零错字（优先于任何覆盖项）
+        if is_printed {
             rp.word_spacing_sigma = 0.0;
             rp.line_spacing_sigma = 0.0;
             rp.font_size_sigma = 0.0;
@@ -385,13 +469,27 @@ impl DefaultEngine {
             }
         }
         for region in &params.regions {
-            if !region.font_path.is_empty() {
+            let role = params.roles.iter().find(|r| r.id == region.role_id && r.id != 0);
+            let font_path = if !region.font_path.is_empty() {
+                Some(region.font_path.clone())
+            } else if let Some(role) = role {
+                if !role.font_path.is_empty() {
+                    Some(role.font_path.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(path) = font_path {
                 let size = if region.font_size > 0 {
                     region.font_size as f32
+                } else if let Some(fs) = role.and_then(|r| r.font_size) {
+                    fs
                 } else {
                     params.font_size
                 };
-                to_load.push((region.font_path.clone(), size));
+                to_load.push((path, size));
             }
             for para in &region.paragraphs {
                 for run in para.effective_runs() {
@@ -916,7 +1014,7 @@ pub fn overlay_bounds(img: &RgbaImage, params: &HandwritingParams, color: [u8; 3
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::models::{Align, Paragraph, TextRun, TextRunStyle};
+    use crate::core::models::{Align, HandwritingRole, Paragraph, TextRegion, TextRun, TextRunStyle};
     use image::Rgb;
     use std::fs;
 
@@ -1977,6 +2075,57 @@ mod tests {
             .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 255 { Some(idx) } else { None })
             .collect();
         assert_ne!(blue_px1, blue_px2, "手写体 Run 3 跨 seed 应受扰动影响具有不同像素坐标");
+    }
+
+    #[test]
+    fn test_region_inherits_role_attributes() {
+        let fonts = system_fonts();
+        if fonts.is_empty() {
+            return;
+        }
+        let role_font = fonts[0].to_string_lossy().into_owned();
+        let main_font = if fonts.len() > 1 {
+            fonts[1].to_string_lossy().into_owned()
+        } else {
+            fonts[0].to_string_lossy().into_owned()
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = region_test_params(&fonts[0], &dir);
+        params.font_path = main_font;
+        params.fill = [0, 0, 0];
+        params.roles = vec![HandwritingRole {
+            id: 2,
+            name: "高亮角色2".into(),
+            highlight: Some("yellow".into()),
+            font_path: role_font.clone(),
+            printed: false,
+            font_size: Some(26.0),
+            fill: Some([255, 0, 0]),
+            word_spacing: Some(5.0),
+            line_spacing: Some(30.0),
+            ..Default::default()
+        }];
+
+        let region = TextRegion {
+            x: 10,
+            y: 10,
+            w: 200,
+            h: 40,
+            text: "继承测试".into(),
+            role_id: 2,
+            font_path: String::new(), // 未显式指定字体，应继承 role.font_path
+            fill: None, // 未显式指定颜色，应继承 role.fill
+            font_size: 0, // 未显式指定字号，应继承 role.font_size
+            ..Default::default()
+        };
+
+        let local_params = DefaultEngine::region_local_params(&params, &region);
+        assert_eq!(local_params.font_path, role_font);
+        assert_eq!(local_params.fill, [255, 0, 0]);
+        assert_eq!(local_params.font_size, 26.0);
+        assert_eq!(local_params.word_spacing, 5.0);
+        assert_eq!(local_params.line_spacing, 30.0);
     }
 }
 

@@ -42,15 +42,36 @@ impl From<std::io::Error> for DocRenderError {
 }
 
 /// 像素包围盒。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundingBox {
     pub min_x: u32,
     pub min_y: u32,
     pub max_x: u32,
     pub max_y: u32,
+    pub highlight: Option<String>,
 }
 
 impl BoundingBox {
+    pub fn new(min_x: u32, min_y: u32, max_x: u32, max_y: u32) -> Self {
+        Self {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+            highlight: None,
+        }
+    }
+
+    pub fn with_highlight(min_x: u32, min_y: u32, max_x: u32, max_y: u32, highlight: impl Into<String>) -> Self {
+        Self {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+            highlight: Some(highlight.into()),
+        }
+    }
+
     pub fn width(&self) -> u32 {
         self.max_x.saturating_sub(self.min_x) + 1
     }
@@ -65,6 +86,7 @@ impl BoundingBox {
             min_y: self.min_y.min(other.min_y),
             max_x: self.max_x.max(other.max_x),
             max_y: self.max_y.max(other.max_y),
+            highlight: self.highlight.clone().or_else(|| other.highlight.clone()),
         }
     }
 
@@ -73,6 +95,38 @@ impl BoundingBox {
             && self.max_x >= other.min_x
             && self.min_y <= other.max_y
             && self.max_y >= other.min_y
+    }
+}
+
+/// 将 RGB 高亮颜色分类为标准颜色名称（如 "yellow", "green", "cyan", "magenta", "pink", "red", "blue" 等）。
+pub fn classify_highlight_color(r: u8, g: u8, b: u8) -> &'static str {
+    let (rf, gf, bf) = (r as f32, g as f32, b as f32);
+    if rf > 160.0 && gf > 160.0 && bf < 140.0 {
+        "yellow"
+    } else if gf > 150.0 && bf > 150.0 && rf < 150.0 {
+        "cyan"
+    } else if rf > 180.0 && bf > 140.0 && gf < 170.0 {
+        if gf < 100.0 && bf > 180.0 {
+            "magenta"
+        } else {
+            "pink"
+        }
+    } else if gf > rf && gf > bf {
+        "green"
+    } else if bf > rf && bf > gf {
+        if gf > 140.0 {
+            "cyan"
+        } else {
+            "blue"
+        }
+    } else if rf > gf && rf > bf {
+        if bf > 100.0 {
+            "pink"
+        } else {
+            "red"
+        }
+    } else {
+        "yellow"
     }
 }
 
@@ -135,6 +189,9 @@ pub fn detect_highlight_boxes(img: &image::RgbImage) -> Vec<BoundingBox> {
             let mut min_y = y;
             let mut max_y = y;
             let mut count = 0usize;
+            let mut sum_r: u64 = pixel[0] as u64;
+            let mut sum_g: u64 = pixel[1] as u64;
+            let mut sum_b: u64 = pixel[2] as u64;
 
             let mut head = 0;
             while head < queue.len() {
@@ -157,6 +214,9 @@ pub fn detect_highlight_boxes(img: &image::RgbImage) -> Vec<BoundingBox> {
                             if is_highlight_pixel(np[0], np[1], np[2]) {
                                 visited[n_idx] = true;
                                 queue.push((nx as u32, ny as u32));
+                                sum_r += np[0] as u64;
+                                sum_g += np[1] as u64;
+                                sum_b += np[2] as u64;
                             }
                         }
                     }
@@ -168,11 +228,16 @@ pub fn detect_highlight_boxes(img: &image::RgbImage) -> Vec<BoundingBox> {
 
             // 过滤噪声：最小宽度 >= 15，最小高度 >= 8，像素数 >= 30
             if bw >= 15 && bh >= 8 && count >= 30 {
+                let avg_r = (sum_r / count as u64) as u8;
+                let avg_g = (sum_g / count as u64) as u8;
+                let avg_b = (sum_b / count as u64) as u8;
+                let color_name = classify_highlight_color(avg_r, avg_g, avg_b);
                 raw_boxes.push(BoundingBox {
                     min_x,
                     min_y,
                     max_x,
                     max_y,
+                    highlight: Some(color_name.to_string()),
                 });
             }
         }
@@ -238,7 +303,7 @@ pub fn merge_close_boxes(mut boxes: Vec<BoundingBox>) -> Vec<BoundingBox> {
             if merged[i] {
                 continue;
             }
-            let mut current = boxes[i];
+            let mut current = boxes[i].clone();
             for j in (i + 1)..boxes.len() {
                 if merged[j] {
                     continue;
@@ -765,6 +830,28 @@ pub fn combine_page_regions(
     page_num: i32,
     scale: f32,
 ) -> Vec<TextRegion> {
+    let mut color_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut next_role_id = 2u32;
+    combine_page_regions_with_role_map(
+        highlight_boxes,
+        tag_regions,
+        page_chars,
+        page_num,
+        scale,
+        &mut color_map,
+        &mut next_role_id,
+    )
+}
+
+pub fn combine_page_regions_with_role_map(
+    highlight_boxes: Vec<BoundingBox>,
+    tag_regions: Vec<TextRegion>,
+    page_chars: &[ExtractedChar],
+    page_num: i32,
+    scale: f32,
+    color_map: &mut std::collections::HashMap<String, u32>,
+    next_role_id: &mut u32,
+) -> Vec<TextRegion> {
     let mut final_regions: Vec<TextRegion> = Vec::new();
     let mut matched_tags = vec![false; tag_regions.len()];
 
@@ -773,6 +860,17 @@ pub fn combine_page_regions(
         let by = b.min_y as i32;
         let bw = b.width() as i32;
         let bh = b.height() as i32;
+
+        let (role_id, highlight) = if let Some(c) = &b.highlight {
+            let rid = *color_map.entry(c.clone()).or_insert_with(|| {
+                let id = *next_role_id;
+                *next_role_id += 1;
+                id
+            });
+            (rid, Some(c.clone()))
+        } else {
+            (0, None)
+        };
 
         // 从字符中提取文字与字号
         let (extracted_text, detected_font_size) =
@@ -810,6 +908,8 @@ pub fn combine_page_regions(
             w: bw,
             h: bh,
             text,
+            role_id,
+            highlight,
             printed: false,
             page: page_num,
             font_size,
@@ -883,6 +983,8 @@ pub fn pdf_to_images_with_regions(
     let scale = dpi as f32 / 72.0;
     let mut paths = Vec::new();
     let mut all_regions = Vec::new();
+    let mut color_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut next_role_id = 2u32;
 
     for (index, page) in document.pages().iter().enumerate() {
         // 目标像素尺寸：页面点数（1/72 英寸）× dpi/72
@@ -912,12 +1014,14 @@ pub fn pdf_to_images_with_regions(
         erase_highlight_boxes(&mut rgb_img, &highlight_boxes);
 
         // 4. 合并高亮框与文本标签区域，提取高亮框内部文字和字号
-        let page_regions = combine_page_regions(
+        let page_regions = combine_page_regions_with_role_map(
             highlight_boxes,
             tag_regions,
             &page_chars,
             (index + 1) as i32,
             scale,
+            &mut color_map,
+            &mut next_role_id,
         );
         all_regions.extend(page_regions);
 
@@ -1334,12 +1438,7 @@ mod tests {
             },
         ];
 
-        let b1 = BoundingBox {
-            min_x: 95,
-            min_y: 45,
-            max_x: 150,
-            max_y: 75,
-        };
+        let b1 = BoundingBox::new(95, 45, 150, 75);
 
         let (text1, fs1) = extract_text_and_font_size_for_box(&chars, &b1, scale);
         assert_eq!(text1, "张三");
@@ -1347,12 +1446,7 @@ mod tests {
         assert_eq!(fs1, expected_fs);
 
         // 空高亮框
-        let b_empty = BoundingBox {
-            min_x: 300,
-            min_y: 300,
-            max_x: 350,
-            max_y: 330,
-        };
+        let b_empty = BoundingBox::new(300, 300, 350, 330);
         let (text_empty, _) = extract_text_and_font_size_for_box(&chars, &b_empty, scale);
         assert_eq!(text_empty, "");
     }
@@ -1412,12 +1506,7 @@ mod tests {
             },
         ];
 
-        let b = BoundingBox {
-            min_x: 45,
-            min_y: 95,
-            max_x: 110,
-            max_y: 160,
-        };
+        let b = BoundingBox::new(45, 95, 110, 160);
 
         let (text, _) = extract_text_and_font_size_for_box(&chars, &b, scale);
         assert_eq!(text, "第一行\n第二行");
@@ -1427,18 +1516,8 @@ mod tests {
     fn test_combine_page_regions() {
         let scale = 200.0 / 72.0;
         let highlight_boxes = vec![
-            BoundingBox {
-                min_x: 50,
-                min_y: 100,
-                max_x: 250,
-                max_y: 140,
-            },
-            BoundingBox {
-                min_x: 300,
-                min_y: 500,
-                max_x: 400,
-                max_y: 530,
-            },
+            BoundingBox::with_highlight(50, 100, 250, 140, "yellow"),
+            BoundingBox::with_highlight(300, 500, 400, 530, "cyan"),
         ];
 
         let tag_regions = vec![
@@ -1495,24 +1574,30 @@ mod tests {
         let combined = combine_page_regions(highlight_boxes, tag_regions, &page_chars, 1, scale);
         assert_eq!(combined.len(), 3);
 
-        // 1. (50, 100) 处与字符重叠，拥有高亮框尺寸和提取的文字及字号
+        // 1. (50, 100) 处与字符重叠，拥有高亮框尺寸和提取的文字及字号，分配为 Role 2
         let r1 = combined.iter().find(|r| r.x == 50 && r.y == 100).unwrap();
         assert_eq!(r1.w, 201);
         assert_eq!(r1.h, 41);
         assert_eq!(r1.text, "请签名");
         assert_eq!(r1.page, 1);
         assert_eq!(r1.font_size, (12.0 * scale).round() as i32);
+        assert_eq!(r1.role_id, 2);
+        assert_eq!(r1.highlight, Some("yellow".into()));
 
-        // 2. (100, 300) 处的独立标签
+        // 2. (100, 300) 处的独立标签 (role_id 0, highlight None)
         let r2 = combined.iter().find(|r| r.x == 100 && r.y == 300).unwrap();
         assert_eq!(r2.w, 120);
         assert_eq!(r2.text, "独立标签");
         assert_eq!(r2.font_size, 24);
+        assert_eq!(r2.role_id, 0);
+        assert_eq!(r2.highlight, None);
 
-        // 3. (300, 500) 处的独立高亮框（无文字）
+        // 3. (300, 500) 处的独立高亮框（无文字），分配为 Role 3
         let r3 = combined.iter().find(|r| r.x == 300 && r.y == 500).unwrap();
         assert_eq!(r3.w, 101);
         assert_eq!(r3.text, "");
+        assert_eq!(r3.role_id, 3);
+        assert_eq!(r3.highlight, Some("cyan".into()));
     }
 
     #[test]

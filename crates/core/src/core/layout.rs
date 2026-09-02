@@ -353,7 +353,15 @@ pub fn layout_text(
     let normal_strike = Normal::new(0.0, 0.15).unwrap();
 
     let mut i = start;
-    let mut y = params.first_line_y();
+    let mut y = if force_first_line {
+        if params.top_margin > 0.0 {
+            params.top_margin
+        } else {
+            ((height as f32 - params.font_size) / 2.0).max(0.0)
+        }
+    } else {
+        params.first_line_y()
+    };
     let mut first_line = true;
 
     while y <= height as f32 - params.bottom_margin - params.font_size
@@ -1540,6 +1548,37 @@ mod tests {
 
         let r3 = line.layers.iter().find(|l| l.style.fill == [0, 255, 0]).unwrap();
         assert!(!r3.style.printed);
+    }
+
+    #[test]
+    fn test_small_region_layout_produces_visible_ink() {
+        let Some(path) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let font = FontFace::load(&path, 36.0).unwrap();
+        let p = HandwritingParams {
+            font_size: 36.0,
+            line_spacing: 97.0, // 模拟页面预设的极大行间距
+            left_margin: 0.0,
+            right_margin: 0.0,
+            top_margin: 0.0,
+            bottom_margin: 0.0,
+            ..HandwritingParams::default()
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        // 单行矮区域：宽 200，高 44，字号 36
+        let res = layout_text(&p, &font, &mut rng, "思想汇报", 0, 200, 44, true);
+        assert_eq!(res.consumed, 4, "应消费全部 4 个字符");
+        assert!(
+            res.mask.iter().any(|&b| b),
+            "矮区域 (h=44, font_size=36) 应在包围盒 [0, 44) 内部生成有效前景像素"
+        );
+
+        let has_ink_in_bounds = res.mask.chunks(200).enumerate().any(|(y, row)| {
+            y < 44 && row.iter().any(|&b| b)
+        });
+        assert!(has_ink_in_bounds, "前景像素必须落在 [0, 44) 范围内");
     }
 }
 

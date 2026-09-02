@@ -61,6 +61,10 @@ export interface UiRegion {
   w: number;
   h: number;
   text: string;
+  /** 绑定的角色 ID（0 为默认角色） */
+  roleId?: number;
+  /** 绑定的高亮颜色名称（如 "yellow", "cyan", "pink", null = 无高亮） */
+  highlight?: string | null;
   fontPath: string;
   printed: boolean;
   fontSize: number;

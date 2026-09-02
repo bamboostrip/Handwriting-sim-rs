@@ -185,6 +185,12 @@ pub struct UiRegion {
     pub h: i32,
     /// 区域文字（空文字区域会被前端拒绝提交）
     pub text: String,
+    /// 绑定的角色 ID（0 为默认角色）
+    #[serde(default)]
+    pub role_id: u32,
+    /// 绑定的高亮颜色名称（如 "yellow", "cyan", "pink", None = 无高亮）
+    #[serde(default)]
+    pub highlight: Option<String>,
     /// 打印字体路径（空 = 使用主字体）
     pub font_path: String,
     /// true = 打印体（无笔画扰动、排版规整）
@@ -237,6 +243,8 @@ impl From<&TextRegion> for UiRegion {
             w: r.w,
             h: r.h,
             text: r.text.clone(),
+            role_id: r.role_id,
+            highlight: r.highlight.clone(),
             font_path: r.font_path.clone(),
             printed: r.printed,
             font_size: r.font_size,
@@ -559,6 +567,8 @@ impl UiParams {
                     w: r.w,
                     h: r.h,
                     text: r.text.trim().to_string(),
+                    role_id: r.role_id,
+                    highlight: r.highlight.clone(),
                     font_path: r.font_path.trim().to_string(),
                     printed: r.printed,
                     font_size: r.font_size,
@@ -848,6 +858,8 @@ mod tests {
             w: 100,
             h: 50,
             text: "测试填空".into(),
+            role_id: 2,
+            highlight: Some("yellow".into()),
             font_path: "fonts/test.ttf".into(),
             printed: true,
             font_size: 24,
@@ -871,6 +883,8 @@ mod tests {
         assert_eq!(ui_region.w, 100);
         assert_eq!(ui_region.h, 50);
         assert_eq!(ui_region.text, "测试填空");
+        assert_eq!(ui_region.role_id, 2);
+        assert_eq!(ui_region.highlight, Some("yellow".into()));
         assert_eq!(ui_region.font_path, "fonts/test.ttf");
         assert!(ui_region.printed);
         assert_eq!(ui_region.font_size, 24);

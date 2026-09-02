@@ -104,6 +104,12 @@ pub struct TextRegion {
     /// 区域内文字（支持多行）。
     #[serde(default)]
     pub text: String,
+    /// 绑定的角色 ID（0 为默认角色）。
+    #[serde(default)]
+    pub role_id: u32,
+    /// 绑定的高亮颜色名称（如 "yellow", "green", "cyan", "magenta", "pink", None = 无高亮）。
+    #[serde(default)]
+    pub highlight: Option<String>,
     /// 区域独立字体；空 = 使用主字体。
     #[serde(default)]
     pub font_path: String,
@@ -181,6 +187,8 @@ impl Default for TextRegion {
         Self {
             x: 0, y: 0, w: 0, h: 0,
             text: String::new(),
+            role_id: 0,
+            highlight: None,
             font_path: String::new(),
             printed: false,
             font_size: 0,
@@ -210,7 +218,9 @@ impl Default for TextRegion {
 impl TextRegion {
     /// 是否设置了任意一项逐区域覆盖（列表摘要标记用）。
     pub fn has_overrides(&self) -> bool {
-        self.word_spacing.is_some()
+        self.role_id != 0
+            || self.highlight.is_some()
+            || self.word_spacing.is_some()
             || self.line_spacing.is_some()
             || self.font_size_sigma.is_some()
             || self.word_spacing_sigma.is_some()
