@@ -270,6 +270,7 @@ impl DefaultEngine {
                     _ => Align::Left,
                 },
                 first_line_indent: region.indent_em * rp.font_size,
+                runs: Vec::new(),
             }];
         } else if region.text.contains('\n') {
             rp.paragraphs = region
@@ -279,6 +280,7 @@ impl DefaultEngine {
                     text: t.to_string(),
                     align: Align::Left,
                     first_line_indent: 0.0,
+                    runs: Vec::new(),
                 })
                 .collect();
         } else {
@@ -898,11 +900,13 @@ mod tests {
                 text: "第一段文字，居中。".into(),
                 align: Align::Center,
                 first_line_indent: 40.0,
+                runs: Vec::new(),
             },
             Paragraph {
                 text: "第二段文字，右对齐。".into(),
                 align: Align::Right,
                 first_line_indent: 0.0,
+                runs: Vec::new(),
             },
         ];
         params.text = String::new();
@@ -1084,6 +1088,7 @@ mod tests {
             text: "第一段".into(),
             align: Align::Left,
             first_line_indent: 280.0, // 2 字宽（2 × font_size 140）
+            runs: Vec::new(),
         }];
         // 背景宽 2560（> PREVIEW_MAX_WIDTH 1280）→ scale = 0.5
         let scaled = scaled_params_for(&params, 2560);
@@ -1326,8 +1331,8 @@ mod tests {
             x: 40, y: 40, w: 300, h: 200,
             text: "你好\n张三".into(),
             paragraphs: vec![
-                Paragraph { text: "你好".into(), align: Align::Center, first_line_indent: 0.0 },
-                Paragraph { text: "张三".into(), align: Align::Right, first_line_indent: 0.0 },
+                Paragraph { text: "你好".into(), align: Align::Center, first_line_indent: 0.0, runs: Vec::new() },
+                Paragraph { text: "张三".into(), align: Align::Right, first_line_indent: 0.0, runs: Vec::new() },
             ],
             ..TextRegion::default()
         }];

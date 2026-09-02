@@ -67,7 +67,7 @@ pub fn load_paragraphs(path: &Path, font_size: f32) -> Result<Vec<Paragraph>, St
         let text = text.trim().to_string();
         let align = resolve_align(&fmt);
         let indent = resolve_indent(&fmt, font_size, &styles, doc_defaults_sz);
-        result.push(Paragraph { text, align, first_line_indent: indent });
+        result.push(Paragraph { text, align, first_line_indent: indent, runs: Vec::new() });
     }
     Ok(result)
 }

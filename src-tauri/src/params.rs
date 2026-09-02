@@ -259,6 +259,7 @@ impl UiParams {
                 text: clean_text(&row.text),
                 align: align_of(row.align),
                 first_line_indent: row.indent_em * self.font_size,
+                runs: Vec::new(),
             })
             .collect();
         if !p.paragraphs.is_empty() {
@@ -288,6 +289,7 @@ impl UiParams {
                         text: clean_text(&row.text),
                         align: align_of(row.align),
                         first_line_indent: row.indent_em * region_fs,
+                        runs: Vec::new(),
                     })
                     .collect();
                 Ok(TextRegion {

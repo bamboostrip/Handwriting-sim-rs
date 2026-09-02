@@ -716,6 +716,7 @@ mod tests {
             text: "第一行文字，第二行测试。".into(),
             align: Align::Left,
             first_line_indent: 0.0,
+            runs: Vec::new(),
         }
     }
 
