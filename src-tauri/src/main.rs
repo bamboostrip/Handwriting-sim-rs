@@ -10,6 +10,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod params;
+mod system_fonts;
 mod updater;
 
 use std::path::{Path, PathBuf};
@@ -353,6 +354,12 @@ fn get_system_theme(app: AppHandle) -> String {
     "light".to_string()
 }
 
+/// 获取系统已安装字体列表
+#[tauri::command]
+fn list_system_fonts() -> Vec<system_fonts::SystemFontItem> {
+    system_fonts::list_system_fonts()
+}
+
 pub fn run() {
     init_webview2_fixed_runtime();
     tauri::Builder::default()
@@ -376,7 +383,8 @@ pub fn run() {
             download_update,
             apply_portable_update,
             open_url,
-            get_system_theme
+            get_system_theme,
+            list_system_fonts
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::ThemeChanged(theme) = event {
