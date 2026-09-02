@@ -76,7 +76,8 @@ function openInBrowser(): void {
 async function startAutoUpdate(): Promise<void> {
   const assetUrl = info.value?.assetUrl;
   if (!assetUrl) {
-    // 若 release 中没有直接的 exe/zip 资产，退回浏览器手动下载
+    // 若 release 中没有当前平台的 exe/zip 直链资产，退回浏览器手动下载
+    message.warning("未能获取当前平台的更新包直链，已为你打开浏览器下载页，请手动下载更新。");
     openInBrowser();
     return;
   }

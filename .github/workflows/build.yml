@@ -200,6 +200,7 @@ jobs:
         run: codesign --force --deep -s - "target/release/${{ matrix.exe_name }}"
 
       # 组装便携包：二进制 + 预设 + 背景 + 空 fonts 目录（用户自备字体）
+      # 同时产出单文件 exe（老用户升级直接替换旧 exe，应用内自动更新优先使用）
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -210,6 +211,7 @@ jobs:
           Copy-Item "target/release/${{ matrix.exe_name }}" "staging/"
           Copy-Item "packaging/fonts-README.txt" "staging/fonts/README.txt"
           Compress-Archive -Path "staging/*" -DestinationPath "${{ matrix.artifact }}.zip" -Force
+          Copy-Item "target/release/${{ matrix.exe_name }}" "${{ matrix.artifact }}.exe"
 
       - name: Package (Linux / macOS)
         if: runner.os != 'Windows'
@@ -230,6 +232,15 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.zip
+          if-no-files-found: error
+
+      # 单文件版：老用户升级无需下载整包，直接替换旧 exe 即可
+      - name: Upload single-file exe (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}-exe
+          path: ${{ matrix.artifact }}.exe
           if-no-files-found: error
 
   # ── Windows 便携版（内置 WebView2 Fixed Runtime，解压即用，无需安装）──
@@ -394,5 +405,7 @@ jobs:
       - name: Publish Release
         uses: softprops/action-gh-release@v3
         with:
-          files: artifacts/**/*.zip
+          files: |
+            artifacts/**/*.zip
+            artifacts/**/*.exe
           body_path: RELEASE_NOTES.md

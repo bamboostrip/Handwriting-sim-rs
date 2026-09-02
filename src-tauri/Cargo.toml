@@ -23,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "blocking", "default-tls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 handwrite-sim = { path = "../crates/core" }
 
 

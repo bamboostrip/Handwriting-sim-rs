@@ -4,12 +4,13 @@
 
 | 文件名 | 平台 | 是否内置 WebView2 | 大小（约） | 适合谁 |
 |---|---|---|---|---|
-| `handwrite-sim-windows-x86_64.zip` | Windows x64 | ❌ 否（需系统已装 WebView2，Win10/11 通常自带） | ~10 MB | 已有 WebView2、追求轻量/便携，U盘拷贝 |
+| `handwrite-sim-windows-x86_64.zip` | Windows x64 | ❌ 否（需系统已装 WebView2，Win10/11 通常自带） | ~30 MB | 新用户首次下载：exe + 预设 + 背景整套便携包 |
+| `handwrite-sim-windows-x86_64.exe` | Windows x64 | ❌ 否（同上） | ~30 MB | **已有便携包的老用户升级**：下载后直接替换旧的 `handwrite-sim.exe` 即可（应用内「立即自动更新」优先使用该单文件） |
 | `handwrite-sim-windows-x86_64-webview2.zip` | Windows x64 | ✅ 是（**Fixed Runtime 便携**，exe 旁 `WebView2/` 目录，启动时 `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` 指向它） | ~150 MB | **报错/离线/受限账户/精简系统**：解压即用，无需安装，无需联网，无需管理员 |
 | `handwrite-sim-linux-x86_64.zip` | Linux x64 | —（依赖系统 WebKitGTK，非 WebView2） | ~10 MB | Linux 用户 |
 | `handwrite-sim-macos-arm64.zip` | macOS Apple Silicon | —（系统 WKWebView） | ~10 MB | macOS 用户 |
 
-> 整体 4 文件：原 3 便携（win/linux/macos）保留，v0.3.1 为 Windows **额外新增 1 个便携免安装的 WebView2 版**。Linux/macOS 不使用 WebView2，无需额外打包。小工具免安装，暂不提供 NSIS/MSI 安装包。
+> 整体 5 文件：3 个平台便携包（win/linux/macos）+ Windows WebView2 免安装版 + Windows 单文件升级包。Linux/macOS 不使用 WebView2，无需额外打包。小工具免安装，暂不提供 NSIS/MSI 安装包。
 
 ### Windows 该下哪个？
 
