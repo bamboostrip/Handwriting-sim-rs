@@ -922,6 +922,37 @@ export async function importDocument(): Promise<void> {
     store.backgroundPath = res.pages[0];
     loadBgDimensions(res.pages[0]);
     if (res.regions.length > 0) {
+      const detectedRoleIds = Array.from(
+        new Set(
+          res.regions
+            .map((r) => r.roleId)
+            .filter((id): id is number => typeof id === "number" && id >= 2),
+        ),
+      ).sort((a, b) => a - b);
+
+      for (const roleId of detectedRoleIds) {
+        const matchingRegion =
+          res.regions.find((r) => r.roleId === roleId && r.highlight) ||
+          res.regions.find((r) => r.roleId === roleId);
+        const highlight = matchingRegion?.highlight ?? null;
+        const hlInfo = getHighlightInfo(highlight);
+        const name = `手写角色 ${roleId - 1}${hlInfo ? ` (${hlInfo.name})` : ""}`;
+        const existingRole = store.roles.find((r) => r.id === roleId);
+        if (existingRole) {
+          if (!existingRole.highlight && highlight) existingRole.highlight = highlight;
+        } else {
+          store.roles.push({
+            id: roleId,
+            name,
+            fontPath: "",
+            printed: false,
+            highlight: highlight ?? null,
+            fill: null,
+          });
+        }
+      }
+      store.roles.sort((a, b) => a.id - b.id);
+
       store.regions = res.regions;
       store.selectedRegionIndex = 0;
       store.status = `已导入文档底图（共 ${res.pages.length} 页），并自动识别提取了 ${res.regions.length} 处手写填空区域！`;
@@ -1255,7 +1286,18 @@ export function regionHasOverrides(r: Region): boolean {
 
 /** 区域列表摘要（对齐 models.rs TextRegion::label；自定义过追加 ⚙ 标记）。 */
 export function regionLabel(r: Region, index: number): string {
-  const style = r.printed ? "打印" : "手写";
+  let style = r.printed ? "🖨️ 打印" : "✍️ 手写";
+  if (r.roleId && r.roleId >= 2) {
+    const role = store.roles.find((role) => role.id === r.roleId);
+    if (role) {
+      const badge = getRoleBadgeInfo(role);
+      style = `${badge.icon} ${role.name}`;
+    } else {
+      const hlInfo = getHighlightInfo(r.highlight);
+      const icon = hlInfo?.icon || "✍️";
+      style = `${icon} 手写角色 ${r.roleId - 1}${hlInfo ? ` (${hlInfo.name})` : ""}`;
+    }
+  }
   const page = r.page > 1 ? ` 第${r.page}页` : "";
   const custom = regionHasOverrides(r) ? " ⚙" : "";
   return `${index}. ${style}${page} ${[...r.text].length}字 (${r.x},${r.y} ${r.w}×${r.h})${custom}`;
@@ -1297,6 +1339,8 @@ const defaultRegionDraft = (page: number): Region => ({
   w: 0,
   h: 0,
   text: "",
+  roleId: 0,
+  highlight: null,
   fontPath: "",
   printed: false,
   fontSize: 0,
@@ -1329,6 +1373,9 @@ export function openEditRegionDialog(index: number): void {
   if (!r) return;
   store.dialogTargetIndex = index;
   const draft: Region = { ...r };
+  if (draft.roleId === undefined) {
+    draft.roleId = draft.printed ? 1 : 0;
+  }
   if (!draft.paragraphs || draft.paragraphs.length === 0) {
     if (draft.text) {
       draft.paragraphs = draft.text.split("\n").map((line) => ({

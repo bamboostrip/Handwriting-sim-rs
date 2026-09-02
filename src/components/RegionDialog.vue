@@ -29,7 +29,9 @@ import {
   cancelRegionDialog,
   cleanText,
   confirmRegionDialog,
+  getRoleBadgeInfo,
   importDocxToDraft,
+  isDarkActive,
   regionHasOverrides,
   store,
 } from "../store";
@@ -53,6 +55,35 @@ watch(
 const draft = computed(() => store.dialogDraft);
 const isPrinted = computed(() => draft.value?.printed ?? false);
 const isNew = computed(() => store.dialogTargetIndex < 0);
+
+const roleOptions = computed(() =>
+  store.roles.map((r) => {
+    const badge = getRoleBadgeInfo(r, isDarkActive());
+    return {
+      label: `${badge.icon} ${r.name}`,
+      value: r.id,
+    };
+  }),
+);
+
+const selectedRoleId = computed<number>({
+  get: () => draft.value?.roleId ?? (draft.value?.printed ? 1 : 0),
+  set: (val: number) => {
+    onRoleChange(val);
+  },
+});
+
+function onRoleChange(roleId: number): void {
+  if (!draft.value) return;
+  draft.value.roleId = roleId;
+  const role = store.roles.find((r) => r.id === roleId);
+  if (role) {
+    draft.value.printed = role.printed;
+    if (role.highlight) {
+      draft.value.highlight = role.highlight;
+    }
+  }
+}
 
 const curPara = computed<UiParagraph | undefined>(
   () => draft.value?.paragraphs?.[curRowIndex.value],
@@ -176,9 +207,33 @@ async function onConfirm(): Promise<void> {
 
       <!-- 基础参数：统一「标签列 + 控件列」网格 -->
       <div class="dlg-basic-grid">
+        <span class="field-label">绑定角色</span>
+        <div class="field-control">
+          <NSelect
+            :value="selectedRoleId"
+            size="small"
+            :options="roleOptions"
+            style="flex: 1"
+            placeholder="选择笔迹或打印角色"
+            @update:value="onRoleChange"
+          />
+        </div>
+
         <span class="field-label">样式</span>
         <div class="field-control">
-          <NRadioGroup v-model:value="draft.printed" size="small">
+          <NRadioGroup
+            v-model:value="draft.printed"
+            size="small"
+            @update:value="(printed: boolean) => {
+              if (draft) {
+                if (printed && draft.roleId === 0) {
+                  draft.roleId = 1;
+                } else if (!printed && draft.roleId === 1) {
+                  draft.roleId = 0;
+                }
+              }
+            }"
+          >
             <NRadioButton :value="false">手写体</NRadioButton>
             <NRadioButton :value="true">打印体</NRadioButton>
           </NRadioGroup>
