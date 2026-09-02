@@ -10,6 +10,92 @@ use rand_distr::{Distribution, Normal};
 use crate::core::font::FontFace;
 use crate::core::models::{Align, HandwritingParams, MiswriteMode, Paragraph, StrikeoutStyle};
 
+/// 单个样式层的扰动与颜色参数。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerturbStyle {
+    pub fill: [u8; 3],
+    pub printed: bool,
+    pub perturb_x_sigma: f32,
+    pub perturb_y_sigma: f32,
+    pub perturb_theta_sigma: f32,
+}
+
+impl PerturbStyle {
+    pub fn new(fill: [u8; 3], printed: bool, px: f32, py: f32, pt: f32) -> Self {
+        if printed {
+            Self {
+                fill,
+                printed: true,
+                perturb_x_sigma: 0.0,
+                perturb_y_sigma: 0.0,
+                perturb_theta_sigma: 0.0,
+            }
+        } else {
+            Self {
+                fill,
+                printed: false,
+                perturb_x_sigma: px,
+                perturb_y_sigma: py,
+                perturb_theta_sigma: pt,
+            }
+        }
+    }
+
+    pub fn is_printed(&self) -> bool {
+        self.printed
+            || (self.perturb_x_sigma == 0.0
+                && self.perturb_y_sigma == 0.0
+                && self.perturb_theta_sigma == 0.0)
+    }
+
+    pub fn matches(&self, other: &PerturbStyle) -> bool {
+        self.fill == other.fill
+            && self.is_printed() == other.is_printed()
+            && (self.perturb_x_sigma - other.perturb_x_sigma).abs() < 1e-5
+            && (self.perturb_y_sigma - other.perturb_y_sigma).abs() < 1e-5
+            && (self.perturb_theta_sigma - other.perturb_theta_sigma).abs() < 1e-5
+    }
+}
+
+/// 单个样式层的掩码数据。
+#[derive(Debug, Clone)]
+pub struct StyledLayer {
+    pub style: PerturbStyle,
+    pub mask: Vec<bool>,
+}
+
+/// 一行排版结果，包含组合掩码与各样式分层。
+#[derive(Debug, Clone)]
+pub struct StyledLine {
+    /// 组合掩码（所有 layer 叠加，兼容已有测试与快速空判断）。
+    pub mask: Option<Vec<bool>>,
+    /// 相对该行绘制基线的垂直偏移。
+    pub offset: f32,
+    /// 各样式分层。
+    pub layers: Vec<StyledLayer>,
+}
+
+/// 一页排版结果，包含该页所有样式分层。
+#[derive(Debug, Clone)]
+pub struct StyledPage {
+    pub layers: Vec<StyledLayer>,
+}
+
+impl StyledPage {
+    /// 合并所有图层为单一布尔掩码（用于测试或单一背景渲染）。
+    pub fn to_combined_mask(&self, width: usize, height: usize) -> Vec<bool> {
+        let mut mask = vec![false; width * height];
+        for layer in &self.layers {
+            for (idx, &b) in layer.mask.iter().enumerate() {
+                if b && idx < mask.len() {
+                    mask[idx] = true;
+                }
+            }
+        }
+        mask
+    }
+}
+
 /// 一页排版结果。
 pub struct LayoutResult {
     /// `width * height` 的前景掩码（逐行）。
@@ -17,6 +103,7 @@ pub struct LayoutResult {
     /// 本页消费的字符数（含换行符）。
     pub consumed: usize,
 }
+
 
 /// 在掩码中画一条带厚度的线段（删除线用）。逐行 bool 掩码，越界自动忽略。
 #[allow(clippy::too_many_arguments)]
@@ -364,33 +451,142 @@ fn split_text_rows(rows: &[bool]) -> Vec<(usize, usize)> {
     groups
 }
 
-/// 渲染单个段落，返回逐行 [(该行墨迹裁剪掩码, 相对该行绘制基线的偏移)]。
-/// 空行对应 (None, 0.0)。画布按段落自身高度创建（不受页高裁剪）。
-pub fn layout_paragraph(
+/// 渲染单个段落（分层样式支持），返回逐行 `StyledLine`。
+pub fn layout_paragraph_styled<'f>(
     params: &HandwritingParams,
-    font: &FontFace,
+    default_font: &'f FontFace,
+    font_resolver: Option<&dyn Fn(&str) -> Option<&'f FontFace>>,
     rng: &mut impl Rng,
     paragraph: &Paragraph,
     width: usize,
-) -> Vec<(Option<Vec<bool>>, f32)> {
+) -> Vec<StyledLine> {
+
     let width_f = width as f32;
     let line_spacing = params.total_line_spacing();
     let end_chars = params.end_chars.as_str();
     let start_chars = params.start_chars.as_str();
-    let text = paragraph.text.as_str();
-    let chars: Vec<char> = text.chars().collect();
-    let text_len = chars.len();
 
-    let normal_line = Normal::new(0.0, f64::from(params.line_spacing_sigma)).unwrap();
-    let normal_word = Normal::new(0.0, f64::from(params.word_spacing_sigma)).unwrap();
-    let normal_font = Normal::new(0.0, f64::from(params.font_size_sigma)).unwrap();
+    let effective_runs = paragraph.effective_runs();
+
+    struct ResolvedChar<'a> {
+        ch: char,
+        font: &'a FontFace,
+        font_size: f32,
+        style: PerturbStyle,
+        word_spacing: f32,
+        word_spacing_sigma: f32,
+        line_spacing_sigma: f32,
+        font_size_sigma: f32,
+        miswrite_rate: f32,
+        miswrite_strikeout_style: StrikeoutStyle,
+    }
+
+    let mut resolved_chars: Vec<ResolvedChar> = Vec::new();
+
+    for run in &effective_runs {
+        let style = &run.style;
+        let role = params.roles.iter().find(|r| r.id == style.role_id);
+
+        let is_printed = style.printed || role.map_or(false, |r| r.printed) || style.role_id == 1;
+        let font_size = style
+            .font_size
+            .or_else(|| role.and_then(|r| r.font_size))
+            .unwrap_or(params.font_size);
+        let font_path = style
+            .font_path
+            .as_deref()
+            .or_else(|| role.map(|r| r.font_path.as_str()).filter(|p| !p.is_empty()))
+            .unwrap_or(&params.font_path);
+        let font = if let Some(resolver) = font_resolver {
+            resolver(font_path).unwrap_or(default_font)
+        } else {
+            default_font
+        };
+        let fill = style
+            .fill
+            .or_else(|| role.and_then(|r| r.fill))
+            .unwrap_or(params.fill);
+        let word_spacing = role
+            .and_then(|r| r.word_spacing)
+            .unwrap_or(params.word_spacing);
+
+        let (
+            word_spacing_sigma,
+            line_spacing_sigma,
+            font_size_sigma,
+            perturb_x_sigma,
+            perturb_y_sigma,
+            perturb_theta_sigma,
+            miswrite_rate,
+            miswrite_strikeout_style,
+        ) = if is_printed {
+            (
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                role.and_then(|r| r.miswrite_strikeout_style)
+                    .unwrap_or(params.miswrite_strikeout_style),
+            )
+        } else {
+            (
+                role.and_then(|r| r.word_spacing_sigma)
+                    .unwrap_or(params.word_spacing_sigma),
+                role.and_then(|r| r.line_spacing_sigma)
+                    .unwrap_or(params.line_spacing_sigma),
+                role.and_then(|r| r.font_size_sigma)
+                    .unwrap_or(params.font_size_sigma),
+                role.and_then(|r| r.perturb_x_sigma)
+                    .unwrap_or(params.perturb_x_sigma),
+                role.and_then(|r| r.perturb_y_sigma)
+                    .unwrap_or(params.perturb_y_sigma),
+                role.and_then(|r| r.perturb_theta_sigma)
+                    .unwrap_or(params.perturb_theta_sigma),
+                role.and_then(|r| r.miswrite_rate)
+                    .unwrap_or(params.miswrite_rate),
+                role.and_then(|r| r.miswrite_strikeout_style)
+                    .unwrap_or(params.miswrite_strikeout_style),
+            )
+        };
+
+        let perturb_style = PerturbStyle::new(
+            fill,
+            is_printed,
+            perturb_x_sigma,
+            perturb_y_sigma,
+            perturb_theta_sigma,
+        );
+
+        for ch in run.text.chars() {
+            resolved_chars.push(ResolvedChar {
+                ch,
+                font,
+                font_size,
+                style: perturb_style.clone(),
+                word_spacing,
+                word_spacing_sigma,
+                line_spacing_sigma,
+                font_size_sigma,
+                miswrite_rate,
+                miswrite_strikeout_style,
+            });
+        }
+    }
+
+    if resolved_chars.is_empty() {
+        return Vec::new();
+    }
+
+    let text_len = resolved_chars.len();
     let normal_strike = Normal::new(0.0, 0.15).unwrap();
 
-    // 阶段一：纯排版（不绘制），随机数消耗顺序与纯文本路径一致
-    #[derive(Clone, Copy)]
-    struct Placed {
-        ch: char,          // The character actually drawn (could be wrong_ch)
-        correct_ch: char,  // The original correct character
+    struct Placed<'a> {
+        ch: char,
+        correct_ch: char,
+        font: &'a FontFace,
         x: f32,
         y: f32,
         size: f32,
@@ -398,51 +594,67 @@ pub fn layout_paragraph(
         miswrite: bool,
         angle: f32,
         rewrite_x: f32,
+        style: PerturbStyle,
+        strikeout_style: StrikeoutStyle,
     }
+
     let mut placed: Vec<Placed> = Vec::new();
     let mut line_x_ends: Vec<f32> = Vec::new();
     let mut line_ys: Vec<f32> = Vec::new();
     let mut i = 0;
     let mut y = line_spacing - params.font_size;
+
     while i < text_len {
         line_ys.push(y);
         let mut x = params.left_margin + (if i == 0 { paragraph.first_line_indent } else { 0.0 });
         while i < text_len {
-            let ch = chars[i];
+            let sc = &resolved_chars[i];
+            let ch = sc.ch;
             if ch == '\n' {
                 i += 1;
                 break;
             }
-            if x > width_f - params.right_margin - 2.0 * params.font_size
-                && start_chars.contains(ch)
-            {
+            if x > width_f - params.right_margin - 2.0 * sc.font_size && start_chars.contains(ch) {
                 break;
             }
-            if x > width_f - params.right_margin - params.font_size && !end_chars.contains(ch) {
+            if x > width_f - params.right_margin - sc.font_size && !end_chars.contains(ch) {
                 break;
             }
-            let yj = y + normal_line.sample(rng) as f32;
-            let mut size = params.font_size;
-            if params.font_size_sigma > 0.0 {
-                size = (params.font_size + normal_font.sample(rng) as f32).round().max(0.0);
+
+            let yj = if sc.line_spacing_sigma > 0.0 {
+                let dist = Normal::new(0.0, f64::from(sc.line_spacing_sigma)).unwrap();
+                y + dist.sample(rng) as f32
+            } else {
+                y
+            };
+
+            let mut size = sc.font_size;
+            if sc.font_size_sigma > 0.0 {
+                let dist = Normal::new(0.0, f64::from(sc.font_size_sigma)).unwrap();
+                size = (sc.font_size + dist.sample(rng) as f32).round().max(0.0);
             }
             let size = size.max(1.0);
 
-            let word_noise = normal_word.sample(rng) as f32;
+            let word_noise = if sc.word_spacing_sigma > 0.0 {
+                let dist = Normal::new(0.0, f64::from(sc.word_spacing_sigma)).unwrap();
+                dist.sample(rng) as f32
+            } else {
+                0.0
+            };
 
             let mut is_miswrite = false;
             let mut wrong_ch = ch;
             let mut angle = 0.0;
-            if params.miswrite_rate > 0.0 && rng.random_bool(f64::from(params.miswrite_rate)) {
+            if sc.miswrite_rate > 0.0 && rng.random_bool(f64::from(sc.miswrite_rate)) {
                 is_miswrite = true;
                 wrong_ch = get_wrong_char(ch, rng);
                 angle = normal_strike.sample(rng) as f32;
             }
 
-            let offset = font.glyph_width(wrong_ch, size);
+            let offset = sc.font.glyph_width(wrong_ch, size);
             let mut rewrite_x = 0.0;
-            let x_next = x + params.word_spacing + offset + word_noise;
-            
+            let x_next = x + sc.word_spacing + offset + word_noise;
+
             if is_miswrite && params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
                 rewrite_x = x_next;
             }
@@ -450,6 +662,7 @@ pub fn layout_paragraph(
             placed.push(Placed {
                 ch: wrong_ch,
                 correct_ch: ch,
+                font: sc.font,
                 x,
                 y: yj,
                 size,
@@ -457,23 +670,26 @@ pub fn layout_paragraph(
                 miswrite: is_miswrite,
                 angle,
                 rewrite_x,
+                style: sc.style.clone(),
+                strikeout_style: sc.miswrite_strikeout_style,
             });
-            
+
             x = x_next;
             i += 1;
-            
+
             if is_miswrite && params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
-                x += font.glyph_width(ch, size) + params.word_spacing;
+                x += sc.font.glyph_width(ch, size) + sc.word_spacing;
             }
         }
         line_x_ends.push(x);
         y += line_spacing;
     }
+
     if line_ys.is_empty() {
         return Vec::new();
     }
 
-    // 右对齐：按每行逻辑宽度（含尾部空格）平移到右边距
+    // 右对齐：按每行逻辑宽度平移到右边距
     let shifts: Option<Vec<f32>> = if paragraph.align == Align::Right {
         let right_x = width_f - params.right_margin;
         Some(line_x_ends.iter().map(|xe| right_x - xe).collect())
@@ -481,17 +697,16 @@ pub fn layout_paragraph(
         None
     };
 
-    // 居中：按行计算中心偏移（与右对齐 shifts 同机制），
-    // 使小字带/重写与锚定字符同移，避免行带被独立居中导致漂移
+    // 居中：按行计算中心偏移
     let center_shifts: Option<Vec<f32>> = if paragraph.align == Align::Center {
         let mut min_x = vec![f32::MAX; line_ys.len()];
         let mut max_x = vec![f32::MIN; line_ys.len()];
         for item in &placed {
-            let w = font.glyph_width(item.ch, item.size);
+            let w = item.font.glyph_width(item.ch, item.size);
             min_x[item.line] = min_x[item.line].min(item.x);
             let mut right_w = item.x + w;
             if item.miswrite && params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
-                let rw = font.glyph_width(item.correct_ch, item.size);
+                let rw = item.font.glyph_width(item.correct_ch, item.size);
                 right_w = right_w.max(item.rewrite_x + rw);
             }
             max_x[item.line] = max_x[item.line].max(right_w);
@@ -511,10 +726,19 @@ pub fn layout_paragraph(
         None
     };
 
-    // 阶段二：按段落实际高度创建画布并绘制（不被页高裁剪）
-    let canvas_h = (y + params.font_size + 4.0 * params.line_spacing_sigma + 4.0).max(1.0);
-    let canvas_h = canvas_h as usize;
-    let mut mask = vec![false; width * canvas_h];
+    // 阶段二：按段落实际高度创建画布并绘制
+    let canvas_h =
+        (y + params.font_size + 4.0 * params.line_spacing_sigma + 4.0).max(1.0) as usize;
+
+    let mut unique_styles: Vec<PerturbStyle> = Vec::new();
+    for item in &placed {
+        if !unique_styles.iter().any(|s| s.matches(&item.style)) {
+            unique_styles.push(item.style.clone());
+        }
+    }
+
+    let mut style_masks: Vec<Vec<bool>> = vec![vec![false; width * canvas_h]; unique_styles.len()];
+
     for item in &placed {
         let shift = match (&shifts, &center_shifts) {
             (Some(s), _) => s[item.line],
@@ -522,14 +746,22 @@ pub fn layout_paragraph(
             (None, None) => 0.0,
         };
         let dx = item.x + shift;
-        let baseline_y = item.y + font.ascent(item.size);
-        font.rasterize(item.ch, item.size, dx, baseline_y, &mut mask, width, canvas_h);
+        let baseline_y = item.y + item.font.ascent(item.size);
+
+        let style_idx = unique_styles
+            .iter()
+            .position(|s| s.matches(&item.style))
+            .unwrap();
+        let target_mask = &mut style_masks[style_idx];
+
+        item.font
+            .rasterize(item.ch, item.size, dx, baseline_y, target_mask, width, canvas_h);
         if item.miswrite {
             draw_miswrite(
-                &mut mask,
+                target_mask,
                 width,
                 canvas_h,
-                font,
+                item.font,
                 item.ch,
                 item.correct_ch,
                 dx,
@@ -537,23 +769,41 @@ pub fn layout_paragraph(
                 item.size,
                 item.angle,
                 params.miswrite_rewrite_mode == MiswriteMode::Above,
-                params.miswrite_strikeout_style,
+                item.strikeout_style,
                 rng,
             );
             if params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
-                font.rasterize(item.correct_ch, item.size, item.rewrite_x + shift, baseline_y, &mut mask, width, canvas_h);
+                item.font.rasterize(
+                    item.correct_ch,
+                    item.size,
+                    item.rewrite_x + shift,
+                    baseline_y,
+                    target_mask,
+                    width,
+                    canvas_h,
+                );
             }
         }
     }
 
-    // 按行提取墨迹：行带分组 → 归属各行，空行补 (None, 0.0)。
-    // 一行可能包含多个行带（Above 模式的小字重写悬浮在行顶上方），
-    // 全部归入该行合并提取，避免多余行带被丢弃。
-    let rows: Vec<bool> = mask.chunks(width).map(|r| r.iter().any(|&b| b)).collect();
+    let mut combined_mask = vec![false; width * canvas_h];
+    for s_mask in &style_masks {
+        for (idx, &b) in s_mask.iter().enumerate() {
+            if b {
+                combined_mask[idx] = true;
+            }
+        }
+    }
+
+    let rows: Vec<bool> = combined_mask
+        .chunks(width)
+        .map(|r| r.iter().any(|&b| b))
+        .collect();
     let bands = split_text_rows(&rows);
     let mut bi = 0usize;
     let off_max = 0.8 * line_spacing;
-    let mut lines: Vec<(Option<Vec<bool>>, f32)> = Vec::new();
+    let mut lines: Vec<StyledLine> = Vec::new();
+
     for &yk in &line_ys {
         if bi < bands.len() && (bands[bi].0 as f32) < yk + line_spacing / 2.0 {
             let s0 = bands[bi].0;
@@ -563,16 +813,134 @@ pub fn layout_paragraph(
                 e = bands[bi].1;
                 bi += 1;
             }
-            // 对齐基准取切片起点 s0（可能为上方悬浮小字带顶），
-            // 使所有行保持画布绝对位置；下限放宽容纳小字带
             let off_min = -0.85 * params.font_size - 0.25 * line_spacing;
             let off = ((s0 as f32 - yk).max(off_min)).min(off_max);
-            lines.push((Some(mask[s0 * width..e * width].to_vec()), off));
+
+            let mut line_layers: Vec<StyledLayer> = Vec::new();
+            for (style, s_mask) in unique_styles.iter().zip(style_masks.iter()) {
+                let slice = s_mask[s0 * width..e * width].to_vec();
+                if slice.iter().any(|&b| b) {
+                    line_layers.push(StyledLayer {
+                        style: style.clone(),
+                        mask: slice,
+                    });
+                }
+            }
+            let comb_slice = combined_mask[s0 * width..e * width].to_vec();
+            lines.push(StyledLine {
+                mask: Some(comb_slice),
+                offset: off,
+                layers: line_layers,
+            });
         } else {
-            lines.push((None, 0.0));
+            lines.push(StyledLine {
+                mask: None,
+                offset: 0.0,
+                layers: Vec::new(),
+            });
         }
     }
     lines
+}
+
+/// 渲染单个段落，返回逐行 [(该行墨迹裁剪掩码, 相对该行绘制基线的偏移)]。
+/// 空行对应 (None, 0.0)。画布按段落自身高度创建（不受页高裁剪）。
+pub fn layout_paragraph(
+    params: &HandwritingParams,
+    font: &FontFace,
+    rng: &mut impl Rng,
+    paragraph: &Paragraph,
+    width: usize,
+) -> Vec<(Option<Vec<bool>>, f32)> {
+    layout_paragraph_styled(params, font, None, rng, paragraph, width)
+        .into_iter()
+        .map(|l| (l.mask, l.offset))
+        .collect()
+}
+
+/// 全部段落 → 逐行流式分页（分层样式支持），返回各页 `StyledPage`。
+pub fn layout_paragraphs_styled<'f>(
+    params: &HandwritingParams,
+    default_font: &'f FontFace,
+    font_resolver: Option<&dyn Fn(&str) -> Option<&'f FontFace>>,
+    rng: &mut impl Rng,
+    paragraphs: &[Paragraph],
+    width: usize,
+    height: usize,
+) -> Vec<StyledPage> {
+
+    let line_spacing = params.total_line_spacing();
+    let lead = line_spacing - params.font_size;
+    let limit = height as f32 - params.bottom_margin - params.font_size;
+
+    let mut all_lines: Vec<StyledLine> = Vec::new();
+    for para in paragraphs {
+        let mut lines =
+            layout_paragraph_styled(params, default_font, font_resolver, rng, para, width);
+        if lines.is_empty() {
+            lines.push(StyledLine {
+                mask: None,
+                offset: 0.0,
+                layers: Vec::new(),
+            });
+        }
+        all_lines.extend(lines);
+    }
+
+    let mut pages: Vec<StyledPage> = Vec::new();
+    let mut current_layers: Vec<StyledLayer> = Vec::new();
+    let mut page_has_ink = false;
+    let mut draw_y = params.top_margin + lead;
+
+    for line in all_lines {
+        if draw_y > limit && page_has_ink {
+            pages.push(StyledPage {
+                layers: std::mem::take(&mut current_layers),
+            });
+            page_has_ink = false;
+            draw_y = params.top_margin + lead;
+        }
+        if line.mask.is_some() {
+            let row0 = (draw_y + line.offset).round() as isize;
+            for line_layer in line.layers {
+                let layer_idx = if let Some(pos) = current_layers
+                    .iter()
+                    .position(|l| l.style.matches(&line_layer.style))
+                {
+                    pos
+                } else {
+                    current_layers.push(StyledLayer {
+                        style: line_layer.style.clone(),
+                        mask: vec![false; width * height],
+                    });
+                    current_layers.len() - 1
+                };
+
+                let dst_mask = &mut current_layers[layer_idx].mask;
+                for (by, row) in line_layer.mask.chunks(width).enumerate() {
+                    let ty = row0 + by as isize;
+                    if ty < 0 || ty >= height as isize {
+                        continue;
+                    }
+                    let dst_row = &mut dst_mask[ty as usize * width..(ty as usize + 1) * width];
+                    for (x, &b) in row.iter().enumerate() {
+                        if b {
+                            dst_row[x] = true;
+                            page_has_ink = true;
+                        }
+                    }
+                }
+            }
+        }
+        draw_y += line_spacing;
+    }
+
+    if page_has_ink || pages.is_empty() {
+        pages.push(StyledPage {
+            layers: current_layers,
+        });
+    }
+    pages
 }
 
 /// 全部段落 → 逐行流式分页，返回各页前景掩码（对齐 Python `_paragraph_pages`）。
@@ -584,62 +952,20 @@ pub fn layout_paragraphs(
     width: usize,
     height: usize,
 ) -> Vec<Vec<bool>> {
-    let line_spacing = params.total_line_spacing();
-    let lead = line_spacing - params.font_size;
-    let limit = height as f32 - params.bottom_margin - params.font_size;
-
-    // 所有段落共用同一 rng 流，先全部排版为逐行列表
-    let mut all_lines: Vec<(Option<Vec<bool>>, f32)> = Vec::new();
-    for para in paragraphs {
-        let mut lines = layout_paragraph(params, font, rng, para, width);
-        if lines.is_empty() {
-            lines.push((None, 0.0)); // 空段保留一行空行
-        }
-        all_lines.extend(lines);
-    }
-
-    let mut pages: Vec<Vec<bool>> = Vec::new();
-    let mut page_canvas = vec![false; width * height];
-    let mut page_has_ink = false;
-    let mut draw_y = params.top_margin + lead;
-    for (band, off) in all_lines {
-        // 用 dirty 标志替代整页 any() 扫描（原实现每行 O(WxH)，文档级二次方）
-        if draw_y > limit && page_has_ink {
-            pages.push(std::mem::take(&mut page_canvas));
-            page_canvas = vec![false; width * height];
-            page_has_ink = false;
-            draw_y = params.top_margin + lead;
-        }
-        if let Some(band) = band {
-            let row0 = (draw_y + off).round() as isize;
-            for (by, row) in band.chunks(width).enumerate() {
-                let ty = row0 + by as isize;
-                if ty < 0 || ty >= height as isize {
-                    continue;
-                }
-                let dst = &mut page_canvas[ty as usize * width..(ty as usize + 1) * width];
-                for (x, &b) in row.iter().enumerate() {
-                    if b {
-                        dst[x] = true;
-                        page_has_ink = true;
-                    }
-                }
-            }
-        }
-        draw_y += line_spacing;
-    }
-    if page_has_ink || pages.is_empty() {
-        pages.push(page_canvas);
-    }
-    pages
+    layout_paragraphs_styled(params, font, None, rng, paragraphs, width, height)
+        .into_iter()
+        .map(|page| page.to_combined_mask(width, height))
+        .collect()
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::models::MiswriteMode;
+    use crate::core::models::{MiswriteMode, TextRun, TextRunStyle};
     use rand::SeedableRng;
     use std::path::PathBuf;
+
 
     fn system_font() -> Option<PathBuf> {
         const CANDIDATES: &[&str] = &[
@@ -1077,4 +1403,139 @@ mod tests {
         draw_bezier_line(&mut mask, 100, 100, 10.0, 10.0, 90.0, 90.0, 2.0, 5.0, &mut rng);
         assert!(mask.iter().any(|&b| b), "draw_bezier_line should modify mask");
     }
+
+    #[test]
+    fn test_mixed_runs_layout_and_wrapping() {
+        let Some(path) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let font = FontFace::load(&path, 30.0).unwrap();
+        let p = HandwritingParams {
+            font_size: 30.0,
+            word_spacing: 5.0,
+            line_spacing: 40.0,
+            left_margin: 20.0,
+            right_margin: 20.0,
+            word_spacing_sigma: 0.0,
+            font_size_sigma: 0.0,
+            line_spacing_sigma: 0.0,
+            perturb_x_sigma: 2.0,
+            perturb_y_sigma: 2.0,
+            perturb_theta_sigma: 0.05,
+            fill: [0, 0, 0],
+            ..HandwritingParams::default()
+        };
+
+        let para = Paragraph {
+            text: String::new(),
+            align: Align::Left,
+            first_line_indent: 0.0,
+            runs: vec![
+                TextRun::new(
+                    "【题目】",
+                    TextRunStyle {
+                        role_id: 1,
+                        printed: true,
+                        fill: Some([0, 0, 0]),
+                        ..Default::default()
+                    },
+                ),
+                TextRun::new(
+                    "这是手写回答内容，足够长以至于必然会在窄画布上产生换行。",
+                    TextRunStyle {
+                        role_id: 0,
+                        printed: false,
+                        fill: Some([26, 26, 140]),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        };
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let lines = layout_paragraph_styled(&p, &font, None, &mut rng, &para, 300);
+        assert!(lines.len() >= 2, "长段落应产生多行，实际 {}", lines.len());
+
+        // 首行应同时包含印刷层和手写层
+        let first_line = &lines[0];
+        assert_eq!(first_line.layers.len(), 2, "首行应包含印刷与手写 2 个样式层");
+
+        let printed_layer = first_line.layers.iter().find(|l| l.style.printed).expect("应有印刷层");
+        assert_eq!(printed_layer.style.fill, [0, 0, 0]);
+        assert_eq!(printed_layer.style.perturb_x_sigma, 0.0);
+        assert!(printed_layer.mask.iter().any(|&b| b), "印刷层应有墨迹");
+
+        let hand_layer = first_line.layers.iter().find(|l| !l.style.printed).expect("应有手写层");
+        assert_eq!(hand_layer.style.fill, [26, 26, 140]);
+        assert!(hand_layer.style.perturb_x_sigma > 0.0);
+        assert!(hand_layer.mask.iter().any(|&b| b), "手写层应有墨迹");
+    }
+
+    #[test]
+    fn test_multi_role_and_multi_font_resolution() {
+        let Some(path) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let font = FontFace::load(&path, 30.0).unwrap();
+        let mut p = HandwritingParams {
+            font_size: 30.0,
+            word_spacing: 5.0,
+            line_spacing: 40.0,
+            fill: [0, 0, 0],
+            roles: vec![
+                crate::core::models::HandwritingRole {
+                    id: 1,
+                    name: "印刷体".into(),
+                    font_path: path.to_string_lossy().into_owned(),
+                    printed: true,
+                    font_size: Some(28.0),
+                    fill: Some([0, 0, 0]),
+                    ..Default::default()
+                },
+                crate::core::models::HandwritingRole {
+                    id: 2,
+                    name: "批注".into(),
+                    font_path: path.to_string_lossy().into_owned(),
+                    printed: false,
+                    font_size: Some(24.0),
+                    fill: Some([255, 0, 0]),
+                    ..Default::default()
+                },
+            ],
+            ..HandwritingParams::default()
+        };
+        p.word_spacing_sigma = 0.0;
+        p.font_size_sigma = 0.0;
+        p.line_spacing_sigma = 0.0;
+
+        let para = Paragraph {
+            text: String::new(),
+            align: Align::Left,
+            first_line_indent: 0.0,
+            runs: vec![
+                TextRun::new("印刷标题", TextRunStyle { role_id: 1, ..Default::default() }),
+                TextRun::new("红字批注", TextRunStyle { role_id: 2, ..Default::default() }),
+                TextRun::new("默认手写", TextRunStyle { role_id: 0, fill: Some([0, 255, 0]), ..Default::default() }),
+            ],
+        };
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let lines = layout_paragraph_styled(&p, &font, None, &mut rng, &para, 600);
+        assert!(!lines.is_empty());
+
+        let line = &lines[0];
+        assert_eq!(line.layers.len(), 3, "应生成 3 个不同样式的层");
+
+        let r1 = line.layers.iter().find(|l| l.style.fill == [0, 0, 0]).unwrap();
+        assert!(r1.style.printed);
+
+        let r2 = line.layers.iter().find(|l| l.style.fill == [255, 0, 0]).unwrap();
+        assert!(!r2.style.printed);
+
+        let r3 = line.layers.iter().find(|l| l.style.fill == [0, 255, 0]).unwrap();
+        assert!(!r3.style.printed);
+    }
 }
+

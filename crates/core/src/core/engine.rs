@@ -353,35 +353,105 @@ impl DefaultEngine {
         hasher.finish()
     }
 
-    /// 主文字（text 或 paragraphs）的逐页墨迹掩码；无文字返回空。
+    /// 预加载参数中涉及的所有字体文件。
+    fn preload_fonts(
+        params: &HandwritingParams,
+    ) -> Result<std::collections::HashMap<String, Arc<FontFace>>, EngineError> {
+        let mut map = std::collections::HashMap::new();
+        let mut to_load: Vec<(String, f32)> = Vec::new();
+        if !params.font_path.is_empty() {
+            to_load.push((params.font_path.clone(), params.font_size));
+        }
+        for role in &params.roles {
+            if !role.font_path.is_empty() {
+                to_load.push((
+                    role.font_path.clone(),
+                    role.font_size.unwrap_or(params.font_size),
+                ));
+            }
+        }
+        for para in &params.paragraphs {
+            for run in para.effective_runs() {
+                if let Some(font_path) = &run.style.font_path {
+                    if !font_path.is_empty() {
+                        to_load.push((
+                            font_path.clone(),
+                            run.style.font_size.unwrap_or(params.font_size),
+                        ));
+                    }
+                }
+            }
+        }
+        for region in &params.regions {
+            if !region.font_path.is_empty() {
+                let size = if region.font_size > 0 {
+                    region.font_size as f32
+                } else {
+                    params.font_size
+                };
+                to_load.push((region.font_path.clone(), size));
+            }
+        }
+        for (path, size) in to_load {
+            if !map.contains_key(&path) {
+                let font = FontFace::load(Path::new(&path), size).map_err(EngineError::Font)?;
+                map.insert(path, Arc::new(font));
+            }
+        }
+        Ok(map)
+    }
+
+    /// 主文字（text 或 paragraphs）的逐页墨迹分层掩码；无文字返回空。
     /// 返回值第二项为「排版停滞」标志：纯文本路径某页一个字都没消费
     /// （文本区过小）时为 true，调用方据此报 `TextAreaTooSmall` 而不是
     /// 无限追加空白页（保持既有回归语义）。
     fn main_page_masks(
         params: &HandwritingParams,
         font: &FontFace,
+        font_map: Option<&std::collections::HashMap<String, Arc<FontFace>>>,
         rng: &mut StdRng,
         width: usize,
         height: usize,
-    ) -> (Vec<Vec<bool>>, bool) {
+    ) -> (Vec<layout::StyledPage>, bool) {
         if !params.paragraphs.is_empty() {
-            let pages =
-                layout::layout_paragraphs(params, font, rng, &params.paragraphs, width, height);
+            let resolver = |p: &str| font_map.and_then(|m| m.get(p)).map(|f| f.as_ref());
+            let pages = layout::layout_paragraphs_styled(
+                params,
+                font,
+                Some(&resolver),
+                rng,
+                &params.paragraphs,
+                width,
+                height,
+            );
             return (pages, false);
         }
+
         if params.text.trim().is_empty() {
             return (Vec::new(), false);
         }
-        let mut masks = Vec::new();
+        let mut pages = Vec::new();
         let total_chars = params.text.chars().count();
         let mut start = 0usize;
         let mut stalled = false;
+        let default_style = layout::PerturbStyle::new(
+            params.fill,
+            false,
+            params.perturb_x_sigma,
+            params.perturb_y_sigma,
+            params.perturb_theta_sigma,
+        );
         loop {
             let result =
                 layout::layout_text(params, font, rng, &params.text, start, width, height, false);
             let no_progress = result.consumed <= start;
             start = result.consumed;
-            masks.push(result.mask);
+            pages.push(layout::StyledPage {
+                layers: vec![layout::StyledLayer {
+                    style: default_style.clone(),
+                    mask: result.mask,
+                }],
+            });
             if start >= total_chars {
                 break;
             }
@@ -390,7 +460,7 @@ impl DefaultEngine {
                 break;
             }
         }
-        (masks, stalled)
+        (pages, stalled)
     }
 }
 
@@ -421,10 +491,14 @@ fn generate_pages_with(
     let width = first_background.width() as usize;
     let height = first_background.height() as usize;
 
+    let font_map = DefaultEngine::preload_fonts(params)?;
+
     // ---- 主文字逐页掩码（无文字时为空 → 纯背景路径） ----
     let main_rng = &mut StdRng::seed_from_u64(seed);
-    let (main_masks, stalled) = match font {
-        Some(f) => DefaultEngine::main_page_masks(params, f, main_rng, width, height),
+    let (main_pages, stalled) = match font {
+        Some(f) => {
+            DefaultEngine::main_page_masks(params, f, Some(&font_map), main_rng, width, height)
+        }
         None => (Vec::new(), false),
     };
     if stalled {
@@ -442,8 +516,14 @@ fn generate_pages_with(
         let rw = (region.w.max(1) as usize).min(width.saturating_sub(ox)).max(1);
         let rh = (region.h.max(1) as usize).min(height.saturating_sub(oy)).max(1);
         let rp = DefaultEngine::region_local_params(params, region);
-        let font_r = FontFace::load(Path::new(&rp.font_path), rp.font_size)
-            .map_err(EngineError::Font)?;
+        let font_r = if let Some(cached) = font_map.get(&rp.font_path) {
+            cached.clone()
+        } else {
+            Arc::new(
+                FontFace::load(Path::new(&rp.font_path), rp.font_size)
+                    .map_err(EngineError::Font)?,
+            )
+        };
         let rrand = &mut StdRng::seed_from_u64(DefaultEngine::region_seed(seed, index));
         // 区域排版：仅排版在所属单页内（超出框选区域的内容直接截断不跨页延伸）
         let mask: Vec<bool> = if !rp.paragraphs.is_empty() {
@@ -452,11 +532,9 @@ fn generate_pages_with(
                 .next()
                 .unwrap_or_else(|| vec![false; rw * rh])
         } else {
-            let result =
-                layout::layout_text(&rp, &font_r, rrand, &region.text, 0, rw, rh, true);
+            let result = layout::layout_text(&rp, &font_r, rrand, &region.text, 0, rw, rh, true);
             result.mask
         };
-        drop(font_r);
         entries.push(RegionEntry {
             local_params: rp,
             ox,
@@ -469,7 +547,7 @@ fn generate_pages_with(
     }
 
     // ---- 总页数 = 主文字 / 背景页数 / 各区域所在页的最大值（至少 1 页） ----
-    let n_pages = main_masks
+    let n_pages = main_pages
         .len()
         .max(params.background_pages.len())
         .max(entries.iter().map(|e| e.target_page + 1).max().unwrap_or(0))
@@ -477,7 +555,6 @@ fn generate_pages_with(
 
     let perturb_rng = &mut StdRng::seed_from_u64(DefaultEngine::perturb_seed(seed));
     let mut out: Vec<RgbaImage> = Vec::with_capacity(n_pages);
-    let mut scratch: Vec<u8> = Vec::with_capacity(width * height * 3);
     for page_index in 0..n_pages {
         let bg = page_background(page_index)?;
         let mut canvas = bg.as_raw().clone();
@@ -499,23 +576,26 @@ fn generate_pages_with(
                 height,
             );
         }
-        // 主文字后合成：以当前画布为底（含区域墨迹），扰动写入
-        if page_index < main_masks.len() && main_masks[page_index].iter().any(|&b| b) {
-            perturb::perturb_mask_into(
-                &main_masks[page_index],
-                width,
-                height,
-                params,
-                perturb_rng,
-                &canvas,
-                &mut scratch,
-            );
-            std::mem::swap(&mut canvas, &mut scratch);
+        // 主文字后合成：以当前画布为底（含区域墨迹），分层扰动/打印写入
+        if page_index < main_pages.len() {
+            for layer in &main_pages[page_index].layers {
+                if layer.mask.iter().any(|&b| b) {
+                    perturb::perturb_styled_layer_into(
+                        &layer.mask,
+                        width,
+                        height,
+                        &layer.style,
+                        perturb_rng,
+                        &mut canvas,
+                    );
+                }
+            }
         }
         out.push(rgba_from_rgb(&canvas, width, height));
     }
     Ok(out)
 }
+
 
 impl Engine for DefaultEngine {
     fn render_preview(&self, params: &HandwritingParams) -> Result<RgbaImage, EngineError> {
@@ -812,9 +892,10 @@ pub fn overlay_bounds(img: &RgbaImage, params: &HandwritingParams, color: [u8; 3
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::models::{Align, Paragraph};
+    use crate::core::models::{Align, Paragraph, TextRun, TextRunStyle};
     use image::Rgb;
     use std::fs;
+
 
     fn system_font() -> Option<PathBuf> {
         const CANDIDATES: &[&str] = &[
@@ -1614,4 +1695,132 @@ mod tests {
         let ink1 = region_ink_mask(&pages[1]);
         assert!(!ink1.iter().any(|&b| b), "第二页应为纯背景无墨迹");
     }
+
+    #[test]
+    fn test_render_mixed_runs_printed_zero_jitter_and_colors() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = region_test_params(&font, &dir);
+        params.font_size = 28.0;
+        params.line_spacing = 40.0;
+        params.paragraphs = vec![Paragraph {
+            text: String::new(),
+            align: Align::Left,
+            first_line_indent: 0.0,
+            runs: vec![
+                TextRun::new(
+                    "印刷标题：",
+                    TextRunStyle {
+                        role_id: 1,
+                        printed: true,
+                        fill: Some([0, 0, 0]),
+                        ..Default::default()
+                    },
+                ),
+                TextRun::new(
+                    "手写答案内容",
+                    TextRunStyle {
+                        role_id: 0,
+                        printed: false,
+                        fill: Some([0, 0, 255]),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        }];
+
+        // 使用两个不同 seed 渲染
+        let page1 = DefaultEngine::new(1).render_preview(&params).unwrap();
+        let page2 = DefaultEngine::new(2).render_preview(&params).unwrap();
+
+        let raw1 = page1.as_raw();
+        let raw2 = page2.as_raw();
+
+        // 提取两张图上的黑色像素（印刷体）
+        let black_pixels1: Vec<usize> = raw1
+            .chunks_exact(4)
+            .enumerate()
+            .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 0 { Some(idx) } else { None })
+            .collect();
+        let black_pixels2: Vec<usize> = raw2
+            .chunks_exact(4)
+            .enumerate()
+            .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 0 { Some(idx) } else { None })
+            .collect();
+
+        assert!(!black_pixels1.is_empty(), "应存在印刷黑字");
+        assert_eq!(
+            black_pixels1, black_pixels2,
+            "印刷体在不同 seed 下应具有完全一致的零抖动/零位移像素坐标！"
+        );
+
+        // 提取两张图上的蓝色像素（手写体）
+        let blue_pixels1: Vec<usize> = raw1
+            .chunks_exact(4)
+            .enumerate()
+            .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 255 { Some(idx) } else { None })
+            .collect();
+        let blue_pixels2: Vec<usize> = raw2
+            .chunks_exact(4)
+            .enumerate()
+            .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 255 { Some(idx) } else { None })
+            .collect();
+
+        assert!(!blue_pixels1.is_empty(), "应存在手写蓝字");
+        assert_ne!(
+            blue_pixels1, blue_pixels2,
+            "手写体在不同 seed 下应受到随机笔画扰动，像素坐标应当不同！"
+        );
+    }
+
+    #[test]
+    fn test_multi_role_rendering_with_custom_fonts_and_colors() {
+        let Some(font) = system_font() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = region_test_params(&font, &dir);
+        params.font_size = 28.0;
+        params.line_spacing = 40.0;
+        params.roles = vec![
+            crate::core::models::HandwritingRole {
+                id: 1,
+                name: "印刷体".into(),
+                font_path: font.to_string_lossy().into_owned(),
+                printed: true,
+                font_size: Some(28.0),
+                fill: Some([0, 0, 0]),
+                ..Default::default()
+            },
+            crate::core::models::HandwritingRole {
+                id: 2,
+                name: "红笔批注".into(),
+                font_path: font.to_string_lossy().into_owned(),
+                printed: false,
+                font_size: Some(24.0),
+                fill: Some([255, 0, 0]),
+                ..Default::default()
+            },
+        ];
+        params.paragraphs = vec![Paragraph {
+            text: String::new(),
+            align: Align::Left,
+            first_line_indent: 0.0,
+            runs: vec![
+                TextRun::new("【题目】", TextRunStyle { role_id: 1, ..Default::default() }),
+                TextRun::new("优秀回答", TextRunStyle { role_id: 0, fill: Some([0, 0, 255]), ..Default::default() }),
+                TextRun::new("（批注：满分）", TextRunStyle { role_id: 2, ..Default::default() }),
+            ],
+        }];
+
+        let page = DefaultEngine::new(42).render_preview(&params).unwrap();
+        let raw = page.as_raw();
+
+        let has_black = raw.chunks_exact(4).any(|px| px[0] == 0 && px[1] == 0 && px[2] == 0);
+        let has_blue = raw.chunks_exact(4).any(|px| px[0] == 0 && px[1] == 0 && px[2] == 255);
+        let has_red = raw.chunks_exact(4).any(|px| px[0] == 255 && px[1] == 0 && px[2] == 0);
+
+        assert!(has_black, "应渲染黑色印刷体");
+        assert!(has_blue, "应渲染蓝色手写体");
+        assert!(has_red, "应渲染红色批注");
+    }
 }
+

@@ -238,6 +238,62 @@ pub fn perturb_region_into(
     }
 }
 
+/// 直接把未扰动的前景掩码以指定颜色写入画布（印刷体专用，零位移零旋转）。
+pub fn draw_printed_mask(
+    mask: &[bool],
+    width: usize,
+    height: usize,
+    fill: [u8; 3],
+    canvas: &mut [u8],
+) {
+    let (fr, fg, fb) = (fill[0], fill[1], fill[2]);
+    let len = width * height;
+    for idx in 0..len {
+        if mask[idx] {
+            canvas[idx * 3] = fr;
+            canvas[idx * 3 + 1] = fg;
+            canvas[idx * 3 + 2] = fb;
+        }
+    }
+}
+
+/// 对单个样式层的前景掩码做独立笔画扰动并写入画布。
+pub fn perturb_styled_layer_into(
+    mask: &[bool],
+    width: usize,
+    height: usize,
+    style: &crate::core::layout::PerturbStyle,
+    rng: &mut impl Rng,
+    canvas: &mut [u8],
+) {
+    if !mask.iter().any(|&b| b) {
+        return;
+    }
+    if style.is_printed() {
+        draw_printed_mask(mask, width, height, style.fill, canvas);
+        return;
+    }
+    let strokes = label_strokes(mask, width, height);
+    let n = strokes.len();
+    let dxs = normals(style.perturb_x_sigma, n, rng);
+    let dys = normals(style.perturb_y_sigma, n, rng);
+    let thetas = normals(style.perturb_theta_sigma, n, rng);
+    for (k, stroke) in strokes.iter().enumerate() {
+        write_perturbed_stroke(
+            stroke,
+            dxs[k],
+            dys[k],
+            thetas[k],
+            0,
+            0,
+            style.fill,
+            canvas,
+            (width, height),
+        );
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
