@@ -5,7 +5,7 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import type { DocxImportOutput, DownloadProgressPayload, PngPage, PresetItem, UiParams, UpdateInfo } from "./types";
+import type { DocxImportOutput, DownloadProgressPayload, PngPage, PresetItem, SystemFontItem, UiParams, UpdateInfo } from "./types";
 
 /** 本地文件 → asset 协议 URL（需 tauri.conf.json assetProtocol scope 覆盖） */
 export const assetUrl = (path: string): string => convertFileSrc(path);
@@ -48,6 +48,8 @@ export const api = {
   /** 监听操作系统主题切换事件 */
   onSystemThemeChanged: (cb: (theme: string) => void) =>
     listen<string>("system-theme-changed", (e) => cb(e.payload)),
+  /** 获取系统已安装字体列表 */
+  listSystemFonts: () => invoke<SystemFontItem[]>("list_system_fonts"),
 };
 
 

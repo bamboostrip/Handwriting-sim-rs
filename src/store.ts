@@ -8,7 +8,7 @@ import { reactive, watch } from "vue";
 import { createDiscreteApi } from "naive-ui";
 import { useDebounceFn } from "@vueuse/core";
 import { api, assetUrl, dialogs } from "./api";
-import type { UiHandwritingRole, UiParams, UiRegion, UiTextRun, UpdateInfo } from "./types";
+import type { SystemFontItem, UiHandwritingRole, UiParams, UiRegion, UiTextRun, UpdateInfo } from "./types";
 
 /** 当前版本号与开源仓库地址 */
 export const APP_VERSION = "0.3.3";
@@ -309,11 +309,8 @@ export interface Para {
 export type Region = UiRegion;
 
 export const defaultRoles = (): UiHandwritingRole[] => [
-  { id: 0, name: "默认手写 (主字体)", fontPath: "", printed: false, fill: null, highlight: null },
-  { id: 1, name: "打印体 (无扰动)", fontPath: "", printed: true, fill: null, highlight: "lightGray" },
-  { id: 2, name: "手写角色 1 (黄色高亮)", fontPath: "", printed: false, fill: null, highlight: "yellow" },
-  { id: 3, name: "手写角色 2 (绿色高亮)", fontPath: "", printed: false, fill: null, highlight: "green" },
-  { id: 4, name: "手写角色 3 (青色高亮)", fontPath: "", printed: false, fill: null, highlight: "cyan" },
+  { id: 0, name: "默认手写 (主字体)", fontPath: "", printed: false, fill: null },
+  { id: 1, name: "打印体 (无扰动)", fontPath: "", printed: true, fill: null },
 ];
 
 let paraSeq = 1;
@@ -337,6 +334,9 @@ export const cleanText = (s: string): string =>
 const PREVIEW_BG_COLORS = ["#c8d0ca", "#565b56"];
 
 export const store = reactive({
+  // ---- 系统字体缓存 ----
+  systemFonts: [] as SystemFontItem[],
+
   // ---- 参数表单（与 Slint 版控件一一对应）----
   fontPath: "",
   backgroundPath: "",
@@ -658,6 +658,109 @@ watch(
   },
 );
 
+// ---------------------------------------------------------------- 系统字体管理与匹配
+
+export async function initSystemFonts(): Promise<void> {
+  try {
+    store.systemFonts = await api.listSystemFonts();
+  } catch (e) {
+    console.warn("获取系统字体列表失败:", e);
+    store.systemFonts = [];
+  }
+}
+
+const FONT_ALIAS_GROUPS: string[][] = [
+  ["仿宋", "fangsong", "仿宋_gb2312", "fangsong_gb2312", "simfang", "stfangsong", "华文仿宋"],
+  ["楷体", "kaiti", "楷体_gb2312", "kaiti_gb2312", "simkai", "stkaiti", "kaitisc", "华文楷体"],
+  ["微软雅黑", "microsoftyahei", "microsoftyaheiui", "yahei", "msyh"],
+  ["宋体", "simsun", "新宋体", "nsimsun", "songtisc", "songti", "stsong", "华文宋体"],
+  ["黑体", "simhei", "heitisc", "heiti", "stxihei", "stheitilight", "stheitimedium", "华文细黑", "华文黑体"],
+  ["等线", "dengxian", "deng"],
+  ["幼圆", "youyuan", "simyou"],
+  ["隶书", "lisu", "simli", "stliti", "华文隶书"],
+  ["华文行楷", "stxingkai", "xingkai"],
+  ["华文中宋", "stzhongsong"],
+  ["华文琥珀", "sthupo"],
+  ["华文彩云", "stcaiyun"],
+  ["华文新魏", "stxinwei"],
+  ["方正舒体", "fzshuti", "fzstk"],
+  ["方正姚体", "fzyaoti", "fzytk"],
+  ["苹方", "pingfang", "pingfangsc"],
+  ["思源黑体", "notosanssc", "notosanscjk", "notosans", "sourcehansanscn", "sourcehansans"],
+  ["思源宋体", "notoserifsc", "notoserifcjk", "notoserif", "sourcehanserifcn", "sourcehanserif"],
+  ["文泉驿微米黑", "wenquanyimicrohei", "wqymicrohei"],
+  ["文泉驿正黑", "wenquanyizenhei", "wqyzenhei"],
+  ["arial", "arialmt"],
+  ["timesnewroman", "times", "timeroman"],
+  ["calibri"],
+  ["couriernew", "courier"],
+  ["tahoma"],
+  ["verdana"],
+  ["segoeui", "segoe"],
+];
+
+function normalizeFontStr(s: string): string {
+  return s.toLowerCase().replace(/[\s\-_]/g, "").replace(/gb2312|regular|normal|bold|italic|ui|sc|light/g, "");
+}
+
+/** 智能模糊匹配系统字体（支持中英文别名、简写及规范化匹配） */
+export function matchSystemFont(fontName?: string | null): SystemFontItem | undefined {
+  if (!fontName || !fontName.trim() || store.systemFonts.length === 0) return undefined;
+  const raw = fontName.trim();
+  const rawLower = raw.toLowerCase();
+  const rawNorm = rawLower.replace(/[\s\-_]/g, "");
+
+  // 1. 尝试完全/规范化精确匹配（name, family, 或 path 中文件名）
+  let found = store.systemFonts.find(
+    (f) =>
+      f.name.toLowerCase() === rawLower ||
+      f.family.toLowerCase() === rawLower ||
+      f.name.toLowerCase().replace(/[\s\-_]/g, "") === rawNorm ||
+      f.family.toLowerCase().replace(/[\s\-_]/g, "") === rawNorm,
+  );
+  if (found) return found;
+
+  // 2. 尝试别名组匹配
+  for (const group of FONT_ALIAS_GROUPS) {
+    const matchesInput = group.some(
+      (alias) =>
+        rawNorm === alias ||
+        rawNorm.includes(alias) ||
+        alias.includes(rawNorm) ||
+        normalizeFontStr(raw) === normalizeFontStr(alias),
+    );
+    if (matchesInput) {
+      for (const alias of group) {
+        found = store.systemFonts.find((f) => {
+          const fn = f.name.toLowerCase().replace(/[\s\-_]/g, "");
+          const ff = f.family.toLowerCase().replace(/[\s\-_]/g, "");
+          const fp = f.path.toLowerCase().replace(/[\s\-_]/g, "");
+          return fn.includes(alias) || ff.includes(alias) || fp.includes(alias);
+        });
+        if (found) return found;
+      }
+    }
+  }
+
+  // 3. 包含关系模糊匹配
+  const stripped = normalizeFontStr(raw);
+  if (stripped.length >= 2) {
+    found = store.systemFonts.find((f) => {
+      const fn = normalizeFontStr(f.name);
+      const ff = normalizeFontStr(f.family);
+      return (
+        fn.includes(stripped) ||
+        ff.includes(stripped) ||
+        stripped.includes(fn) ||
+        stripped.includes(ff)
+      );
+    });
+    if (found) return found;
+  }
+
+  return undefined;
+}
+
 // ---------------------------------------------------------------- 文件选择类动作
 
 export async function chooseFont(): Promise<void> {
@@ -690,6 +793,32 @@ export async function importDocx(): Promise<void> {
       ),
     );
 
+    // 基础角色：Role 0 (主字体) 与 Role 1 (打印体)
+    const role0: UiHandwritingRole = store.roles.find((r) => r.id === 0) || {
+      id: 0,
+      name: "默认手写 (主字体)",
+      fontPath: "",
+      printed: false,
+      fill: null,
+    };
+    const role1: UiHandwritingRole = store.roles.find((r) => r.id === 1) || {
+      id: 1,
+      name: "打印体 (无扰动)",
+      fontPath: "",
+      printed: true,
+      fill: null,
+    };
+
+    // 自动匹配文档字体 -> Role 1 (打印体)
+    if (res.docFontFamily) {
+      const matched = matchSystemFont(res.docFontFamily);
+      if (matched) {
+        role1.fontPath = matched.path;
+      }
+    }
+
+    const nextRoles: UiHandwritingRole[] = [role0, role1];
+
     // 动态提取并自适应角色（收集 roleId >= 2 及对应的 highlight/fill）
     const detectedRoles = new Map<number, { highlight?: string | null; fill?: string | null }>();
     for (const row of rows) {
@@ -720,24 +849,21 @@ export async function importDocx(): Promise<void> {
         const subLabel = highlightLabel || colorLabel || "自定颜色";
         const roleName = `手写角色 ${rId - 1} (${subLabel})`;
 
-        const existingRole = store.roles.find((r) => r.id === rId);
-        if (existingRole) {
-          existingRole.highlight = info.highlight ?? existingRole.highlight;
-          if (info.fill && !existingRole.fill) existingRole.fill = info.fill;
-          existingRole.name = roleName;
-        } else {
-          store.roles.push({
-            id: rId,
-            name: roleName,
-            fontPath: "",
-            printed: false,
-            highlight: info.highlight ?? null,
-            fill: info.fill ?? null,
-          });
-        }
+        const prevRole = store.roles.find((r) => r.id === rId);
+
+        nextRoles.push({
+          id: rId,
+          name: roleName,
+          fontPath: prevRole?.fontPath || "",
+          printed: false,
+          highlight: info.highlight ?? null,
+          fill: info.fill ?? null,
+        });
       }
-      store.roles.sort((a, b) => a.id - b.id);
+      nextRoles.sort((a, b) => a.id - b.id);
     }
+
+    store.roles = nextRoles;
 
     focusPara(store.paragraphs[0].id, 0);
     store.status = `已导入 ${rows.length} 个段落，回车分段、按钮设格式`;

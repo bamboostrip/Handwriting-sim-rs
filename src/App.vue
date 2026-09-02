@@ -11,6 +11,7 @@ import {
   buildParams,
   cancelRegionEdit,
   doRender,
+  initSystemFonts,
   initThemeSystem,
   isDarkActive,
   loadBgDimensions,
@@ -89,6 +90,7 @@ watch(paramSnapshot, () => {
 
 onMounted(() => {
   initThemeSystem();
+  void initSystemFonts();
   void refreshPresets();
   loadBgDimensions(store.backgroundPath);
   void startupCheckUpdate();

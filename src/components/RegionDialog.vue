@@ -39,6 +39,22 @@ const message = useMessage();
 const advOpen = ref<string[]>([]);
 const curRowIndex = ref(0);
 
+const regionFontOptions = computed(() => {
+  const base = store.systemFonts.map((f) => ({
+    label: f.name,
+    value: f.path,
+  }));
+  const current = draft.value?.fontPath?.trim();
+  if (current && !base.some((opt) => opt.value === current)) {
+    const fileName = current.split(/[\\/]/).pop() || current;
+    return [
+      { label: `📁 ${fileName} (外部字体)`, value: current },
+      ...base,
+    ];
+  }
+  return base;
+});
+
 // 每次打开对话框时折叠面板收起、重置聚焦行为第一行
 watch(
   () => store.dialogOpen,
@@ -204,14 +220,18 @@ async function onConfirm(): Promise<void> {
 
         <span class="field-label">打印字体</span>
         <div class="field-control">
-          <NInput
-            v-model:value="draft.fontPath"
+          <NSelect
+            :value="draft.fontPath || null"
             size="small"
+            filterable
+            clearable
             :disabled="!isPrinted"
-            placeholder="留空使用主字体"
+            placeholder="留空使用主字体或选择系统字体"
+            :options="regionFontOptions"
             style="flex: 1"
+            @update:value="(val: string | null) => { if (draft) draft.fontPath = val || ''; }"
           />
-          <NButton size="small" :disabled="!isPrinted" @click="chooseRegionFont()">选择</NButton>
+          <NButton size="small" :disabled="!isPrinted" @click="chooseRegionFont()">浏览</NButton>
         </div>
       </div>
 

@@ -150,3 +150,9 @@ export interface DownloadProgressPayload {
   percent: number;
 }
 
+export interface SystemFontItem {
+  name: string;
+  family: string;
+  path: string;
+}
+

@@ -50,6 +50,22 @@ const themeOptions = [
 const presetOptions = computed(() =>
   store.presets.map((p) => ({ label: p.name, value: p.path })),
 );
+
+const fontOptions = computed(() => {
+  const base = store.systemFonts.map((f) => ({
+    label: f.name,
+    value: f.path,
+  }));
+  const current = store.fontPath.trim();
+  if (current && !base.some((opt) => opt.value === current)) {
+    const fileName = current.split(/[\\/]/).pop() || current;
+    return [
+      { label: `📁 ${fileName} (外部字体)`, value: current },
+      ...base,
+    ];
+  }
+  return base;
+});
 </script>
 
 <template>
@@ -133,8 +149,17 @@ const presetOptions = computed(() =>
       <!-- ============ 字体 / 背景 / 文档底图 ============ -->
       <div class="field-row" style="margin-top: 10px">
         <span class="field-label">字体</span>
-        <NInput v-model:value="store.fontPath" size="small" placeholder="未选择字体（.ttf/.ttc/.otf）" />
-        <NButton size="small" @click="chooseFont()">选择</NButton>
+        <NSelect
+          :value="store.fontPath || null"
+          size="small"
+          filterable
+          clearable
+          placeholder="选择系统字体或点击右侧浏览文件"
+          :options="fontOptions"
+          style="flex: 1"
+          @update:value="(val: string | null) => { store.fontPath = val || ''; }"
+        />
+        <NButton size="small" @click="chooseFont()">浏览</NButton>
       </div>
       <div class="field-row">
         <span class="field-label">背景</span>
