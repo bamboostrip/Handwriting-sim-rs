@@ -19,7 +19,7 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use zip::ZipArchive;
 
-use crate::core::models::{Align, Paragraph};
+use crate::core::models::{Align, Paragraph, TextRun, TextRunStyle};
 
 /// 段落直接格式（来自 document.xml 的 `w:pPr`）。
 #[derive(Default)]
@@ -35,6 +35,12 @@ struct ParaFmt {
     run_sz_half_pt: Option<u32>,
 }
 
+/// 解析后的单个段落（直接格式 + 原始 Run 列表）。
+struct ParsedParagraph {
+    runs: Vec<TextRun>,
+    fmt: ParaFmt,
+}
+
 /// 样式定义（来自 styles.xml 的 `w:style`）。
 struct StyleDef {
     style_id: String,
@@ -46,7 +52,7 @@ struct StyleDef {
     sz_half_pt: Option<u32>,
 }
 
-/// 从 docx 读取段落（忽略空段），对齐/首行缩进还原。
+/// 从 docx 读取段落（忽略空段），对齐/首行缩进还原，并提取 Run 级富文本样式与标签。
 pub fn load_paragraphs(path: &Path, font_size: f32) -> Result<Vec<Paragraph>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("读取 docx {path:?} 失败：{e}"))?;
     let mut archive =
@@ -55,19 +61,30 @@ pub fn load_paragraphs(path: &Path, font_size: f32) -> Result<Vec<Paragraph>, St
     let document_xml = read_entry(&mut archive, "word/document.xml")?;
     let styles_xml = read_entry_optional(&mut archive, "word/styles.xml");
 
-    let (texts, fmts) = parse_document(&document_xml)?;
+    let parsed_paras = parse_document(&document_xml)?;
     let (styles, doc_defaults_sz) = parse_styles(&styles_xml);
 
     let mut result = Vec::new();
-    for (text, fmt) in texts.into_iter().zip(fmts) {
-        if text.trim().is_empty() {
+    for parsed in parsed_paras {
+        // 展开标签语法（如 {{手写:内容}}）
+        let mut runs = Vec::new();
+        for r in parsed.runs {
+            runs.extend(split_syntax_tags(&r));
+        }
+
+        let (trimmed_text, trimmed_runs) = trim_paragraph_runs(runs);
+        if trimmed_text.is_empty() {
             continue;
         }
-        // 与 Python 版一致：存 `para.text.strip()` 后的文本
-        let text = text.trim().to_string();
-        let align = resolve_align(&fmt);
-        let indent = resolve_indent(&fmt, font_size, &styles, doc_defaults_sz);
-        result.push(Paragraph { text, align, first_line_indent: indent, runs: Vec::new() });
+
+        let align = resolve_align(&parsed.fmt);
+        let indent = resolve_indent(&parsed.fmt, font_size, &styles, doc_defaults_sz);
+        result.push(Paragraph {
+            text: trimmed_text,
+            align,
+            first_line_indent: indent,
+            runs: trimmed_runs,
+        });
     }
     Ok(result)
 }
@@ -99,20 +116,226 @@ fn local_name(name: &[u8]) -> &[u8] {
     }
 }
 
-/// 解析 document.xml，返回 (段落文本列表, 段落直接格式列表)。
-fn parse_document(xml: &str) -> Result<(Vec<String>, Vec<ParaFmt>), String> {
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+/// 将 Word highlight 属性值映射到角色 ID 与印刷体标记。
+fn map_highlight_to_role(val: &str) -> Option<(u32, bool)> {
+    let lower = val.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "none" => None,
+        "yellow" => Some((2, false)),
+        "green" => Some((3, false)),
+        "cyan" => Some((4, false)),
+        "magenta" => Some((5, false)),
+        "lightgray" | "gray-25" | "gray25" | "darkgray" | "gray-50" | "gray50" => Some((1, true)),
+        _ => Some((2, false)),
+    }
+}
 
-    let mut texts = Vec::new();
-    let mut fmts = Vec::new();
+/// 解析 6 位十六进制 RGB 颜色值（支持可选前导 #，忽略 "auto"）。
+fn parse_hex_color(val: &str) -> Option<[u8; 3]> {
+    let mut s = val.trim();
+    if s.eq_ignore_ascii_case("auto") {
+        return None;
+    }
+    if let Some(stripped) = s.strip_prefix('#') {
+        s = stripped;
+    }
+    if s.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some([r, g, b])
+}
+
+/// 解析标签中的角色/样式配置。
+fn parse_tag_style(tag_content: &str, parent_style: &TextRunStyle) -> (String, TextRunStyle) {
+    let mut style = parent_style.clone();
+    let colon_pos = tag_content.find(':').or_else(|| tag_content.find('：'));
+    if let Some(pos) = colon_pos {
+        let colon_len = if tag_content.as_bytes()[pos] == b':' { 1 } else { '：'.len_utf8() };
+        let prefix = tag_content[..pos].trim();
+        let body = &tag_content[pos + colon_len..];
+
+        if prefix == "手写" {
+            style.role_id = 2;
+            style.printed = false;
+        } else if let Some(rest) = prefix.strip_prefix("手写") {
+            if rest.is_empty() {
+                style.role_id = 2;
+            } else if let Ok(n) = rest.parse::<u32>() {
+                style.role_id = if n <= 1 { 2 } else { n + 1 };
+            } else {
+                style.role_id = 2;
+            }
+            style.printed = false;
+        } else if prefix.starts_with("打印") {
+            style.role_id = 1;
+            style.printed = true;
+        } else if let Ok(n) = prefix.parse::<u32>() {
+            style.role_id = n;
+            style.printed = false;
+        } else {
+            style.role_id = 2;
+            style.printed = false;
+        }
+        (body.to_string(), style)
+    } else {
+        style.role_id = 2;
+        style.printed = false;
+        (tag_content.to_string(), style)
+    }
+}
+
+/// 将单个 TextRun 中内嵌的 {{...}} 语法标签拆分为独立的 TextRun。
+fn split_syntax_tags(run: &TextRun) -> Vec<TextRun> {
+    let mut result = Vec::new();
+    let text = &run.text;
+    let mut cursor = 0;
+
+    while let Some(rel_start) = text[cursor..].find("{{") {
+        let tag_start = cursor + rel_start;
+        if let Some(rel_end) = text[tag_start + 2..].find("}}") {
+            let tag_content_start = tag_start + 2;
+            let tag_content_end = tag_start + 2 + rel_end;
+            let tag_end = tag_content_end + 2;
+
+            if tag_start > cursor {
+                let pre = &text[cursor..tag_start];
+                if !pre.is_empty() {
+                    result.push(TextRun::new(pre, run.style.clone()));
+                }
+            }
+
+            let tag_inner = &text[tag_content_start..tag_content_end];
+            let (clean_text, tag_style) = parse_tag_style(tag_inner, &run.style);
+            if !clean_text.is_empty() {
+                result.push(TextRun::new(clean_text, tag_style));
+            }
+
+            cursor = tag_end;
+        } else {
+            break;
+        }
+    }
+
+    if cursor < text.len() {
+        let rem = &text[cursor..];
+        if !rem.is_empty() {
+            result.push(TextRun::new(rem, run.style.clone()));
+        }
+    }
+
+    result
+}
+
+/// 修剪整段文本的首尾空白，并同步修剪 runs 列表两端的字符/空格，保留词间空格。
+fn trim_paragraph_runs(runs: Vec<TextRun>) -> (String, Vec<TextRun>) {
+    let full_text: String = runs.iter().map(|r| r.text.as_str()).collect();
+    let trimmed_text = full_text.trim().to_string();
+    if trimmed_text.is_empty() {
+        return (String::new(), Vec::new());
+    }
+
+    let leading_ws_len = full_text.len() - full_text.trim_start().len();
+    let trailing_ws_len = full_text.len() - full_text.trim_end().len();
+
+    let mut result_runs = Vec::new();
+    let mut current_pos = 0;
+    let keep_start = leading_ws_len;
+    let keep_end = full_text.len() - trailing_ws_len;
+
+    for run in runs {
+        let run_len = run.text.len();
+        let run_start = current_pos;
+        let run_end = current_pos + run_len;
+        current_pos = run_end;
+
+        let slice_start = run_start.max(keep_start);
+        let slice_end = run_end.min(keep_end);
+
+        if slice_start < slice_end {
+            let offset_start = slice_start - run_start;
+            let offset_end = slice_end - run_start;
+            let sub_text = &run.text[offset_start..offset_end];
+            if !sub_text.is_empty() {
+                result_runs.push(TextRun::new(sub_text, run.style));
+            }
+        }
+    }
+
+    (trimmed_text, result_runs)
+}
+
+/// 处理 rPr 属性节点。
+fn handle_r_pr_tag(e: &quick_xml::events::BytesStart, style: &mut TextRunStyle, fmt: &mut ParaFmt) {
+    match local_name(e.name().as_ref()) {
+        b"sz" => {
+            if let Some(v) = attr_val(e, "val").and_then(|v| v.parse::<u32>().ok()) {
+                if fmt.run_sz_half_pt.is_none() {
+                    fmt.run_sz_half_pt = Some(v);
+                }
+                style.font_size = Some(v as f32 / 2.0);
+            }
+        }
+        b"highlight" => {
+            if let Some(v) = attr_val(e, "val") {
+                if let Some((role_id, printed)) = map_highlight_to_role(&v) {
+                    style.role_id = role_id;
+                    if printed {
+                        style.printed = true;
+                    }
+                }
+            }
+        }
+        b"color" => {
+            if let Some(v) = attr_val(e, "val") {
+                if let Some(rgb) = parse_hex_color(&v) {
+                    style.fill = Some(rgb);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 处理 pPr 属性节点。
+fn handle_p_pr_tag(e: &quick_xml::events::BytesStart, fmt: &mut ParaFmt) {
+    match local_name(e.name().as_ref()) {
+        b"pStyle" => {
+            if let Some(v) = attr_val(e, "val") {
+                fmt.style_id = Some(v);
+            }
+        }
+        b"jc" => {
+            if let Some(v) = attr_val(e, "val") {
+                fmt.jc = Some(v);
+            }
+        }
+        b"ind" => {
+            read_ind_attrs(e, fmt);
+        }
+        _ => {}
+    }
+}
+
+/// 解析 document.xml，返回段落列表（每个段落包含 Runs 与格式）。
+fn parse_document(xml: &str) -> Result<Vec<ParsedParagraph>, String> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut paras = Vec::new();
     // 状态
     let mut in_body_para = false; // 当前 w:p 是 body 直接子级（对齐 python-docx doc.paragraphs）
     let mut in_table = false;
     let mut in_p_pr = false;
     let mut in_run = false;
     let mut in_r_pr = false;
-    let mut cur_text = String::new();
+    let mut in_t = false;
+
+    let mut cur_runs: Vec<TextRun> = Vec::new();
+    let mut cur_run_text = String::new();
+    let mut cur_run_style = TextRunStyle::default();
     let mut cur_fmt = ParaFmt::default();
 
     loop {
@@ -121,58 +344,82 @@ fn parse_document(xml: &str) -> Result<(Vec<String>, Vec<ParaFmt>), String> {
                 b"tbl" => in_table = true,
                 b"p" if !in_table => {
                     in_body_para = true;
-                    cur_text.clear();
+                    cur_runs.clear();
+                    cur_run_text.clear();
+                    cur_run_style = TextRunStyle::default();
                     cur_fmt = ParaFmt::default();
                 }
-                b"pPr" if in_body_para => in_p_pr = true,
-                b"r" if in_body_para => in_run = true,
-                b"rPr" if in_run => in_r_pr = true,
-                _ => {}
+                b"pPr" if in_body_para => {
+                    in_p_pr = true;
+                    handle_p_pr_tag(&e, &mut cur_fmt);
+                }
+                b"r" if in_body_para => {
+                    if !cur_run_text.is_empty() {
+                        cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), cur_run_style.clone()));
+                    }
+                    in_run = true;
+                    cur_run_text.clear();
+                    cur_run_style = TextRunStyle::default();
+                }
+                b"rPr" if in_run => {
+                    in_r_pr = true;
+                    handle_r_pr_tag(&e, &mut cur_run_style, &mut cur_fmt);
+                }
+                b"t" if in_body_para => in_t = true,
+                _ => {
+                    if in_p_pr {
+                        handle_p_pr_tag(&e, &mut cur_fmt);
+                    } else if in_r_pr {
+                        handle_r_pr_tag(&e, &mut cur_run_style, &mut cur_fmt);
+                    }
+                }
             },
             Ok(Event::Empty(e)) => match local_name(e.name().as_ref()) {
-                b"tab" if in_body_para => cur_text.push('\t'),
-                b"br" if in_body_para => cur_text.push('\n'),
-                b"pStyle" if in_p_pr => {
-                    if let Some(v) = attr_val(&e, "val") {
-                        cur_fmt.style_id = Some(v);
+                b"tab" if in_body_para => cur_run_text.push('\t'),
+                b"br" | b"cr" if in_body_para => cur_run_text.push('\n'),
+                _ => {
+                    if in_p_pr {
+                        handle_p_pr_tag(&e, &mut cur_fmt);
+                    } else if in_r_pr {
+                        handle_r_pr_tag(&e, &mut cur_run_style, &mut cur_fmt);
                     }
                 }
-                b"jc" if in_p_pr => {
-                    if let Some(v) = attr_val(&e, "val") {
-                        cur_fmt.jc = Some(v);
-                    }
-                }
-                b"ind" if in_p_pr => read_ind_attrs(&e, &mut cur_fmt),
-                b"sz" if in_r_pr && cur_fmt.run_sz_half_pt.is_none() => {
-                    cur_fmt.run_sz_half_pt = attr_val(&e, "val").and_then(|v| v.parse().ok());
-                }
-                _ => {}
             },
             Ok(Event::Text(t)) => {
-                if in_body_para {
+                if in_body_para && in_t {
                     if let Ok(s) = std::str::from_utf8(t.as_ref()) {
                         if let Ok(v) = unescape(s) {
-                            cur_text.push_str(&v);
+                            cur_run_text.push_str(&v);
                         }
                     }
                 }
             }
             Ok(Event::End(e)) => match local_name(e.name().as_ref()) {
                 b"tbl" => in_table = false,
-                b"p" if in_body_para => {
-                    texts.push(std::mem::take(&mut cur_text));
-                    fmts.push(std::mem::take(&mut cur_fmt));
-                    in_body_para = false;
-                    in_p_pr = false;
+                b"t" => in_t = false,
+                b"rPr" => in_r_pr = false,
+                b"r" => {
+                    if !cur_run_text.is_empty() {
+                        cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), cur_run_style.clone()));
+                    }
                     in_run = false;
                     in_r_pr = false;
                 }
                 b"pPr" => in_p_pr = false,
-                b"r" => {
+                b"p" if in_body_para => {
+                    if !cur_run_text.is_empty() {
+                        cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), cur_run_style.clone()));
+                    }
+                    paras.push(ParsedParagraph {
+                        runs: std::mem::take(&mut cur_runs),
+                        fmt: std::mem::take(&mut cur_fmt),
+                    });
+                    in_body_para = false;
+                    in_p_pr = false;
                     in_run = false;
                     in_r_pr = false;
+                    in_t = false;
                 }
-                b"rPr" => in_r_pr = false,
                 _ => {}
             },
             Ok(Event::Eof) => break,
@@ -180,7 +427,7 @@ fn parse_document(xml: &str) -> Result<(Vec<String>, Vec<ParaFmt>), String> {
             _ => {}
         }
     }
-    Ok((texts, fmts))
+    Ok(paras)
 }
 
 /// 读取 `w:ind` 的首行缩进属性（firstLineChars / firstLine）。
@@ -645,5 +892,90 @@ mod tests {
         let paras = load_paragraphs(&path, 36.0).unwrap();
         assert_eq!(paras.len(), 1);
         assert_eq!(paras[0].text, "前链接后");
+    }
+
+    #[test]
+    fn test_docx_with_highlights() {
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>黄</w:t></w:r><w:r><w:rPr><w:highlight w:val="green"/></w:rPr><w:t>绿</w:t></w:r><w:r><w:rPr><w:highlight w:val="cyan"/></w:rPr><w:t>青</w:t></w:r><w:r><w:rPr><w:highlight w:val="magenta"/></w:rPr><w:t>品红</w:t></w:r><w:r><w:rPr><w:highlight w:val="lightGray"/></w:rPr><w:t>印刷灰</w:t></w:r></w:p></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("highlights.docx");
+        std::fs::write(&path, zip_docx(document_xml.as_bytes(), None)).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].runs.len(), 5);
+        assert_eq!(paras[0].runs[0].text, "黄");
+        assert_eq!(paras[0].runs[0].style.role_id, 2);
+        assert_eq!(paras[0].runs[1].text, "绿");
+        assert_eq!(paras[0].runs[1].style.role_id, 3);
+        assert_eq!(paras[0].runs[2].text, "青");
+        assert_eq!(paras[0].runs[2].style.role_id, 4);
+        assert_eq!(paras[0].runs[3].text, "品红");
+        assert_eq!(paras[0].runs[3].style.role_id, 5);
+        assert_eq!(paras[0].runs[4].text, "印刷灰");
+        assert_eq!(paras[0].runs[4].style.role_id, 1);
+        assert!(paras[0].runs[4].style.printed);
+    }
+
+    #[test]
+    fn test_docx_with_color_and_size() {
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:color w:val="FF0000"/><w:sz w:val="48"/></w:rPr><w:t>红色大字</w:t></w:r></w:p></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("color_size.docx");
+        std::fs::write(&path, zip_docx(document_xml.as_bytes(), None)).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].runs.len(), 1);
+        assert_eq!(paras[0].runs[0].text, "红色大字");
+        assert_eq!(paras[0].runs[0].style.fill, Some([255, 0, 0]));
+        assert_eq!(paras[0].runs[0].style.font_size, Some(24.0));
+    }
+
+    #[test]
+    fn test_docx_with_syntax_tags() {
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>正文{{手写:已批准}}后续</w:t></w:r></w:p></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("syntax_tags.docx");
+        std::fs::write(&path, zip_docx(document_xml.as_bytes(), None)).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].text, "正文已批准后续");
+        assert_eq!(paras[0].runs.len(), 3);
+        assert_eq!(paras[0].runs[0].text, "正文");
+        assert_eq!(paras[0].runs[0].style.role_id, 0);
+        assert_eq!(paras[0].runs[1].text, "已批准");
+        assert_eq!(paras[0].runs[1].style.role_id, 2);
+        assert_eq!(paras[0].runs[2].text, "后续");
+        assert_eq!(paras[0].runs[2].style.role_id, 0);
+    }
+
+    #[test]
+    fn test_docx_with_extended_syntax_tags() {
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{{手写2:老师批注}}{{打印:注意事项}}{{1:学生A}}{{2:学生B}}{{默认手写}}</w:t></w:r></w:p></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extended_tags.docx");
+        std::fs::write(&path, zip_docx(document_xml.as_bytes(), None)).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].runs.len(), 5);
+
+        assert_eq!(paras[0].runs[0].text, "老师批注");
+        assert_eq!(paras[0].runs[0].style.role_id, 3);
+        assert!(!paras[0].runs[0].style.printed);
+
+        assert_eq!(paras[0].runs[1].text, "注意事项");
+        assert_eq!(paras[0].runs[1].style.role_id, 1);
+        assert!(paras[0].runs[1].style.printed);
+
+        assert_eq!(paras[0].runs[2].text, "学生A");
+        assert_eq!(paras[0].runs[2].style.role_id, 1);
+        assert!(!paras[0].runs[2].style.printed);
+
+        assert_eq!(paras[0].runs[3].text, "学生B");
+        assert_eq!(paras[0].runs[3].style.role_id, 2);
+        assert!(!paras[0].runs[3].style.printed);
+
+        assert_eq!(paras[0].runs[4].text, "默认手写");
+        assert_eq!(paras[0].runs[4].style.role_id, 2);
+        assert!(!paras[0].runs[4].style.printed);
     }
 }
