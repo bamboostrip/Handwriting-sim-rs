@@ -174,15 +174,20 @@ fn export_pdf(state: State<'_, AppState>, params: UiParams, path: String) -> Res
     engine::export_pdf(&hp, Path::new(path.trim()), seed).map_err(|e| e.to_string())
 }
 
-/// 导入 docx：解析段落文本 + 对齐 + 首行缩进 + 富文本 Runs。
+/// 导入 docx：解析段落文本 + 对齐 + 首行缩进 + 富文本 Runs 与主字体名。
 #[tauri::command]
-fn import_docx(path: String, font_size: f32) -> Result<Vec<params::UiParagraph>, String> {
+fn import_docx(path: String, font_size: f32) -> Result<params::DocxImportOutput, String> {
     let paras = docx_io::load_paragraphs(Path::new(path.trim()), font_size)
         .map_err(|e| format!("导入 docx 失败：{e}"))?;
-    Ok(paras
+    let doc_font_family = docx_io::detect_doc_font_family(&paras);
+    let paragraphs = paras
         .iter()
         .map(|p| params::UiParagraph::from_paragraph_with_font_size(p, font_size))
-        .collect())
+        .collect();
+    Ok(params::DocxImportOutput {
+        paragraphs,
+        doc_font_family,
+    })
 }
 
 /// 导入 PDF/DOCX 文档底图：后台栅格化为 200 DPI 逐页 PNG，返回路径列表。

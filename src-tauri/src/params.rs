@@ -27,6 +27,7 @@ pub struct UiTextRunStyle {
     pub role_id: u32,
     pub highlight: Option<String>,
     pub font_path: Option<String>,
+    pub font_family: Option<String>,
     pub font_size: Option<f32>,
     pub fill: Option<String>, // #RRGGBB
     pub printed: bool,
@@ -38,6 +39,7 @@ impl From<&TextRunStyle> for UiTextRunStyle {
             role_id: s.role_id,
             highlight: s.highlight.clone(),
             font_path: s.font_path.clone(),
+            font_family: s.font_family.clone(),
             font_size: s.font_size,
             fill: s
                 .fill
@@ -45,6 +47,13 @@ impl From<&TextRunStyle> for UiTextRunStyle {
             printed: s.printed,
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DocxImportOutput {
+    pub paragraphs: Vec<UiParagraph>,
+    pub doc_font_family: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -447,6 +456,7 @@ impl UiParams {
                                 role_id: r.style.role_id,
                                 highlight: r.style.highlight.clone(),
                                 font_path: r.style.font_path.clone().filter(|s| !s.trim().is_empty()),
+                                font_family: r.style.font_family.clone().filter(|s| !s.trim().is_empty()),
                                 font_size: r.style.font_size,
                                 fill,
                                 printed: r.style.printed,
@@ -464,6 +474,7 @@ impl UiParams {
                     text,
                     align: align_of(row.align),
                     first_line_indent: row.indent_em * self.font_size,
+                    font_family: None,
                     runs,
                 })
             })
@@ -512,6 +523,7 @@ impl UiParams {
                                         role_id: r.style.role_id,
                                         highlight: r.style.highlight.clone(),
                                         font_path: r.style.font_path.clone().filter(|s| !s.trim().is_empty()),
+                                        font_family: r.style.font_family.clone().filter(|s| !s.trim().is_empty()),
                                         font_size: r.style.font_size,
                                         fill,
                                         printed: r.style.printed,
@@ -529,6 +541,7 @@ impl UiParams {
                             text,
                             align: align_of(row.align),
                             first_line_indent: row.indent_em * region_fs,
+                            font_family: None,
                             runs,
                         })
                     })
@@ -694,6 +707,7 @@ mod tests {
                                 role_id: 1,
                                 highlight: None,
                                 font_path: Some("fonts/custom.ttf".into()),
+                                font_family: None,
                                 font_size: Some(28.0),
                                 fill: Some("#00ff00".into()),
                                 printed: false,
@@ -705,6 +719,7 @@ mod tests {
                                 role_id: 2,
                                 highlight: Some("lightGray".into()),
                                 font_path: None,
+                                font_family: None,
                                 font_size: None,
                                 fill: None,
                                 printed: true,
@@ -757,8 +772,9 @@ mod tests {
             text: "全段文本".into(),
             align: Align::Right,
             first_line_indent: 72.0,
+            font_family: None,
             runs: vec![
-                TextRun::new("片段1", TextRunStyle { role_id: 1, fill: Some([255, 0, 0]), ..Default::default() }),
+                TextRun::new("片段1", TextRunStyle { role_id: 1, fill: Some([255, 0, 0]), font_family: Some("仿宋_GB2312".into()), ..Default::default() }),
                 TextRun::new("片段2", TextRunStyle { role_id: 2, printed: true, ..Default::default() }),
             ],
         };
@@ -771,6 +787,7 @@ mod tests {
         assert_eq!(ui_para.runs[0].text, "片段1");
         assert_eq!(ui_para.runs[0].style.role_id, 1);
         assert_eq!(ui_para.runs[0].style.fill, Some("#ff0000".into()));
+        assert_eq!(ui_para.runs[0].style.font_family, Some("仿宋_GB2312".into()));
         assert_eq!(ui_para.runs[1].text, "片段2");
         assert_eq!(ui_para.runs[1].style.role_id, 2);
         assert!(ui_para.runs[1].style.printed);

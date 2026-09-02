@@ -4,6 +4,7 @@ export interface UiTextRunStyle {
   roleId?: number;
   highlight?: string | null;
   fontPath?: string | null;
+  fontFamily?: string | null;
   fontSize?: number | null;
   fill?: string | null;
   printed?: boolean;
@@ -12,6 +13,11 @@ export interface UiTextRunStyle {
 export interface UiTextRun {
   text: string;
   style?: UiTextRunStyle;
+}
+
+export interface DocxImportOutput {
+  paragraphs: UiParagraph[];
+  docFontFamily?: string | null;
 }
 
 export interface UiParagraph {

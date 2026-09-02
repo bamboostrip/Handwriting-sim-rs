@@ -113,9 +113,9 @@ fn integration_paragraph_path_renders_and_exports() {
         left_margin: 40.0,
         fill: [0, 0, 0],
         paragraphs: vec![
-            Paragraph { text: "第一段：居左对齐，首行缩进。".into(), align: Align::Left, first_line_indent: 50.0, runs: Vec::new() },
-            Paragraph { text: "第二段：居中对齐。".into(), align: Align::Center, first_line_indent: 0.0, runs: Vec::new() },
-            Paragraph { text: "第三段：居右对齐。".into(), align: Align::Right, first_line_indent: 0.0, runs: Vec::new() },
+            Paragraph { text: "第一段：居左对齐，首行缩进。".into(), align: Align::Left, first_line_indent: 50.0, font_family: None, runs: Vec::new() },
+            Paragraph { text: "第二段：居中对齐。".into(), align: Align::Center, first_line_indent: 0.0, font_family: None, runs: Vec::new() },
+            Paragraph { text: "第三段：居右对齐。".into(), align: Align::Right, first_line_indent: 0.0, font_family: None, runs: Vec::new() },
         ],
         ..HandwritingParams::default()
     };

@@ -270,6 +270,7 @@ impl DefaultEngine {
                     _ => Align::Left,
                 },
                 first_line_indent: region.indent_em * rp.font_size,
+                font_family: None,
                 runs: Vec::new(),
             }];
         } else if region.text.contains('\n') {
@@ -280,6 +281,7 @@ impl DefaultEngine {
                     text: t.to_string(),
                     align: Align::Left,
                     first_line_indent: 0.0,
+                    font_family: None,
                     runs: Vec::new(),
                 })
                 .collect();
@@ -981,12 +983,14 @@ mod tests {
                 text: "第一段文字，居中。".into(),
                 align: Align::Center,
                 first_line_indent: 40.0,
+                font_family: None,
                 runs: Vec::new(),
             },
             Paragraph {
                 text: "第二段文字，右对齐。".into(),
                 align: Align::Right,
                 first_line_indent: 0.0,
+                font_family: None,
                 runs: Vec::new(),
             },
         ];
@@ -1169,6 +1173,7 @@ mod tests {
             text: "第一段".into(),
             align: Align::Left,
             first_line_indent: 280.0, // 2 字宽（2 × font_size 140）
+            font_family: None,
             runs: Vec::new(),
         }];
         // 背景宽 2560（> PREVIEW_MAX_WIDTH 1280）→ scale = 0.5
@@ -1412,8 +1417,8 @@ mod tests {
             x: 40, y: 40, w: 300, h: 200,
             text: "你好\n张三".into(),
             paragraphs: vec![
-                Paragraph { text: "你好".into(), align: Align::Center, first_line_indent: 0.0, runs: Vec::new() },
-                Paragraph { text: "张三".into(), align: Align::Right, first_line_indent: 0.0, runs: Vec::new() },
+                Paragraph { text: "你好".into(), align: Align::Center, first_line_indent: 0.0, font_family: None, runs: Vec::new() },
+                Paragraph { text: "张三".into(), align: Align::Right, first_line_indent: 0.0, font_family: None, runs: Vec::new() },
             ],
             ..TextRegion::default()
         }];
@@ -1707,6 +1712,7 @@ mod tests {
             text: String::new(),
             align: Align::Left,
             first_line_indent: 0.0,
+            font_family: None,
             runs: vec![
                 TextRun::new(
                     "印刷标题：",
@@ -1804,6 +1810,7 @@ mod tests {
             text: String::new(),
             align: Align::Left,
             first_line_indent: 0.0,
+            font_family: None,
             runs: vec![
                 TextRun::new("【题目】", TextRunStyle { role_id: 1, ..Default::default() }),
                 TextRun::new("优秀回答", TextRunStyle { role_id: 0, fill: Some([0, 0, 255]), ..Default::default() }),

@@ -256,6 +256,9 @@ pub struct TextRunStyle {
     /// 字体文件路径覆盖（None = 跟随角色或主配置）。
     #[serde(default)]
     pub font_path: Option<String>,
+    /// 字体名称 / 族名（从 docx 等导入时捕获的字体名，如 "仿宋_GB2312"）。
+    #[serde(default)]
+    pub font_family: Option<String>,
     /// 字号覆盖（None = 跟随角色或主配置）。
     #[serde(default)]
     pub font_size: Option<f32>,
@@ -319,6 +322,9 @@ pub struct Paragraph {
     /// 首行缩进（像素）。
     #[serde(default)]
     pub first_line_indent: f32,
+    /// 段落关联字体（可选）。
+    #[serde(default)]
+    pub font_family: Option<String>,
     /// 富文本分段（多样式 / 多角色混排）；非空时优先于 text。
     #[serde(default)]
     pub runs: Vec<TextRun>,
@@ -330,6 +336,7 @@ impl Default for Paragraph {
             text: String::new(),
             align: Align::Left,
             first_line_indent: 0.0,
+            font_family: None,
             runs: Vec::new(),
         }
     }
@@ -786,6 +793,7 @@ mod tests {
             role_id: 2,
             highlight: Some("yellow".into()),
             font_path: Some("custom/font.ttf".into()),
+            font_family: Some("仿宋_GB2312".into()),
             font_size: Some(28.0),
             fill: Some([255, 0, 0]),
             printed: true,
@@ -799,6 +807,7 @@ mod tests {
         assert_eq!(deserialized.style.role_id, 2);
         assert_eq!(deserialized.style.highlight, Some("yellow".into()));
         assert_eq!(deserialized.style.font_path, Some("custom/font.ttf".into()));
+        assert_eq!(deserialized.style.font_family, Some("仿宋_GB2312".into()));
         assert_eq!(deserialized.style.font_size, Some(28.0));
         assert_eq!(deserialized.style.fill, Some([255, 0, 0]));
         assert!(deserialized.style.printed);
@@ -810,6 +819,7 @@ mod tests {
         assert_eq!(minimal_run.style, TextRunStyle::default());
         assert_eq!(minimal_run.style.role_id, 0);
         assert_eq!(minimal_run.style.highlight, None);
+        assert_eq!(minimal_run.style.font_family, None);
         assert!(!minimal_run.style.printed);
     }
 
@@ -820,6 +830,7 @@ mod tests {
             text: "传统单段落内容".into(),
             align: Align::Left,
             first_line_indent: 20.0,
+            font_family: None,
             runs: Vec::new(),
         };
         let effective = legacy_para.effective_runs();
@@ -832,6 +843,7 @@ mod tests {
             text: String::new(),
             align: Align::Center,
             first_line_indent: 0.0,
+            font_family: None,
             runs: vec![
                 TextRun::new("角色A手写", TextRunStyle { role_id: 1, ..Default::default() }),
                 TextRun::new("印刷体提示", TextRunStyle { printed: true, ..Default::default() }),
@@ -960,6 +972,7 @@ mod tests {
                 text: String::new(),
                 align: Align::Left,
                 first_line_indent: 0.0,
+                font_family: None,
                 runs: vec![TextRun::new("片段内容", TextRunStyle::default())],
             }],
             ..HandwritingParams::default()

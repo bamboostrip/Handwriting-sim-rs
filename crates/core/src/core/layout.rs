@@ -1042,6 +1042,7 @@ mod tests {
             text: "第一行文字，第二行测试。".into(),
             align: Align::Left,
             first_line_indent: 0.0,
+            font_family: None,
             runs: Vec::new(),
         }
     }
@@ -1431,6 +1432,7 @@ mod tests {
             text: String::new(),
             align: Align::Left,
             first_line_indent: 0.0,
+            font_family: None,
             runs: vec![
                 TextRun::new(
                     "【题目】",
@@ -1514,6 +1516,7 @@ mod tests {
             text: String::new(),
             align: Align::Left,
             first_line_indent: 0.0,
+            font_family: None,
             runs: vec![
                 TextRun::new("印刷标题", TextRunStyle { role_id: 1, ..Default::default() }),
                 TextRun::new("红字批注", TextRunStyle { role_id: 2, ..Default::default() }),

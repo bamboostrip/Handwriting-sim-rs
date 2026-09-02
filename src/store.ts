@@ -674,7 +674,8 @@ export async function importDocx(): Promise<void> {
   const p = await dialogs.pickDocx();
   if (!p) return;
   try {
-    const rows = await api.importDocx(p, num(store.fontSize, 36));
+    const res = await api.importDocx(p, num(store.fontSize, 36));
+    const rows = res.paragraphs;
     setParagraphs(
       rows.map((row) =>
         newPara(
@@ -1230,7 +1231,8 @@ export async function importDocxToDraft(): Promise<void> {
   const p = await dialogs.pickDocx();
   if (!p) return;
   try {
-    const rows = await api.importDocx(p, draftFontSize(d));
+    const res = await api.importDocx(p, draftFontSize(d));
+    const rows = res.paragraphs;
     if (!rows.length) throw new Error("文档为空");
     d.paragraphs = rows.map((row) => ({
       text: cleanText(row.text),

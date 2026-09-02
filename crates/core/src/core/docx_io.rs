@@ -84,10 +84,95 @@ pub fn load_paragraphs(path: &Path, font_size: f32) -> Result<Vec<Paragraph>, St
             text: trimmed_text,
             align,
             first_line_indent: indent,
+            font_family: None,
             runs: trimmed_runs,
         });
     }
+
+    // 双模式自动分类：
+    // 如果整个文档没有任何高亮背景色：纯手写模式（所有 runs 设为 role_id = 0, printed = false）。
+    // 如果整个文档存在高亮背景色：高亮文本为手写（role_id >= 2, printed = false），所有未高亮文本自动转为印刷体模板（role_id = 1, printed = true）。
+    let has_highlights = result.iter().any(|p| {
+        p.runs
+            .iter()
+            .any(|r| r.style.highlight.is_some() || (r.style.role_id >= 2 && !r.style.printed))
+    });
+
+    if !has_highlights {
+        for p in &mut result {
+            for r in &mut p.runs {
+                r.style.role_id = 0;
+                r.style.printed = false;
+            }
+        }
+    } else {
+        for p in &mut result {
+            for r in &mut p.runs {
+                if r.style.role_id == 0 {
+                    r.style.role_id = 1;
+                    r.style.printed = true;
+                }
+            }
+        }
+    }
+
     Ok(result)
+}
+
+/// 探测文档的主字体名称（优先从印刷体或未高亮片段统计最常出现的字体族名）。
+pub fn detect_doc_font_family(paragraphs: &[Paragraph]) -> Option<String> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+
+    // 优先从印刷体或未高亮的 run 中提取
+    for p in paragraphs {
+        for r in &p.runs {
+            if r.style.printed || r.style.highlight.is_none() {
+                if let Some(ref font) = r.style.font_family {
+                    let trimmed = font.trim();
+                    if !trimmed.is_empty() {
+                        let count = counts.entry(trimmed.to_string()).or_insert(0);
+                        if *count == 0 {
+                            order.push(trimmed.to_string());
+                        }
+                        *count += r.text.chars().count().max(1);
+                    }
+                }
+            }
+        }
+    }
+
+    // 若无匹配，则回退统计所有 run
+    if counts.is_empty() {
+        for p in paragraphs {
+            for r in &p.runs {
+                if let Some(ref font) = r.style.font_family {
+                    let trimmed = font.trim();
+                    if !trimmed.is_empty() {
+                        let count = counts.entry(trimmed.to_string()).or_insert(0);
+                        if *count == 0 {
+                            order.push(trimmed.to_string());
+                        }
+                        *count += r.text.chars().count().max(1);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut best: Option<(String, usize)> = None;
+    for name in &order {
+        let count = counts.get(name).copied().unwrap_or(0);
+        if let Some((_, max_count)) = best {
+            if count > max_count {
+                best = Some((name.clone(), count));
+            }
+        } else {
+            best = Some((name.clone(), count));
+        }
+    }
+
+    best.map(|(name, _)| name)
 }
 
 /// 读取 zip 内指定 entry 的文本内容（UTF-8）。
@@ -236,14 +321,16 @@ impl StyleRegistry {
 #[derive(Default, Clone, Debug)]
 struct RawRunProps {
     sz_half_pt: Option<u32>,
+    font_family: Option<String>,
     highlight: Option<String>,
     color: Option<String>,
 }
 
 impl RawRunProps {
     fn apply_to(&self, style: &mut TextRunStyle, registry: &mut StyleRegistry) {
-        if let Some(sz) = self.sz_half_pt {
-            style.font_size = Some(sz as f32 / 2.0);
+        // 不再将 Word 中的 sz 设置为 style.font_size，保留信纸预设字号
+        if let Some(ref font) = self.font_family {
+            style.font_family = Some(font.clone());
         }
         if let Some(ref color_val) = self.color {
             if let Some(rgb) = parse_hex_color(color_val) {
@@ -424,6 +511,15 @@ fn handle_r_pr_tag(
         b"color" => {
             if let Some(v) = attr_val(e, "val") {
                 raw.color = Some(v);
+            }
+        }
+        b"rFonts" => {
+            let font = attr_val(e, "eastAsia")
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| attr_val(e, "ascii").filter(|s| !s.trim().is_empty()))
+                .or_else(|| attr_val(e, "hAnsi").filter(|s| !s.trim().is_empty()));
+            if font.is_some() {
+                raw.font_family = font;
             }
         }
         _ => {}
@@ -1102,7 +1198,7 @@ mod tests {
         assert_eq!(paras[0].runs.len(), 1);
         assert_eq!(paras[0].runs[0].text, "红色大字");
         assert_eq!(paras[0].runs[0].style.fill, Some([255, 0, 0]));
-        assert_eq!(paras[0].runs[0].style.font_size, Some(24.0));
+        assert_eq!(paras[0].runs[0].style.font_size, None);
     }
 
     #[test]
@@ -1116,11 +1212,14 @@ mod tests {
         assert_eq!(paras[0].text, "正文已批准后续");
         assert_eq!(paras[0].runs.len(), 3);
         assert_eq!(paras[0].runs[0].text, "正文");
-        assert_eq!(paras[0].runs[0].style.role_id, 0);
+        assert_eq!(paras[0].runs[0].style.role_id, 1);
+        assert!(paras[0].runs[0].style.printed);
         assert_eq!(paras[0].runs[1].text, "已批准");
         assert_eq!(paras[0].runs[1].style.role_id, 2);
+        assert!(!paras[0].runs[1].style.printed);
         assert_eq!(paras[0].runs[2].text, "后续");
-        assert_eq!(paras[0].runs[2].style.role_id, 0);
+        assert_eq!(paras[0].runs[2].style.role_id, 1);
+        assert!(paras[0].runs[2].style.printed);
     }
 
     #[test]
@@ -1152,5 +1251,71 @@ mod tests {
         assert_eq!(paras[0].runs[4].text, "默认手写");
         assert_eq!(paras[0].runs[4].style.role_id, 2);
         assert!(!paras[0].runs[4].style.printed);
+    }
+
+    #[test]
+    fn test_docx_no_highlights_is_full_handwriting() {
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>第一段纯手写</w:t></w:r></w:p><w:p><w:r><w:t>第二段纯手写</w:t></w:r></w:p></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no_highlights.docx");
+        std::fs::write(&path, zip_docx(document_xml.as_bytes(), None)).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 2);
+        for p in &paras {
+            for r in &p.runs {
+                assert_eq!(r.style.role_id, 0);
+                assert!(!r.style.printed);
+            }
+        }
+    }
+
+    #[test]
+    fn test_docx_with_highlights_converts_unmarked_to_printed() {
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>未高亮模板前缀</w:t></w:r><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>黄色高亮填空</w:t></w:r><w:r><w:t>未高亮模板后缀</w:t></w:r></w:p></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dual_mode.docx");
+        std::fs::write(&path, zip_docx(document_xml.as_bytes(), None)).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].runs.len(), 3);
+
+        // Run 0: unmarked -> converted to printed
+        assert_eq!(paras[0].runs[0].text, "未高亮模板前缀");
+        assert_eq!(paras[0].runs[0].style.role_id, 1);
+        assert!(paras[0].runs[0].style.printed);
+
+        // Run 1: yellow highlight -> role_id 2, handwriting (printed = false)
+        assert_eq!(paras[0].runs[1].text, "黄色高亮填空");
+        assert_eq!(paras[0].runs[1].style.role_id, 2);
+        assert_eq!(paras[0].runs[1].style.highlight.as_deref(), Some("yellow"));
+        assert!(!paras[0].runs[1].style.printed);
+
+        // Run 2: unmarked -> converted to printed
+        assert_eq!(paras[0].runs[2].text, "未高亮模板后缀");
+        assert_eq!(paras[0].runs[2].style.role_id, 1);
+        assert!(paras[0].runs[2].style.printed);
+    }
+
+    #[test]
+    fn test_docx_font_size_not_overridden() {
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:t>字号测试</w:t></w:r></w:p></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("font_sz.docx");
+        std::fs::write(&path, zip_docx(document_xml.as_bytes(), None)).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].runs[0].style.font_size, None);
+    }
+
+    #[test]
+    fn test_docx_rfonts_extraction() {
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:rFonts w:eastAsia="仿宋_GB2312" w:ascii="Calibri"/></w:rPr><w:t>字体测试</w:t></w:r></w:p></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rfonts.docx");
+        std::fs::write(&path, zip_docx(document_xml.as_bytes(), None)).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].runs[0].style.font_family.as_deref(), Some("仿宋_GB2312"));
+        assert_eq!(detect_doc_font_family(&paras).as_deref(), Some("仿宋_GB2312"));
     }
 }

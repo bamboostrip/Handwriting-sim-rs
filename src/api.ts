@@ -5,7 +5,7 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import type { DownloadProgressPayload, PngPage, PresetItem, UiParagraph, UiParams, UpdateInfo } from "./types";
+import type { DocxImportOutput, DownloadProgressPayload, PngPage, PresetItem, UiParams, UpdateInfo } from "./types";
 
 /** 本地文件 → asset 协议 URL（需 tauri.conf.json assetProtocol scope 覆盖） */
 export const assetUrl = (path: string): string => convertFileSrc(path);
@@ -16,9 +16,9 @@ export const api = {
     invoke<string[]>("export_files", { params, dir }),
   exportPdf: (params: UiParams, path: string) =>
     invoke<void>("export_pdf", { params, path }),
-  /** 返回 UiParagraph[]（段落文本、对齐、首行缩进 em、富文本 Runs） */
+  /** 返回 DocxImportOutput（段落文本、对齐、首行缩进 em、富文本 Runs 与检测到的文档字体） */
   importDocx: (path: string, fontSize: number) =>
-    invoke<UiParagraph[]>("import_docx", { path, fontSize }),
+    invoke<DocxImportOutput>("import_docx", { path, fontSize }),
   importDocument: (path: string) => invoke<string[]>("import_document", { path }),
   listPresets: () => invoke<PresetItem[]>("list_presets"),
   loadPreset: (path: string) => invoke<UiParams>("load_preset", { path }),
