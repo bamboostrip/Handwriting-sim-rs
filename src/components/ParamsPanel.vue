@@ -15,6 +15,7 @@ import {
   NSlider,
   NTooltip,
 } from "naive-ui";
+import FontPicker from "./FontPicker.vue";
 import ParaEditor from "./ParaEditor.vue";
 import RegionList from "./RegionList.vue";
 import RegionDialog from "./RegionDialog.vue";
@@ -22,7 +23,6 @@ import RoleManager from "./RoleManager.vue";
 import {
   applyRoleToSelection,
   chooseBackground,
-  chooseFont,
   cycleThemePreference,
   doRender,
   exportFiles,
@@ -50,22 +50,6 @@ const themeOptions = [
 const presetOptions = computed(() =>
   store.presets.map((p) => ({ label: p.name, value: p.path })),
 );
-
-const fontOptions = computed(() => {
-  const base = store.systemFonts.map((f) => ({
-    label: f.name,
-    value: f.path,
-  }));
-  const current = store.fontPath.trim();
-  if (current && !base.some((opt) => opt.value === current)) {
-    const fileName = current.split(/[\\/]/).pop() || current;
-    return [
-      { label: `📁 ${fileName} (外部字体)`, value: current },
-      ...base,
-    ];
-  }
-  return base;
-});
 </script>
 
 <template>
@@ -149,17 +133,7 @@ const fontOptions = computed(() => {
       <!-- ============ 字体 / 背景 / 文档底图 ============ -->
       <div class="field-row" style="margin-top: 10px">
         <span class="field-label">字体</span>
-        <NSelect
-          :value="store.fontPath || null"
-          size="small"
-          filterable
-          clearable
-          placeholder="选择系统字体或点击右侧浏览文件"
-          :options="fontOptions"
-          style="flex: 1"
-          @update:value="(val: string | null) => { store.fontPath = val || ''; }"
-        />
-        <NButton size="small" @click="chooseFont()">浏览</NButton>
+        <FontPicker v-model:value="store.fontPath" placeholder="未选择字体（.ttf/.ttc/.otf）" style="flex: 1" />
       </div>
       <div class="field-row">
         <span class="field-label">背景</span>

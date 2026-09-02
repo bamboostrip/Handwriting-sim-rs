@@ -22,9 +22,9 @@ import {
   NSelect,
   NTag,
 } from "naive-ui";
+import FontPicker from "./FontPicker.vue";
 import {
   addRole,
-  chooseRoleFont,
   deleteRole,
   getHighlightInfo,
   getRoleBadgeInfo,
@@ -93,24 +93,6 @@ function onHighlightChange(role: UiHandwritingRole, val: string): void {
 function onFillInput(role: UiHandwritingRole, val: string): void {
   const trimmed = val.trim();
   role.fill = trimmed ? trimmed : null;
-}
-
-function getFontOptions(currentPath?: string | null) {
-  const base = store.systemFonts.map((f) => ({
-    label: f.name,
-    value: f.path,
-  }));
-  if (currentPath && currentPath.trim() !== "") {
-    const trimmed = currentPath.trim();
-    if (!base.some((opt) => opt.value === trimmed)) {
-      const fileName = trimmed.split(/[\\/]/).pop() || trimmed;
-      return [
-        { label: `📁 ${fileName} (外部字体)`, value: trimmed },
-        ...base,
-      ];
-    }
-  }
-  return base;
 }
 </script>
 
@@ -258,17 +240,11 @@ function getFontOptions(currentPath?: string | null) {
           <div class="role-row">
             <span class="role-label">专属字体</span>
             <div class="role-control">
-              <NSelect
-                :value="role.fontPath || null"
-                size="small"
-                filterable
-                clearable
-                placeholder="选择系统字体或点击右侧浏览文件"
-                :options="getFontOptions(role.fontPath)"
+              <FontPicker
+                v-model:value="role.fontPath"
+                placeholder="留空使用全局主字体"
                 style="flex: 1"
-                @update:value="(val: string | null) => { role.fontPath = val || ''; }"
               />
-              <NButton size="small" @click="chooseRoleFont(role.id)">浏览</NButton>
             </div>
           </div>
 
