@@ -61,7 +61,8 @@ pub fn load_paragraphs(path: &Path, font_size: f32) -> Result<Vec<Paragraph>, St
     let document_xml = read_entry(&mut archive, "word/document.xml")?;
     let styles_xml = read_entry_optional(&mut archive, "word/styles.xml");
 
-    let parsed_paras = parse_document(&document_xml)?;
+    let mut registry = StyleRegistry::new();
+    let parsed_paras = parse_document(&document_xml, &mut registry)?;
     let (styles, doc_defaults_sz) = parse_styles(&styles_xml);
 
     let mut result = Vec::new();
@@ -69,7 +70,7 @@ pub fn load_paragraphs(path: &Path, font_size: f32) -> Result<Vec<Paragraph>, St
         // 展开标签语法（如 {{手写:内容}}）
         let mut runs = Vec::new();
         for r in parsed.runs {
-            runs.extend(split_syntax_tags(&r));
+            runs.extend(split_syntax_tags(&r, &mut registry));
         }
 
         let (trimmed_text, trimmed_runs) = trim_paragraph_runs(runs);
@@ -116,17 +117,144 @@ fn local_name(name: &[u8]) -> &[u8] {
     }
 }
 
-/// 将 Word highlight 属性值映射到角色 ID 与印刷体标记。
-fn map_highlight_to_role(val: &str) -> Option<(u32, bool)> {
+/// 检查高亮颜色名称是否表示印刷体/灰色。
+pub fn is_gray_highlight(val: &str) -> bool {
     let lower = val.trim().to_ascii_lowercase();
-    match lower.as_str() {
-        "none" => None,
-        "yellow" => Some((2, false)),
-        "green" => Some((3, false)),
-        "cyan" => Some((4, false)),
-        "magenta" => Some((5, false)),
-        "lightgray" | "gray-25" | "gray25" | "darkgray" | "gray-50" | "gray50" => Some((1, true)),
-        _ => Some((2, false)),
+    matches!(
+        lower.as_str(),
+        "lightgray"
+            | "light_gray"
+            | "light-gray"
+            | "darkgray"
+            | "dark_gray"
+            | "dark-gray"
+            | "gray-25"
+            | "gray25"
+            | "gray_25"
+            | "gray-50"
+            | "gray50"
+            | "gray_50"
+            | "gray"
+            | "grey"
+            | "lightgrey"
+            | "light_grey"
+            | "light-grey"
+            | "darkgrey"
+            | "dark_grey"
+            | "dark-grey"
+            | "grey-25"
+            | "grey25"
+            | "grey_25"
+            | "grey-50"
+            | "grey50"
+            | "grey_50"
+    )
+}
+
+/// 动态样式与角色映射注册表。
+///
+/// 用于在解析 docx 时动态记录遇到的高亮颜色、文字颜色和标签样式，
+/// 按文档中首次出现的顺序依次分配角色 ID（Role 1 为 role_id=2, Role 2 为 role_id=3, ...）。
+/// 印刷体/灰色样式固定映射至 role_id=1。
+#[derive(Debug, Clone, Default)]
+pub struct StyleRegistry {
+    /// 样式键 -> 分配的 role_id。
+    entries: std::collections::HashMap<String, u32>,
+    /// 记录遇到的所有样式键（按首次出现顺序）。
+    ordered_keys: Vec<String>,
+    /// 下一个可分配的角色 ID（从 2 开始）。
+    next_role_id: u32,
+}
+
+impl StyleRegistry {
+    pub fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            ordered_keys: Vec::new(),
+            next_role_id: 2,
+        }
+    }
+
+    /// 获取或注册一个样式键，返回对应的 role_id。
+    pub fn get_or_register(&mut self, key: &str) -> u32 {
+        if let Some(&role_id) = self.entries.get(key) {
+            return role_id;
+        }
+        let role_id = self.next_role_id;
+        self.next_role_id += 1;
+        self.entries.insert(key.to_string(), role_id);
+        self.ordered_keys.push(key.to_string());
+        role_id
+    }
+
+    /// 检查指定样式键是否已注册。
+    pub fn get(&self, key: &str) -> Option<u32> {
+        self.entries.get(key).copied()
+    }
+
+    /// 获取按遇到顺序记录的样式键列表。
+    pub fn registered_keys(&self) -> &[String] {
+        &self.ordered_keys
+    }
+
+    /// 处理并应用高亮颜色到 TextRunStyle。
+    pub fn apply_highlight(&mut self, val: &str, style: &mut TextRunStyle) {
+        let trimmed = val.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if lower == "none" || lower.is_empty() {
+            return;
+        }
+
+        style.highlight = Some(trimmed.to_string());
+
+        if is_gray_highlight(&lower) {
+            style.role_id = 1;
+            style.printed = true;
+        } else {
+            let key = format!("highlight:{lower}");
+            let role_id = self.get_or_register(&key);
+            style.role_id = role_id;
+            style.printed = false;
+        }
+    }
+
+    /// 处理并应用文本颜色到 TextRunStyle。
+    pub fn apply_color(&mut self, val: &str, style: &mut TextRunStyle) {
+        let trimmed = val.trim();
+        if let Some(rgb) = parse_hex_color(trimmed) {
+            style.fill = Some(rgb);
+            if style.highlight.is_none() && rgb != [0, 0, 0] {
+                let key = format!("color:{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]);
+                let role_id = self.get_or_register(&key);
+                style.role_id = role_id;
+            }
+        }
+    }
+}
+
+/// 解析单个 Run 时暂存的格式属性。
+#[derive(Default, Clone, Debug)]
+struct RawRunProps {
+    sz_half_pt: Option<u32>,
+    highlight: Option<String>,
+    color: Option<String>,
+}
+
+impl RawRunProps {
+    fn apply_to(&self, style: &mut TextRunStyle, registry: &mut StyleRegistry) {
+        if let Some(sz) = self.sz_half_pt {
+            style.font_size = Some(sz as f32 / 2.0);
+        }
+        if let Some(ref color_val) = self.color {
+            if let Some(rgb) = parse_hex_color(color_val) {
+                style.fill = Some(rgb);
+            }
+        }
+        if let Some(ref hl_val) = self.highlight {
+            registry.apply_highlight(hl_val, style);
+        } else if let Some(ref color_val) = self.color {
+            registry.apply_color(color_val, style);
+        }
     }
 }
 
@@ -149,7 +277,11 @@ fn parse_hex_color(val: &str) -> Option<[u8; 3]> {
 }
 
 /// 解析标签中的角色/样式配置。
-fn parse_tag_style(tag_content: &str, parent_style: &TextRunStyle) -> (String, TextRunStyle) {
+fn parse_tag_style(
+    tag_content: &str,
+    parent_style: &TextRunStyle,
+    registry: &mut StyleRegistry,
+) -> (String, TextRunStyle) {
     let mut style = parent_style.clone();
     let colon_pos = tag_content.find(':').or_else(|| tag_content.find('：'));
     if let Some(pos) = colon_pos {
@@ -176,7 +308,9 @@ fn parse_tag_style(tag_content: &str, parent_style: &TextRunStyle) -> (String, T
             style.role_id = n;
             style.printed = false;
         } else {
-            style.role_id = 2;
+            let key = format!("tag:{prefix}");
+            let role_id = registry.get_or_register(&key);
+            style.role_id = role_id;
             style.printed = false;
         }
         (body.to_string(), style)
@@ -188,7 +322,7 @@ fn parse_tag_style(tag_content: &str, parent_style: &TextRunStyle) -> (String, T
 }
 
 /// 将单个 TextRun 中内嵌的 {{...}} 语法标签拆分为独立的 TextRun。
-fn split_syntax_tags(run: &TextRun) -> Vec<TextRun> {
+fn split_syntax_tags(run: &TextRun, registry: &mut StyleRegistry) -> Vec<TextRun> {
     let mut result = Vec::new();
     let text = &run.text;
     let mut cursor = 0;
@@ -208,7 +342,7 @@ fn split_syntax_tags(run: &TextRun) -> Vec<TextRun> {
             }
 
             let tag_inner = &text[tag_content_start..tag_content_end];
-            let (clean_text, tag_style) = parse_tag_style(tag_inner, &run.style);
+            let (clean_text, tag_style) = parse_tag_style(tag_inner, &run.style, registry);
             if !clean_text.is_empty() {
                 result.push(TextRun::new(clean_text, tag_style));
             }
@@ -268,31 +402,28 @@ fn trim_paragraph_runs(runs: Vec<TextRun>) -> (String, Vec<TextRun>) {
 }
 
 /// 处理 rPr 属性节点。
-fn handle_r_pr_tag(e: &quick_xml::events::BytesStart, style: &mut TextRunStyle, fmt: &mut ParaFmt) {
+fn handle_r_pr_tag(
+    e: &quick_xml::events::BytesStart,
+    raw: &mut RawRunProps,
+    fmt: &mut ParaFmt,
+) {
     match local_name(e.name().as_ref()) {
         b"sz" => {
             if let Some(v) = attr_val(e, "val").and_then(|v| v.parse::<u32>().ok()) {
                 if fmt.run_sz_half_pt.is_none() {
                     fmt.run_sz_half_pt = Some(v);
                 }
-                style.font_size = Some(v as f32 / 2.0);
+                raw.sz_half_pt = Some(v);
             }
         }
         b"highlight" => {
             if let Some(v) = attr_val(e, "val") {
-                if let Some((role_id, printed)) = map_highlight_to_role(&v) {
-                    style.role_id = role_id;
-                    if printed {
-                        style.printed = true;
-                    }
-                }
+                raw.highlight = Some(v);
             }
         }
         b"color" => {
             if let Some(v) = attr_val(e, "val") {
-                if let Some(rgb) = parse_hex_color(&v) {
-                    style.fill = Some(rgb);
-                }
+                raw.color = Some(v);
             }
         }
         _ => {}
@@ -320,7 +451,7 @@ fn handle_p_pr_tag(e: &quick_xml::events::BytesStart, fmt: &mut ParaFmt) {
 }
 
 /// 解析 document.xml，返回段落列表（每个段落包含 Runs 与格式）。
-fn parse_document(xml: &str) -> Result<Vec<ParsedParagraph>, String> {
+fn parse_document(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<ParsedParagraph>, String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
 
@@ -335,7 +466,7 @@ fn parse_document(xml: &str) -> Result<Vec<ParsedParagraph>, String> {
 
     let mut cur_runs: Vec<TextRun> = Vec::new();
     let mut cur_run_text = String::new();
-    let mut cur_run_style = TextRunStyle::default();
+    let mut cur_run_props = RawRunProps::default();
     let mut cur_fmt = ParaFmt::default();
 
     loop {
@@ -346,7 +477,7 @@ fn parse_document(xml: &str) -> Result<Vec<ParsedParagraph>, String> {
                     in_body_para = true;
                     cur_runs.clear();
                     cur_run_text.clear();
-                    cur_run_style = TextRunStyle::default();
+                    cur_run_props = RawRunProps::default();
                     cur_fmt = ParaFmt::default();
                 }
                 b"pPr" if in_body_para => {
@@ -355,22 +486,24 @@ fn parse_document(xml: &str) -> Result<Vec<ParsedParagraph>, String> {
                 }
                 b"r" if in_body_para => {
                     if !cur_run_text.is_empty() {
-                        cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), cur_run_style.clone()));
+                        let mut style = TextRunStyle::default();
+                        cur_run_props.apply_to(&mut style, registry);
+                        cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
                     }
                     in_run = true;
                     cur_run_text.clear();
-                    cur_run_style = TextRunStyle::default();
+                    cur_run_props = RawRunProps::default();
                 }
                 b"rPr" if in_run => {
                     in_r_pr = true;
-                    handle_r_pr_tag(&e, &mut cur_run_style, &mut cur_fmt);
+                    handle_r_pr_tag(&e, &mut cur_run_props, &mut cur_fmt);
                 }
                 b"t" if in_body_para => in_t = true,
                 _ => {
                     if in_p_pr {
                         handle_p_pr_tag(&e, &mut cur_fmt);
                     } else if in_r_pr {
-                        handle_r_pr_tag(&e, &mut cur_run_style, &mut cur_fmt);
+                        handle_r_pr_tag(&e, &mut cur_run_props, &mut cur_fmt);
                     }
                 }
             },
@@ -381,7 +514,7 @@ fn parse_document(xml: &str) -> Result<Vec<ParsedParagraph>, String> {
                     if in_p_pr {
                         handle_p_pr_tag(&e, &mut cur_fmt);
                     } else if in_r_pr {
-                        handle_r_pr_tag(&e, &mut cur_run_style, &mut cur_fmt);
+                        handle_r_pr_tag(&e, &mut cur_run_props, &mut cur_fmt);
                     }
                 }
             },
@@ -400,15 +533,20 @@ fn parse_document(xml: &str) -> Result<Vec<ParsedParagraph>, String> {
                 b"rPr" => in_r_pr = false,
                 b"r" => {
                     if !cur_run_text.is_empty() {
-                        cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), cur_run_style.clone()));
+                        let mut style = TextRunStyle::default();
+                        cur_run_props.apply_to(&mut style, registry);
+                        cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
                     }
                     in_run = false;
                     in_r_pr = false;
+                    cur_run_props = RawRunProps::default();
                 }
                 b"pPr" => in_p_pr = false,
                 b"p" if in_body_para => {
                     if !cur_run_text.is_empty() {
-                        cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), cur_run_style.clone()));
+                        let mut style = TextRunStyle::default();
+                        cur_run_props.apply_to(&mut style, registry);
+                        cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
                     }
                     paras.push(ParsedParagraph {
                         runs: std::mem::take(&mut cur_runs),
@@ -419,6 +557,7 @@ fn parse_document(xml: &str) -> Result<Vec<ParsedParagraph>, String> {
                     in_run = false;
                     in_r_pr = false;
                     in_t = false;
+                    cur_run_props = RawRunProps::default();
                 }
                 _ => {}
             },
@@ -905,15 +1044,51 @@ mod tests {
         assert_eq!(paras[0].runs.len(), 5);
         assert_eq!(paras[0].runs[0].text, "黄");
         assert_eq!(paras[0].runs[0].style.role_id, 2);
+        assert_eq!(paras[0].runs[0].style.highlight.as_deref(), Some("yellow"));
         assert_eq!(paras[0].runs[1].text, "绿");
         assert_eq!(paras[0].runs[1].style.role_id, 3);
+        assert_eq!(paras[0].runs[1].style.highlight.as_deref(), Some("green"));
         assert_eq!(paras[0].runs[2].text, "青");
         assert_eq!(paras[0].runs[2].style.role_id, 4);
+        assert_eq!(paras[0].runs[2].style.highlight.as_deref(), Some("cyan"));
         assert_eq!(paras[0].runs[3].text, "品红");
         assert_eq!(paras[0].runs[3].style.role_id, 5);
+        assert_eq!(paras[0].runs[3].style.highlight.as_deref(), Some("magenta"));
         assert_eq!(paras[0].runs[4].text, "印刷灰");
         assert_eq!(paras[0].runs[4].style.role_id, 1);
+        assert_eq!(paras[0].runs[4].style.highlight.as_deref(), Some("lightGray"));
         assert!(paras[0].runs[4].style.printed);
+    }
+
+    #[test]
+    fn test_docx_dynamic_color_allocation() {
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:highlight w:val="pink"/></w:rPr><w:t>粉色段落</w:t></w:r></w:p><w:p><w:r><w:rPr><w:highlight w:val="darkBlue"/></w:rPr><w:t>深蓝段落</w:t></w:r></w:p><w:p><w:r><w:rPr><w:highlight w:val="pink"/></w:rPr><w:t>再次粉色</w:t></w:r></w:p></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dynamic_highlight.docx");
+        std::fs::write(&path, zip_docx(document_xml.as_bytes(), None)).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 3);
+
+        // 第 1 段：pink 首次出现 -> 分配 role_id: 2
+        assert_eq!(paras[0].runs.len(), 1);
+        assert_eq!(paras[0].runs[0].text, "粉色段落");
+        assert_eq!(paras[0].runs[0].style.role_id, 2);
+        assert_eq!(paras[0].runs[0].style.highlight.as_deref(), Some("pink"));
+        assert!(!paras[0].runs[0].style.printed);
+
+        // 第 2 段：darkBlue 首次出现 -> 分配 role_id: 3
+        assert_eq!(paras[1].runs.len(), 1);
+        assert_eq!(paras[1].runs[0].text, "深蓝段落");
+        assert_eq!(paras[1].runs[0].style.role_id, 3);
+        assert_eq!(paras[1].runs[0].style.highlight.as_deref(), Some("darkBlue"));
+        assert!(!paras[1].runs[0].style.printed);
+
+        // 第 3 段：pink 再次出现 -> 复用 role_id: 2
+        assert_eq!(paras[2].runs.len(), 1);
+        assert_eq!(paras[2].runs[0].text, "再次粉色");
+        assert_eq!(paras[2].runs[0].style.role_id, 2);
+        assert_eq!(paras[2].runs[0].style.highlight.as_deref(), Some("pink"));
+        assert!(!paras[2].runs[0].style.printed);
     }
 
     #[test]

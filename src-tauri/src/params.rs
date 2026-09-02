@@ -25,6 +25,7 @@ fn clean_text(s: &str) -> String {
 #[serde(rename_all = "camelCase", default)]
 pub struct UiTextRunStyle {
     pub role_id: u32,
+    pub highlight: Option<String>,
     pub font_path: Option<String>,
     pub font_size: Option<f32>,
     pub fill: Option<String>, // #RRGGBB
@@ -35,6 +36,7 @@ impl From<&TextRunStyle> for UiTextRunStyle {
     fn from(s: &TextRunStyle) -> Self {
         Self {
             role_id: s.role_id,
+            highlight: s.highlight.clone(),
             font_path: s.font_path.clone(),
             font_size: s.font_size,
             fill: s
@@ -109,6 +111,7 @@ impl From<&Paragraph> for UiParagraph {
 pub struct UiHandwritingRole {
     pub id: u32,
     pub name: String,
+    pub highlight: Option<String>,
     pub font_path: String,
     pub printed: bool,
     pub font_size: Option<f32>,
@@ -130,6 +133,7 @@ impl From<&HandwritingRole> for UiHandwritingRole {
         Self {
             id: r.id,
             name: r.name.clone(),
+            highlight: r.highlight.clone(),
             font_path: r.font_path.clone(),
             printed: r.printed,
             font_size: r.font_size,
@@ -396,6 +400,7 @@ impl UiParams {
                 Ok(HandwritingRole {
                     id: r.id,
                     name: r.name.trim().to_string(),
+                    highlight: r.highlight.clone(),
                     font_path: r.font_path.trim().to_string(),
                     printed: r.printed,
                     font_size: r.font_size,
@@ -440,6 +445,7 @@ impl UiParams {
                             text: clean_text(&r.text),
                             style: TextRunStyle {
                                 role_id: r.style.role_id,
+                                highlight: r.style.highlight.clone(),
                                 font_path: r.style.font_path.clone().filter(|s| !s.trim().is_empty()),
                                 font_size: r.style.font_size,
                                 fill,

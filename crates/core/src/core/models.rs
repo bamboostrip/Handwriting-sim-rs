@@ -250,6 +250,9 @@ pub struct TextRunStyle {
     /// 角色 ID（0 为默认角色）。
     #[serde(default)]
     pub role_id: u32,
+    /// 高亮颜色名称（如 "yellow", "cyan", "pink", None = 无高亮）。
+    #[serde(default)]
+    pub highlight: Option<String>,
     /// 字体文件路径覆盖（None = 跟随角色或主配置）。
     #[serde(default)]
     pub font_path: Option<String>,
@@ -262,6 +265,23 @@ pub struct TextRunStyle {
     /// 是否为印刷体（默认 false）。
     #[serde(default)]
     pub printed: bool,
+}
+
+impl TextRunStyle {
+    pub fn with_role(role_id: u32) -> Self {
+        Self {
+            role_id,
+            ..Default::default()
+        }
+    }
+
+    pub fn with_highlight(role_id: u32, highlight: impl Into<String>) -> Self {
+        Self {
+            role_id,
+            highlight: Some(highlight.into()),
+            ..Default::default()
+        }
+    }
 }
 
 /// 富文本段落内的一个文本片段。
@@ -337,6 +357,9 @@ pub struct HandwritingRole {
     pub id: u32,
     #[serde(default)]
     pub name: String,
+    /// 绑定的高亮颜色（用于 docx 导入时自动关联对应角色）。
+    #[serde(default)]
+    pub highlight: Option<String>,
     #[serde(default)]
     pub font_path: String,
     #[serde(default)]
@@ -367,11 +390,22 @@ pub struct HandwritingRole {
     pub miswrite_strikeout_style: Option<StrikeoutStyle>,
 }
 
+impl HandwritingRole {
+    pub fn new(id: u32, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+}
+
 impl Default for HandwritingRole {
     fn default() -> Self {
         Self {
             id: 0,
             name: String::new(),
+            highlight: None,
             font_path: String::new(),
             printed: false,
             font_size: None,
@@ -750,6 +784,7 @@ mod tests {
     fn test_text_run_and_style_serde_roundtrip() {
         let style = TextRunStyle {
             role_id: 2,
+            highlight: Some("yellow".into()),
             font_path: Some("custom/font.ttf".into()),
             font_size: Some(28.0),
             fill: Some([255, 0, 0]),
@@ -762,6 +797,7 @@ mod tests {
         assert_eq!(deserialized, run);
         assert_eq!(deserialized.text, "测试片段");
         assert_eq!(deserialized.style.role_id, 2);
+        assert_eq!(deserialized.style.highlight, Some("yellow".into()));
         assert_eq!(deserialized.style.font_path, Some("custom/font.ttf".into()));
         assert_eq!(deserialized.style.font_size, Some(28.0));
         assert_eq!(deserialized.style.fill, Some([255, 0, 0]));
@@ -773,6 +809,7 @@ mod tests {
         assert_eq!(minimal_run.text, "简单文本");
         assert_eq!(minimal_run.style, TextRunStyle::default());
         assert_eq!(minimal_run.style.role_id, 0);
+        assert_eq!(minimal_run.style.highlight, None);
         assert!(!minimal_run.style.printed);
     }
 
@@ -821,6 +858,7 @@ mod tests {
         let role_default = HandwritingRole::default();
         assert_eq!(role_default.id, 0);
         assert_eq!(role_default.name, "");
+        assert_eq!(role_default.highlight, None);
         assert_eq!(role_default.font_path, "");
         assert!(!role_default.printed);
         assert_eq!(role_default.font_size, None);
@@ -833,6 +871,7 @@ mod tests {
         let custom_role = HandwritingRole {
             id: 1,
             name: "批注老师".into(),
+            highlight: Some("yellow".into()),
             font_path: "fonts/teacher.ttf".into(),
             printed: false,
             font_size: Some(30.0),
