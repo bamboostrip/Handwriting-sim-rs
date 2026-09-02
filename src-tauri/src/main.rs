@@ -173,25 +173,14 @@ fn export_pdf(state: State<'_, AppState>, params: UiParams, path: String) -> Res
     engine::export_pdf(&hp, Path::new(path.trim()), seed).map_err(|e| e.to_string())
 }
 
-/// 导入 docx：解析段落文本 + 对齐 + 首行缩进（像素 → em 字符数换算在前端按当前字号进行）。
-/// 这里直接返回 core 解析结果（缩进保留像素值，前端除以字号得 em）。
+/// 导入 docx：解析段落文本 + 对齐 + 首行缩进 + 富文本 Runs。
 #[tauri::command]
-fn import_docx(path: String, font_size: f32) -> Result<Vec<(String, i32, f32)>, String> {
+fn import_docx(path: String, font_size: f32) -> Result<Vec<params::UiParagraph>, String> {
     let paras = docx_io::load_paragraphs(Path::new(path.trim()), font_size)
         .map_err(|e| format!("导入 docx 失败：{e}"))?;
     Ok(paras
-        .into_iter()
-        .map(|p| {
-            (
-                p.text,
-                match p.align {
-                    models::Align::Left => 0,
-                    models::Align::Center => 1,
-                    models::Align::Right => 2,
-                },
-                p.first_line_indent,
-            )
-        })
+        .iter()
+        .map(|p| params::UiParagraph::from_paragraph_with_font_size(p, font_size))
         .collect())
 }
 
