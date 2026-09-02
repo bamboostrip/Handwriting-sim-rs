@@ -33,6 +33,8 @@ struct ParaFmt {
     first_line_twips: Option<i32>,
     /// 段落首个 run 的 `w:rPr/w:sz`（半磅）。
     run_sz_half_pt: Option<u32>,
+    /// 段落默认字体（来自 w:pPr）。
+    font_family: Option<String>,
 }
 
 /// 解析后的单个段落（直接格式 + 原始 Run 列表）。
@@ -80,11 +82,15 @@ pub fn load_paragraphs(path: &Path, font_size: f32) -> Result<Vec<Paragraph>, St
 
         let align = resolve_align(&parsed.fmt);
         let indent = resolve_indent(&parsed.fmt, font_size, &styles, doc_defaults_sz);
+        let p_font = trimmed_runs
+            .iter()
+            .find_map(|r| r.style.font_family.clone())
+            .or_else(|| parsed.fmt.font_family.clone());
         result.push(Paragraph {
             text: trimmed_text,
             align,
             first_line_indent: indent,
-            font_family: None,
+            font_family: p_font,
             runs: trimmed_runs,
         });
     }
@@ -542,6 +548,16 @@ fn handle_p_pr_tag(e: &quick_xml::events::BytesStart, fmt: &mut ParaFmt) {
         b"ind" => {
             read_ind_attrs(e, fmt);
         }
+        b"rFonts" => {
+            let font = attr_val(e, "eastAsia")
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| attr_val(e, "ascii").filter(|s| !s.trim().is_empty()))
+                .or_else(|| attr_val(e, "hAnsi").filter(|s| !s.trim().is_empty()))
+                .or_else(|| attr_val(e, "cs").filter(|s| !s.trim().is_empty()));
+            if font.is_some() {
+                fmt.font_family = font;
+            }
+        }
         _ => {}
     }
 }
@@ -583,6 +599,9 @@ fn parse_document(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<ParsedP
                 b"r" if in_body_para => {
                     if !cur_run_text.is_empty() {
                         let mut style = TextRunStyle::default();
+                        if cur_run_props.font_family.is_none() && cur_fmt.font_family.is_some() {
+                            cur_run_props.font_family = cur_fmt.font_family.clone();
+                        }
                         cur_run_props.apply_to(&mut style, registry);
                         cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
                     }
@@ -630,6 +649,9 @@ fn parse_document(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<ParsedP
                 b"r" => {
                     if !cur_run_text.is_empty() {
                         let mut style = TextRunStyle::default();
+                        if cur_run_props.font_family.is_none() && cur_fmt.font_family.is_some() {
+                            cur_run_props.font_family = cur_fmt.font_family.clone();
+                        }
                         cur_run_props.apply_to(&mut style, registry);
                         cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
                     }
@@ -641,6 +663,9 @@ fn parse_document(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<ParsedP
                 b"p" if in_body_para => {
                     if !cur_run_text.is_empty() {
                         let mut style = TextRunStyle::default();
+                        if cur_run_props.font_family.is_none() && cur_fmt.font_family.is_some() {
+                            cur_run_props.font_family = cur_fmt.font_family.clone();
+                        }
                         cur_run_props.apply_to(&mut style, registry);
                         cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
                     }
@@ -1317,5 +1342,24 @@ mod tests {
         assert_eq!(paras.len(), 1);
         assert_eq!(paras[0].runs[0].style.font_family.as_deref(), Some("仿宋_GB2312"));
         assert_eq!(detect_doc_font_family(&paras).as_deref(), Some("仿宋_GB2312"));
+    }
+
+    #[test]
+    fn test_docx_multi_font_family_extraction() {
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:rFonts w:eastAsia="黑体"/></w:rPr><w:t>黑体标题</w:t></w:r><w:r><w:rPr><w:rFonts w:eastAsia="宋体"/></w:rPr><w:t>宋体副标题</w:t></w:r></w:p><w:p><w:r><w:rPr><w:rFonts w:eastAsia="仿宋_GB2312"/></w:rPr><w:t>仿宋正文</w:t></w:r></w:p></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi_font.docx");
+        std::fs::write(&path, zip_docx(document_xml.as_bytes(), None)).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 2);
+        assert_eq!(paras[0].runs.len(), 2);
+        assert_eq!(paras[0].runs[0].text, "黑体标题");
+        assert_eq!(paras[0].runs[0].style.font_family.as_deref(), Some("黑体"));
+        assert_eq!(paras[0].runs[1].text, "宋体副标题");
+        assert_eq!(paras[0].runs[1].style.font_family.as_deref(), Some("宋体"));
+
+        assert_eq!(paras[1].runs.len(), 1);
+        assert_eq!(paras[1].runs[0].text, "仿宋正文");
+        assert_eq!(paras[1].runs[0].style.font_family.as_deref(), Some("仿宋_GB2312"));
     }
 }

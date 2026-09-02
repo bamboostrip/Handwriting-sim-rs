@@ -393,6 +393,18 @@ impl DefaultEngine {
                 };
                 to_load.push((region.font_path.clone(), size));
             }
+            for para in &region.paragraphs {
+                for run in para.effective_runs() {
+                    if let Some(font_path) = &run.style.font_path {
+                        if !font_path.is_empty() {
+                            to_load.push((
+                                font_path.clone(),
+                                run.style.font_size.unwrap_or(params.font_size),
+                            ));
+                        }
+                    }
+                }
+            }
         }
         for (path, size) in to_load {
             if !map.contains_key(&path) {
@@ -529,10 +541,20 @@ fn generate_pages_with(
         let rrand = &mut StdRng::seed_from_u64(DefaultEngine::region_seed(seed, index));
         // 区域排版：仅排版在所属单页内（超出框选区域的内容直接截断不跨页延伸）
         let mask: Vec<bool> = if !rp.paragraphs.is_empty() {
-            layout::layout_paragraphs(&rp, &font_r, rrand, &rp.paragraphs, rw, rh)
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| vec![false; rw * rh])
+            let resolver = |p: &str| font_map.get(p).map(|f| f.as_ref());
+            layout::layout_paragraphs_styled(
+                &rp,
+                &font_r,
+                Some(&resolver),
+                rrand,
+                &rp.paragraphs,
+                rw,
+                rh,
+            )
+            .into_iter()
+            .next()
+            .map(|p| p.to_combined_mask(rw, rh))
+            .unwrap_or_else(|| vec![false; rw * rh])
         } else {
             let result = layout::layout_text(&rp, &font_r, rrand, &region.text, 0, rw, rh, true);
             result.mask
@@ -899,14 +921,25 @@ mod tests {
     use std::fs;
 
 
-    fn system_font() -> Option<PathBuf> {
+    fn system_fonts() -> Vec<PathBuf> {
         const CANDIDATES: &[&str] = &[
             r"C:\Windows\Fonts\msyh.ttc",
             r"C:\Windows\Fonts\simhei.ttf",
+            r"C:\Windows\Fonts\simsun.ttc",
+            r"C:\Windows\Fonts\simkai.ttf",
+            r"C:\Windows\Fonts\arial.ttf",
             r"/System/Library/Fonts/PingFang.ttc",
             r"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         ];
-        CANDIDATES.iter().map(|p| PathBuf::from(p.trim())).find(|p| p.is_file())
+        CANDIDATES
+            .iter()
+            .map(|p| PathBuf::from(p.trim()))
+            .filter(|p| p.is_file())
+            .collect()
+    }
+
+    fn system_font() -> Option<PathBuf> {
+        system_fonts().into_iter().next()
     }
 
     fn make_params(font: &Path, bg: &Path) -> HandwritingParams {
@@ -1828,6 +1861,122 @@ mod tests {
         assert!(has_black, "应渲染黑色印刷体");
         assert!(has_blue, "应渲染蓝色手写体");
         assert!(has_red, "应渲染红色批注");
+    }
+
+    #[test]
+    fn test_multi_printed_fonts_in_mixed_mode() {
+        let fonts = system_fonts();
+        if fonts.is_empty() {
+            return;
+        }
+        let font_a = fonts[0].to_string_lossy().into_owned();
+        let font_b = if fonts.len() > 1 {
+            fonts[1].to_string_lossy().into_owned()
+        } else {
+            fonts[0].to_string_lossy().into_owned()
+        };
+        let font_hand = fonts[0].to_string_lossy().into_owned();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut params = region_test_params(&fonts[0], &dir);
+        params.font_path = font_hand;
+        params.font_size = 28.0;
+        params.line_spacing = 40.0;
+        params.word_spacing = 5.0;
+        params.perturb_x_sigma = 1.0;
+        params.perturb_y_sigma = 1.0;
+
+        params.paragraphs = vec![Paragraph {
+            text: String::new(),
+            align: Align::Left,
+            first_line_indent: 0.0,
+            font_family: None,
+            runs: vec![
+                TextRun::new(
+                    "【印刷标题】",
+                    TextRunStyle {
+                        font_path: Some(font_a),
+                        printed: true,
+                        role_id: 1,
+                        fill: Some([0, 0, 0]),
+                        ..Default::default()
+                    },
+                ),
+                TextRun::new(
+                    "说明文字：",
+                    TextRunStyle {
+                        font_path: Some(font_b),
+                        printed: true,
+                        role_id: 1,
+                        fill: Some([100, 100, 100]),
+                        ..Default::default()
+                    },
+                ),
+                TextRun::new(
+                    "手写动态扰动内容",
+                    TextRunStyle {
+                        font_path: None,
+                        printed: false,
+                        role_id: 0,
+                        fill: Some([0, 0, 255]),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        }];
+
+        // 验证排版与渲染无错误
+        let page1 = DefaultEngine::new(10).render_preview(&params).expect("应成功渲染页面1");
+        let page2 = DefaultEngine::new(20).render_preview(&params).expect("应成功渲染页面2");
+
+        let raw1 = page1.as_raw();
+        let raw2 = page2.as_raw();
+
+        // 验证黑字（Run 1）、灰字（Run 2）和蓝字（Run 3）均有像素
+        let has_black = raw1.chunks_exact(4).any(|px| px[0] == 0 && px[1] == 0 && px[2] == 0);
+        let has_gray = raw1.chunks_exact(4).any(|px| px[0] == 100 && px[1] == 100 && px[2] == 100);
+        let has_blue = raw1.chunks_exact(4).any(|px| px[0] == 0 && px[1] == 0 && px[2] == 255);
+
+        assert!(has_black, "应渲染黑色印刷体 Run 1");
+        assert!(has_gray, "应渲染灰色印刷体 Run 2");
+        assert!(has_blue, "应渲染蓝色手写体 Run 3");
+
+        // 验证印刷体零扰动（同坐标），手写体存在扰动
+        let black_px1: Vec<usize> = raw1
+            .chunks_exact(4)
+            .enumerate()
+            .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 0 { Some(idx) } else { None })
+            .collect();
+        let black_px2: Vec<usize> = raw2
+            .chunks_exact(4)
+            .enumerate()
+            .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 0 { Some(idx) } else { None })
+            .collect();
+        assert_eq!(black_px1, black_px2, "印刷标题 Run 1 跨 seed 应保持零扰动像素一致");
+
+        let gray_px1: Vec<usize> = raw1
+            .chunks_exact(4)
+            .enumerate()
+            .filter_map(|(idx, px)| if px[0] == 100 && px[1] == 100 && px[2] == 100 { Some(idx) } else { None })
+            .collect();
+        let gray_px2: Vec<usize> = raw2
+            .chunks_exact(4)
+            .enumerate()
+            .filter_map(|(idx, px)| if px[0] == 100 && px[1] == 100 && px[2] == 100 { Some(idx) } else { None })
+            .collect();
+        assert_eq!(gray_px1, gray_px2, "印刷说明 Run 2 跨 seed 应保持零扰动像素一致");
+
+        let blue_px1: Vec<usize> = raw1
+            .chunks_exact(4)
+            .enumerate()
+            .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 255 { Some(idx) } else { None })
+            .collect();
+        let blue_px2: Vec<usize> = raw2
+            .chunks_exact(4)
+            .enumerate()
+            .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 255 { Some(idx) } else { None })
+            .collect();
+        assert_ne!(blue_px1, blue_px2, "手写体 Run 3 跨 seed 应受扰动影响具有不同像素坐标");
     }
 }
 

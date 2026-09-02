@@ -777,18 +777,52 @@ export async function importDocx(): Promise<void> {
   const p = await dialogs.pickDocx();
   if (!p) return;
   try {
+    if (store.systemFonts.length === 0) {
+      await initSystemFonts();
+    }
     const res = await api.importDocx(p, num(store.fontSize, 36));
     const rows = res.paragraphs;
+
+    // 检查文档是否包含高亮或独立角色标记（混合模式 vs 纯手写模式）
+    const hasHighlights = rows.some((row) =>
+      row.runs?.some(
+        (r) =>
+          r.style?.highlight != null ||
+          ((r.style?.roleId ?? 0) >= 2 && !r.style?.printed),
+      ),
+    );
+
     setParagraphs(
       rows.map((row) =>
         newPara(
           cleanText(row.text),
           (row.align ?? 0) as 0 | 1 | 2,
           row.indentEm ?? 0,
-          row.runs?.map((r) => ({
-            text: cleanText(r.text),
-            style: r.style ? { ...r.style } : undefined,
-          })),
+          row.runs?.map((r) => {
+            const runStyle = r.style ? { ...r.style } : undefined;
+            if (hasHighlights) {
+              // 混合模式：未高亮片段 (role_id == 1 或 printed == true)
+              if (runStyle && (runStyle.roleId === 1 || runStyle.printed)) {
+                if (runStyle.fontFamily) {
+                  const matched = matchSystemFont(runStyle.fontFamily);
+                  if (matched) {
+                    runStyle.fontPath = matched.path;
+                  }
+                }
+              }
+            } else {
+              // 纯手写模式：所有 run 清理为 role_id = 0, printed = false, fontPath = undefined
+              if (runStyle) {
+                runStyle.roleId = 0;
+                runStyle.printed = false;
+                runStyle.fontPath = undefined;
+              }
+            }
+            return {
+              text: cleanText(r.text),
+              style: runStyle,
+            };
+          }),
         ),
       ),
     );
@@ -809,7 +843,7 @@ export async function importDocx(): Promise<void> {
       fill: null,
     };
 
-    // 自动匹配文档字体 -> Role 1 (打印体)
+    // 自动匹配文档主字体 -> Role 1 (打印体)
     if (res.docFontFamily) {
       const matched = matchSystemFont(res.docFontFamily);
       if (matched) {
@@ -819,48 +853,50 @@ export async function importDocx(): Promise<void> {
 
     const nextRoles: UiHandwritingRole[] = [role0, role1];
 
-    // 动态提取并自适应角色（收集 roleId >= 2 及对应的 highlight/fill）
-    const detectedRoles = new Map<number, { highlight?: string | null; fill?: string | null }>();
-    for (const row of rows) {
-      if (row.runs) {
-        for (const run of row.runs) {
-          const rId = run.style?.roleId;
-          if (rId && rId >= 2) {
-            if (!detectedRoles.has(rId)) {
-              detectedRoles.set(rId, {
-                highlight: run.style?.highlight ?? null,
-                fill: run.style?.fill ?? null,
-              });
-            } else {
-              const cur = detectedRoles.get(rId)!;
-              if (!cur.highlight && run.style?.highlight) cur.highlight = run.style.highlight;
-              if (!cur.fill && run.style?.fill) cur.fill = run.style.fill;
+    if (hasHighlights) {
+      // 动态提取并自适应角色（收集 roleId >= 2 及对应的 highlight/fill）
+      const detectedRoles = new Map<number, { highlight?: string | null; fill?: string | null }>();
+      for (const row of rows) {
+        if (row.runs) {
+          for (const run of row.runs) {
+            const rId = run.style?.roleId;
+            if (rId && rId >= 2) {
+              if (!detectedRoles.has(rId)) {
+                detectedRoles.set(rId, {
+                  highlight: run.style?.highlight ?? null,
+                  fill: run.style?.fill ?? null,
+                });
+              } else {
+                const cur = detectedRoles.get(rId)!;
+                if (!cur.highlight && run.style?.highlight) cur.highlight = run.style.highlight;
+                if (!cur.fill && run.style?.fill) cur.fill = run.style.fill;
+              }
             }
           }
         }
       }
-    }
 
-    if (detectedRoles.size > 0) {
-      for (const [rId, info] of detectedRoles.entries()) {
-        const hlInfo = getHighlightInfo(info.highlight);
-        const highlightLabel = hlInfo?.name;
-        const colorLabel = info.fill ? `颜色 ${info.fill}` : null;
-        const subLabel = highlightLabel || colorLabel || "自定颜色";
-        const roleName = `手写角色 ${rId - 1} (${subLabel})`;
+      if (detectedRoles.size > 0) {
+        for (const [rId, info] of detectedRoles.entries()) {
+          const hlInfo = getHighlightInfo(info.highlight);
+          const highlightLabel = hlInfo?.name;
+          const colorLabel = info.fill ? `颜色 ${info.fill}` : null;
+          const subLabel = highlightLabel || colorLabel || "自定颜色";
+          const roleName = `手写角色 ${rId - 1} (${subLabel})`;
 
-        const prevRole = store.roles.find((r) => r.id === rId);
+          const prevRole = store.roles.find((r) => r.id === rId);
 
-        nextRoles.push({
-          id: rId,
-          name: roleName,
-          fontPath: prevRole?.fontPath || "",
-          printed: false,
-          highlight: info.highlight ?? null,
-          fill: info.fill ?? null,
-        });
+          nextRoles.push({
+            id: rId,
+            name: roleName,
+            fontPath: prevRole?.fontPath || "",
+            printed: false,
+            highlight: info.highlight ?? null,
+            fill: info.fill ?? null,
+          });
+        }
+        nextRoles.sort((a, b) => a.id - b.id);
       }
-      nextRoles.sort((a, b) => a.id - b.id);
     }
 
     store.roles = nextRoles;
@@ -1357,17 +1393,48 @@ export async function importDocxToDraft(): Promise<void> {
   const p = await dialogs.pickDocx();
   if (!p) return;
   try {
+    if (store.systemFonts.length === 0) {
+      await initSystemFonts();
+    }
     const res = await api.importDocx(p, draftFontSize(d));
     const rows = res.paragraphs;
     if (!rows.length) throw new Error("文档为空");
+
+    const hasHighlights = rows.some((row) =>
+      row.runs?.some(
+        (r) =>
+          r.style?.highlight != null ||
+          ((r.style?.roleId ?? 0) >= 2 && !r.style?.printed),
+      ),
+    );
+
     d.paragraphs = rows.map((row) => ({
       text: cleanText(row.text),
       align: (row.align ?? 0) as 0 | 1 | 2,
       indentEm: row.indentEm ?? 0,
-      runs: row.runs?.map((r) => ({
-        text: cleanText(r.text),
-        style: r.style ? { ...r.style } : undefined,
-      })),
+      runs: row.runs?.map((r) => {
+        const runStyle = r.style ? { ...r.style } : undefined;
+        if (hasHighlights) {
+          if (runStyle && (runStyle.roleId === 1 || runStyle.printed)) {
+            if (runStyle.fontFamily) {
+              const matched = matchSystemFont(runStyle.fontFamily);
+              if (matched) {
+                runStyle.fontPath = matched.path;
+              }
+            }
+          }
+        } else {
+          if (runStyle) {
+            runStyle.roleId = 0;
+            runStyle.printed = false;
+            runStyle.fontPath = undefined;
+          }
+        }
+        return {
+          text: cleanText(r.text),
+          style: runStyle,
+        };
+      }),
     }));
     d.text = d.paragraphs.map((r) => r.text).join("\n");
     d.align = d.paragraphs[0]?.align ?? 0;

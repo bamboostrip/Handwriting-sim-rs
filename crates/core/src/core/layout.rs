@@ -495,6 +495,7 @@ pub fn layout_paragraph_styled<'f>(
         let font_path = style
             .font_path
             .as_deref()
+            .filter(|p| !p.is_empty())
             .or_else(|| role.map(|r| r.font_path.as_str()).filter(|p| !p.is_empty()))
             .unwrap_or(&params.font_path);
         let font = if let Some(resolver) = font_resolver {
