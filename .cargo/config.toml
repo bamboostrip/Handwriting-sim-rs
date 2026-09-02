@@ -1,2 +1,5 @@
-[target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "link-arg=/DEBUG:FASTLINK"]
+# 注意：这里曾给 MSVC 显式追加 `-C link-arg=/DEBUG:FASTLINK` 提速本地链接，
+# 但 VS 2026 起链接器已移除该选项（LNK4315 警告并回退 /DEBUG:FULL，且会让
+# release 无调试符号的链接也强制生成 PDB）。rustc 1.96+ 只传裸 /DEBUG，
+# 由链接器自行取默认值：VS2022/2025（本地）默认 FASTLINK，VS2026（CI）默认 FULL。
+# 因此无需、也不应再手工指定 FASTLINK。

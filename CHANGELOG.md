@@ -10,6 +10,19 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 修复 CI Windows 构建日志中的 `LNK4315` 链接器警告：移除 `.cargo/config.toml` 里显式追加的 `/DEBUG:FASTLINK`（VS 2026 链接器已移除该选项；rustc 1.96+ 只传裸 `/DEBUG` 交由链接器取默认值），同时避免 release 链接被强制生成 PDB 拖慢速度。本地 VS2022/2025 链接行为不变。
+
+### Changed
+
+- **CI 构建提速**（Windows 端 test / build 原先各约 13 分钟且串行执行）：
+  - 测试拆分为与打包并行的独立 `test` job，改用 `cargo-nextest` 运行（并行执行、失败隔离、输出更清晰）。
+  - CI 测试构建关闭调试符号（`CARGO_PROFILE_DEV_DEBUG=0`）与增量编译（`CARGO_INCREMENTAL=0`），MSVC 编译与链接显著提速；本地开发不受影响。
+  - hosted Windows runner 上临时关闭 Defender 实时监控，加快 rustc / link.exe 文件 IO（runner 为一次性环境）。
+  - 便携版 WebView2 变体改为复用 build job 产出的同一份 Windows 二进制，不再重复完整 release 编译（tag 构建省约 14 分钟与一份约 1 GB 的独立缓存）。
+  - 为同一分支的连续推送启用 `concurrency` 自动取消旧运行；升级 workflow 使用的 actions 至当前主版本（checkout@v7 / setup-node@v7 / upload-artifact@v7 / download-artifact@v8 / pnpm-action-setup@v6 / gh-release@v3），消除 Node 20 弃用警告。
+
 ## [0.3.3] - 2026-09-01
 
 ### Added

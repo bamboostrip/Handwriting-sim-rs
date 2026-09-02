@@ -10,7 +10,7 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "cargo test --workspace"
+    "test": "cargo nextest run --workspace"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

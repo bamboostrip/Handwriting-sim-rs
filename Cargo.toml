@@ -18,9 +18,10 @@ incremental = true
 
 # dev 构建下优化核心渲染路径：debug 未优化时引擎慢 10~30 倍，
 # 预览/导出会卡顿数秒。只优化重计算 crate，编译时间基本不受影响。
+# debug 跟随 [profile.dev]（=1），不要在此重复声明——
+# CI 通过 CARGO_PROFILE_DEV_DEBUG=0 一键关闭全部调试符号。
 [profile.dev.package."handwrite-sim"]
 opt-level = 2
-debug = 1
 
 
 [profile.dev.package.ab_glyph]
