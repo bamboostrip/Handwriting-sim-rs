@@ -321,6 +321,11 @@ body,
 
 
 /* ---------------- 逐段编辑器 ---------------- */
+.para-editor-wrapper {
+  position: relative;
+  width: 100%;
+}
+
 .para-editor {
   height: 190px;
   border: 1px solid var(--border);
@@ -364,6 +369,163 @@ body,
   user-select: text;
   -webkit-user-select: text;
 }
+
+/* ---------------- 笔迹角色 / 打印体 高亮标签 ---------------- */
+.run-tag {
+  display: inline;
+  padding: 1px 3px;
+  margin: 0 1px;
+  border-radius: 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.run-tag.role-yellow {
+  background-color: #fef08a;
+  color: #713f12;
+}
+html.dark .run-tag.role-yellow {
+  background-color: #713f12;
+  color: #fef08a;
+}
+
+.run-tag.role-green {
+  background-color: #bbf7d0;
+  color: #14532d;
+}
+html.dark .run-tag.role-green {
+  background-color: #14532d;
+  color: #bbf7d0;
+}
+
+.run-tag.role-cyan {
+  background-color: #bae6fd;
+  color: #0c4a6e;
+}
+html.dark .run-tag.role-cyan {
+  background-color: #0c4a6e;
+  color: #bae6fd;
+}
+
+.run-tag.role-printed {
+  background-color: #e2e8f0;
+  color: #334155;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, monospace, sans-serif;
+  font-size: 12.5px;
+  letter-spacing: -0.02em;
+}
+html.dark .run-tag.role-printed {
+  background-color: #334155;
+  color: #e2e8f0;
+}
+
+.run-tag.role-custom {
+  background-color: #f3e8ff;
+  color: #6b21a8;
+}
+html.dark .run-tag.role-custom {
+  background-color: #581c87;
+  color: #f3e8ff;
+}
+
+/* ---------------- 悬浮快速标记气泡 ---------------- */
+.role-bubble {
+  position: absolute;
+  z-index: 99;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 5px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  transform: translate(-50%, -100%);
+  user-select: none;
+  animation: fadeInBubble 0.15s ease-out;
+  pointer-events: auto;
+}
+
+@keyframes fadeInBubble {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -90%) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -100%) scale(1);
+  }
+}
+
+.bubble-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  background: var(--panel-bg);
+  color: var(--text-main);
+  transition: all 0.15s;
+  outline: none;
+  white-space: nowrap;
+}
+
+.bubble-btn:hover {
+  background: var(--hover-bg);
+  border-color: var(--accent);
+}
+
+.bubble-btn.btn-printed {
+  font-family: monospace, sans-serif;
+}
+.bubble-btn.btn-yellow:hover {
+  background: #fef08a;
+  color: #713f12;
+}
+html.dark .bubble-btn.btn-yellow:hover {
+  background: #713f12;
+  color: #fef08a;
+}
+.bubble-btn.btn-green:hover {
+  background: #bbf7d0;
+  color: #14532d;
+}
+html.dark .bubble-btn.btn-green:hover {
+  background: #14532d;
+  color: #bbf7d0;
+}
+.bubble-btn.btn-cyan:hover {
+  background: #bae6fd;
+  color: #0c4a6e;
+}
+html.dark .bubble-btn.btn-cyan:hover {
+  background: #0c4a6e;
+  color: #bae6fd;
+}
+.bubble-btn.btn-clear {
+  color: var(--text-sub);
+}
+.bubble-btn.btn-clear:hover {
+  background: rgba(229, 72, 77, 0.12);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.role-tag-bar {
+  align-items: center;
+}
+
+.tag-bar-label {
+  font-size: 11.5px;
+  color: var(--text-sub);
+  margin-right: 2px;
+  font-weight: 600;
+}
+
 
 
 /* ---------------- 区域列表 ---------------- */

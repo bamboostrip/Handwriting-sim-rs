@@ -20,6 +20,7 @@ import RegionList from "./RegionList.vue";
 import RegionDialog from "./RegionDialog.vue";
 import RoleManager from "./RoleManager.vue";
 import {
+  applyRoleToSelection,
   chooseBackground,
   chooseFont,
   cycleThemePreference,
@@ -96,6 +97,24 @@ const presetOptions = computed(() =>
         <NButton size="tiny" @click="toggleIndent(true)">首行缩进</NButton>
         <NButton size="tiny" @click="toggleIndent(false)">取消缩进</NButton>
         <NButton size="tiny" @click="importDocx()">导入 docx</NButton>
+      </div>
+      <div class="field-row role-tag-bar" style="flex-wrap: wrap; gap: 4px; margin-top: 2px">
+        <span class="tag-bar-label">选区角色:</span>
+        <NButton size="tiny" secondary type="default" @mousedown.prevent @click="applyRoleToSelection(1)">
+          🖨️ 打印体
+        </NButton>
+        <NButton size="tiny" secondary type="warning" @mousedown.prevent @click="applyRoleToSelection(2)">
+          🟨 角色 1
+        </NButton>
+        <NButton size="tiny" secondary type="success" @mousedown.prevent @click="applyRoleToSelection(3)">
+          🟩 角色 2
+        </NButton>
+        <NButton size="tiny" secondary type="info" @mousedown.prevent @click="applyRoleToSelection(4)">
+          🟦 角色 3
+        </NButton>
+        <NButton size="tiny" tertiary @mousedown.prevent @click="applyRoleToSelection(0)">
+          ✕ 清除标记
+        </NButton>
       </div>
       <div class="hint-line">{{ store.paraStatus }}</div>
       <ParaEditor />

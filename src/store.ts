@@ -680,6 +680,22 @@ export function toggleIndent(on: boolean): void {
   scheduleRender();
 }
 
+let activeRoleApplier: ((roleId: number) => void) | null = null;
+
+export function registerRoleApplier(fn: (roleId: number) => void): () => void {
+  activeRoleApplier = fn;
+  return () => {
+    if (activeRoleApplier === fn) activeRoleApplier = null;
+  };
+}
+
+export function applyRoleToSelection(roleId: number): void {
+  if (activeRoleApplier) {
+    activeRoleApplier(roleId);
+  }
+}
+
+
 
 export function splitPara(id: number, caretOffset: number): void {
   const idx = store.paragraphs.findIndex((p) => p.id === id);
