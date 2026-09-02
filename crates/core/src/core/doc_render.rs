@@ -361,32 +361,134 @@ pub fn scan_text_tags(chars: &[char]) -> Vec<TagMatch> {
     matches
 }
 
-struct PdfCharEntry {
-    _ch: char,
-    left: f32,
-    right: f32,
-    bottom: f32,
-    top: f32,
+/// PDF 提取的单个字符对象及其在页面像素空间的位置与字号。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtractedChar {
+    pub ch: char,
+    pub min_x: f32,
+    pub min_y: f32,
+    pub max_x: f32,
+    pub max_y: f32,
+    pub font_size_pt: f32,
 }
 
-fn extract_pdf_page_tags(
+/// 清理提取文本中可能包含的模板标签语法（如 `{{...}}`、`【...】`、`{{手写:...}}` 等）。
+pub fn strip_tag_syntax(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    // 1. 如果整体被 {{ ... }} 包裹
+    if let Some(inner) = trimmed.strip_prefix("{{").and_then(|s| s.strip_suffix("}}")) {
+        let inner = inner.trim();
+        if let Some(pos) = inner.find(':').or_else(|| inner.find('：')) {
+            let colon_len = if inner.as_bytes()[pos] == b':' { 1 } else { '：'.len_utf8() };
+            return inner[pos + colon_len..].trim().to_string();
+        }
+        return inner.to_string();
+    }
+
+    // 2. 如果整体被 【 ... 】 包裹
+    if let Some(inner) = trimmed.strip_prefix('【').and_then(|s| s.strip_suffix('】')) {
+        let inner = inner.trim();
+        if let Some(pos) = inner.find(':').or_else(|| inner.find('：')) {
+            let colon_len = if inner.as_bytes()[pos] == b':' { 1 } else { '：'.len_utf8() };
+            return inner[pos + colon_len..].trim().to_string();
+        }
+        return inner.to_string();
+    }
+
+    // 3. 扫描并替换内部可能存在的内联标签
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut result = String::new();
+    let mut i = 0;
+    let mut replaced_tag = false;
+
+    while i < len {
+        if i + 1 < len && chars[i] == '{' && chars[i + 1] == '{' {
+            let mut j = i + 2;
+            let mut found = false;
+            while j + 1 < len {
+                if chars[j] == '}' && chars[j + 1] == '}' {
+                    let inner: String = chars[(i + 2)..j].iter().collect();
+                    let inner_str = inner.trim();
+                    let body = if let Some(pos) = inner_str.find(':').or_else(|| inner_str.find('：')) {
+                        let colon_len = if inner_str.as_bytes()[pos] == b':' { 1 } else { '：'.len_utf8() };
+                        inner_str[pos + colon_len..].trim()
+                    } else {
+                        inner_str
+                    };
+                    result.push_str(body);
+                    i = j + 2;
+                    found = true;
+                    replaced_tag = true;
+                    break;
+                }
+                j += 1;
+            }
+            if !found {
+                result.push(chars[i]);
+                i += 1;
+            }
+        } else if chars[i] == '【' {
+            let mut j = i + 1;
+            let mut found = false;
+            while j < len {
+                if chars[j] == '】' {
+                    let inner: String = chars[(i + 1)..j].iter().collect();
+                    let inner_str = inner.trim();
+                    let body = if let Some(pos) = inner_str.find(':').or_else(|| inner_str.find('：')) {
+                        let colon_len = if inner_str.as_bytes()[pos] == b':' { 1 } else { '：'.len_utf8() };
+                        inner_str[pos + colon_len..].trim()
+                    } else {
+                        inner_str
+                    };
+                    result.push_str(body);
+                    i = j + 1;
+                    found = true;
+                    replaced_tag = true;
+                    break;
+                }
+                j += 1;
+            }
+            if !found {
+                result.push(chars[i]);
+                i += 1;
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    if replaced_tag {
+        result.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// 从 PDF 页面提取所有文字字符及其包围盒（像素坐标）与字号。
+pub fn extract_pdf_page_chars(
     page: &pdfium_render::prelude::PdfPage,
-    page_index: usize,
     dpi: u32,
-    img_width: u32,
-    img_height: u32,
-    img: &mut image::RgbImage,
-) -> Vec<TextRegion> {
+) -> Vec<ExtractedChar> {
     let text_page = match page.text() {
         Ok(tp) => tp,
         Err(_) => return Vec::new(),
     };
 
-    let mut char_entries: Vec<PdfCharEntry> = Vec::new();
-    let mut chars_vec: Vec<char> = Vec::new();
+    let scale = dpi as f32 / 72.0;
+    let page_height_pt = page.height().value;
+    let mut chars = Vec::new();
 
     for char_obj in text_page.chars().iter() {
         if let Some(ch) = char_obj.unicode_char() {
+            if ch == '\0' {
+                continue;
+            }
             let (left, right, bottom, top) = if let Ok(rect) =
                 char_obj.loose_bounds().or_else(|_| char_obj.tight_bounds())
             {
@@ -399,38 +501,204 @@ fn extract_pdf_page_tags(
             } else {
                 (0.0, 0.0, 0.0, 0.0)
             };
-            char_entries.push(PdfCharEntry {
-                _ch: ch,
-                left,
-                right,
-                bottom,
-                top,
+
+            let font_size_pt = {
+                let sz = char_obj.scaled_font_size().value;
+                if sz > 0.0 && !sz.is_nan() {
+                    sz
+                } else {
+                    (top - bottom).abs()
+                }
+            };
+
+            let min_x = (left * scale).min(right * scale);
+            let max_x = (left * scale).max(right * scale);
+            let py1 = (page_height_pt - top) * scale;
+            let py2 = (page_height_pt - bottom) * scale;
+            let min_y = py1.min(py2);
+            let max_y = py1.max(py2);
+
+            chars.push(ExtractedChar {
+                ch,
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+                font_size_pt,
             });
-            chars_vec.push(ch);
         }
     }
 
+    chars
+}
+
+/// 从字符列表中提取落在高亮包围盒内的文字与字号。
+/// - 自动过滤掉不在包围盒内的字符（带 4 像素容差）；
+/// - 按阅读顺序分行排序（行内从左到右，行间从上到下）；
+/// - 清理占位标签语法（如 `{{...}}`、`【...】`、`{{手写:...}}` 等）；
+/// - 计算匹配字符的平均字号（像素）。
+pub fn extract_text_and_font_size_for_box(
+    chars: &[ExtractedChar],
+    b: &BoundingBox,
+    scale: f32,
+) -> (String, i32) {
+    if chars.is_empty() {
+        return (String::new(), 0);
+    }
+
+    let pad = 4.0f32;
+    let box_min_x = (b.min_x as f32 - pad).max(0.0);
+    let box_max_x = b.max_x as f32 + pad;
+    let box_min_y = (b.min_y as f32 - pad).max(0.0);
+    let box_max_y = b.max_y as f32 + pad;
+
+    let mut matched: Vec<&ExtractedChar> = Vec::new();
+
+    for c in chars {
+        if c.ch.is_control() && c.ch != '\n' && c.ch != '\t' {
+            continue;
+        }
+
+        let cx = (c.min_x + c.max_x) / 2.0;
+        let cy = (c.min_y + c.max_y) / 2.0;
+
+        let center_inside =
+            cx >= box_min_x && cx <= box_max_x && cy >= box_min_y && cy <= box_max_y;
+
+        let overlap_x = (c.max_x.min(box_max_x) - c.min_x.max(box_min_x)).max(0.0);
+        let overlap_y = (c.max_y.min(box_max_y) - c.min_y.max(box_min_y)).max(0.0);
+        let char_w = (c.max_x - c.min_x).abs().max(1.0);
+        let char_h = (c.max_y - c.min_y).abs().max(1.0);
+        let overlap_area = overlap_x * overlap_y;
+        let char_area = char_w * char_h;
+        let overlap_inside = overlap_area >= 0.3 * char_area;
+
+        if center_inside || overlap_inside {
+            matched.push(c);
+        }
+    }
+
+    if matched.is_empty() {
+        return (String::new(), 0);
+    }
+
+    // 计算平均字号 (pt -> px)
+    let valid_font_sizes: Vec<f32> = matched
+        .iter()
+        .map(|c| c.font_size_pt)
+        .filter(|&s| s > 0.0 && !s.is_nan())
+        .collect();
+
+    let avg_font_size_pt = if !valid_font_sizes.is_empty() {
+        valid_font_sizes.iter().sum::<f32>() / valid_font_sizes.len() as f32
+    } else {
+        0.0
+    };
+
+    let avg_char_h = matched
+        .iter()
+        .map(|c| (c.max_y - c.min_y).abs())
+        .filter(|&h| h > 0.0)
+        .sum::<f32>()
+        / matched.len().max(1) as f32;
+
+    let font_size_px = if avg_font_size_pt > 0.0 {
+        (avg_font_size_pt * scale).round() as i32
+    } else if avg_char_h > 2.0 {
+        avg_char_h.round() as i32
+    } else {
+        (b.height() as f32 * 0.8).round().max(1.0) as i32
+    };
+
+    // 按阅读顺序排序：先按垂直中心坐标粗排
+    matched.sort_by(|a, b| {
+        let ay = (a.min_y + a.max_y) / 2.0;
+        let by = (b.min_y + b.max_y) / 2.0;
+        ay.total_cmp(&by).then_with(|| a.min_x.total_cmp(&b.min_x))
+    });
+
+    // 动态分行
+    let line_threshold = if font_size_px > 0 {
+        (font_size_px as f32 * 0.5).max(4.0)
+    } else if avg_char_h > 0.0 {
+        (avg_char_h * 0.5).max(4.0)
+    } else {
+        (b.height() as f32 * 0.5).max(4.0)
+    };
+
+    let mut lines: Vec<Vec<&ExtractedChar>> = Vec::new();
+    for c in matched {
+        let cy = (c.min_y + c.max_y) / 2.0;
+        if let Some(last_line) = lines.last_mut() {
+            let line_avg_cy = last_line
+                .iter()
+                .map(|ch| (ch.min_y + ch.max_y) / 2.0)
+                .sum::<f32>()
+                / last_line.len() as f32;
+            if (cy - line_avg_cy).abs() <= line_threshold {
+                last_line.push(c);
+                continue;
+            }
+        }
+        lines.push(vec![c]);
+    }
+
+    // 各行内按 x 坐标升序排序
+    for line in &mut lines {
+        line.sort_by(|a, b| {
+            a.min_x
+                .total_cmp(&b.min_x)
+                .then_with(|| a.min_y.total_cmp(&b.min_y))
+        });
+    }
+
+    let mut raw_text = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            raw_text.push('\n');
+        }
+        for c in line {
+            raw_text.push(c.ch);
+        }
+    }
+
+    let clean_text = strip_tag_syntax(&raw_text);
+    (clean_text, font_size_px)
+}
+
+fn extract_pdf_page_tags(
+    page_chars: &[ExtractedChar],
+    page_index: usize,
+    dpi: u32,
+    img_width: u32,
+    img_height: u32,
+    img: &mut image::RgbImage,
+) -> Vec<TextRegion> {
+    let chars_vec: Vec<char> = page_chars.iter().map(|c| c.ch).collect();
     let matches = scan_text_tags(&chars_vec);
     let scale = dpi as f32 / 72.0;
-    let page_height_pt = page.height().value;
 
     let mut regions = Vec::new();
 
     for m in matches {
-        let mut min_left = f32::MAX;
-        let mut max_right = f32::MIN;
-        let mut min_bottom = f32::MAX;
-        let mut max_top = f32::MIN;
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        let mut font_sizes = Vec::new();
         let mut has_valid_bounds = false;
 
         for k in m.start_char_idx..=m.end_char_idx {
-            if k < char_entries.len() {
-                let e = &char_entries[k];
-                if e.right > e.left && e.top > e.bottom {
-                    min_left = min_left.min(e.left);
-                    max_right = max_right.max(e.right);
-                    min_bottom = min_bottom.min(e.bottom);
-                    max_top = max_top.max(e.top);
+            if k < page_chars.len() {
+                let e = &page_chars[k];
+                if e.max_x > e.min_x && e.max_y > e.min_y {
+                    min_x = min_x.min(e.min_x);
+                    max_x = max_x.max(e.max_x);
+                    min_y = min_y.min(e.min_y);
+                    max_y = max_y.max(e.max_y);
+                    if e.font_size_pt > 0.0 {
+                        font_sizes.push(e.font_size_pt);
+                    }
                     has_valid_bounds = true;
                 }
             }
@@ -440,16 +708,23 @@ fn extract_pdf_page_tags(
             continue;
         }
 
-        // PDF 点坐标转换为像素坐标（原点在左上角）
-        let x_px = (min_left * scale).round() as i32;
-        let y_px = ((page_height_pt - max_top) * scale).round() as i32;
-        let w_px = ((max_right - min_left) * scale).round().max(1.0) as i32;
-        let h_px = ((max_top - min_bottom) * scale).round().max(1.0) as i32;
+        // 像素坐标（原点在左上角）
+        let x_px = min_x.round() as i32;
+        let y_px = min_y.round() as i32;
+        let w_px = (max_x - min_x).round().max(1.0) as i32;
+        let h_px = (max_y - min_y).round().max(1.0) as i32;
 
         let x = x_px.max(0).min(img_width.saturating_sub(1) as i32);
         let y = y_px.max(0).min(img_height.saturating_sub(1) as i32);
         let w = w_px.max(1).min((img_width as i32).saturating_sub(x).max(1));
         let h = h_px.max(1).min((img_height as i32).saturating_sub(y).max(1));
+
+        let font_size = if !font_sizes.is_empty() {
+            let avg_fs = font_sizes.iter().sum::<f32>() / font_sizes.len() as f32;
+            (avg_fs * scale).round() as i32
+        } else {
+            0
+        };
 
         // 清理原图上的 {{...}} 标签区域为纯白色（向外扩展 2 像素以消除文字抗锯齿）
         let pad = 2i32;
@@ -464,15 +739,17 @@ fn extract_pdf_page_tags(
             }
         }
 
+        let clean_text = strip_tag_syntax(&m.inner_text);
+
         regions.push(TextRegion {
             x,
             y,
             w,
             h,
-            text: m.inner_text,
+            text: clean_text,
             printed: false,
             page: (page_index + 1) as i32,
-            font_size: 0,
+            font_size,
             ..TextRegion::default()
         });
     }
@@ -480,11 +757,13 @@ fn extract_pdf_page_tags(
     regions
 }
 
-/// 合并高亮区域与文本标签区域。
+/// 合并高亮区域与文本标签区域，并从 PDF 字符层中提取高亮框内部文字与字号。
 pub fn combine_page_regions(
     highlight_boxes: Vec<BoundingBox>,
     tag_regions: Vec<TextRegion>,
+    page_chars: &[ExtractedChar],
     page_num: i32,
+    scale: f32,
 ) -> Vec<TextRegion> {
     let mut final_regions: Vec<TextRegion> = Vec::new();
     let mut matched_tags = vec![false; tag_regions.len()];
@@ -495,8 +774,13 @@ pub fn combine_page_regions(
         let bw = b.width() as i32;
         let bh = b.height() as i32;
 
+        // 从字符中提取文字与字号
+        let (extracted_text, detected_font_size) =
+            extract_text_and_font_size_for_box(page_chars, &b, scale);
+
         // 查找是否包含或重叠某个 tag_region
-        let mut extracted_text = String::new();
+        let mut tag_text = String::new();
+        let mut tag_font_size = 0;
         for (t_idx, tag) in tag_regions.iter().enumerate() {
             if matched_tags[t_idx] {
                 continue;
@@ -506,20 +790,29 @@ pub fn combine_page_regions(
             if overlap_x > 0 && overlap_y > 0 {
                 matched_tags[t_idx] = true;
                 if !tag.text.is_empty() {
-                    extracted_text = tag.text.clone();
+                    tag_text = tag.text.clone();
+                    tag_font_size = tag.font_size;
                 }
             }
         }
+
+        let (text, font_size) = if !extracted_text.is_empty() {
+            (extracted_text, detected_font_size)
+        } else if !tag_text.is_empty() {
+            (tag_text, tag_font_size)
+        } else {
+            (String::new(), detected_font_size)
+        };
 
         final_regions.push(TextRegion {
             x: bx,
             y: by,
             w: bw,
             h: bh,
-            text: extracted_text,
+            text,
             printed: false,
             page: page_num,
-            font_size: 0,
+            font_size,
             ..TextRegion::default()
         });
     }
@@ -601,9 +894,12 @@ pub fn pdf_to_images_with_regions(
         let image = bitmap.as_image();
         let mut rgb_img = image.to_rgb8();
 
-        // 1. 从 PDF 文本层提取 {{...}} / 【...】标签区域，并在图像上抹除标签文字
+        // 1. 提取页面所有字符对象及其包围盒与字号
+        let page_chars = extract_pdf_page_chars(&page, dpi);
+
+        // 2. 从 PDF 文本层提取 {{...}} / 【...】标签区域，并在图像上抹除标签文字
         let tag_regions = extract_pdf_page_tags(
-            &page,
+            &page_chars,
             index,
             dpi,
             rgb_img.width(),
@@ -611,12 +907,18 @@ pub fn pdf_to_images_with_regions(
             &mut rgb_img,
         );
 
-        // 2. 从渲染图像中检测高亮色块，并将其擦除为白色
+        // 3. 从渲染图像中检测高亮色块，并将其擦除为白色
         let highlight_boxes = detect_highlight_boxes(&rgb_img);
         erase_highlight_boxes(&mut rgb_img, &highlight_boxes);
 
-        // 3. 合并高亮框与文本标签区域
-        let page_regions = combine_page_regions(highlight_boxes, tag_regions, (index + 1) as i32);
+        // 4. 合并高亮框与文本标签区域，提取高亮框内部文字和字号
+        let page_regions = combine_page_regions(
+            highlight_boxes,
+            tag_regions,
+            &page_chars,
+            (index + 1) as i32,
+            scale,
+        );
         all_regions.extend(page_regions);
 
         let path = out_dir.join(format!("{prefix}_{index}.png"));
@@ -987,8 +1289,143 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_tag_syntax() {
+        assert_eq!(strip_tag_syntax("纯文本内容"), "纯文本内容");
+        assert_eq!(strip_tag_syntax("{{ 签名 }}"), "签名");
+        assert_eq!(strip_tag_syntax("{{手写:张三}}"), "张三");
+        assert_eq!(strip_tag_syntax("{{手写1: 李四}}"), "李四");
+        assert_eq!(strip_tag_syntax("{{打印: 2026-09-02}}"), "2026-09-02");
+        assert_eq!(strip_tag_syntax("【同意批准】"), "同意批准");
+        assert_eq!(strip_tag_syntax("【手写：王五】"), "王五");
+        assert_eq!(strip_tag_syntax("{{}}"), "");
+        assert_eq!(strip_tag_syntax("【】"), "");
+        assert_eq!(strip_tag_syntax("   {{  审核通过  }}   "), "审核通过");
+        assert_eq!(strip_tag_syntax("前缀 {{手写:内容}} 后缀"), "前缀 内容 后缀");
+        assert_eq!(strip_tag_syntax("前缀 【手写：结论】 后缀"), "前缀 结论 后缀");
+    }
+
+    #[test]
+    fn test_extract_text_and_font_size_for_box() {
+        let scale = 200.0 / 72.0;
+        let chars = vec![
+            ExtractedChar {
+                ch: '张',
+                min_x: 100.0,
+                min_y: 50.0,
+                max_x: 120.0,
+                max_y: 70.0,
+                font_size_pt: 12.0,
+            },
+            ExtractedChar {
+                ch: '三',
+                min_x: 125.0,
+                min_y: 50.0,
+                max_x: 145.0,
+                max_y: 70.0,
+                font_size_pt: 12.0,
+            },
+            ExtractedChar {
+                ch: '外',
+                min_x: 500.0,
+                min_y: 500.0,
+                max_x: 520.0,
+                max_y: 520.0,
+                font_size_pt: 10.0,
+            },
+        ];
+
+        let b1 = BoundingBox {
+            min_x: 95,
+            min_y: 45,
+            max_x: 150,
+            max_y: 75,
+        };
+
+        let (text1, fs1) = extract_text_and_font_size_for_box(&chars, &b1, scale);
+        assert_eq!(text1, "张三");
+        let expected_fs = (12.0 * scale).round() as i32;
+        assert_eq!(fs1, expected_fs);
+
+        // 空高亮框
+        let b_empty = BoundingBox {
+            min_x: 300,
+            min_y: 300,
+            max_x: 350,
+            max_y: 330,
+        };
+        let (text_empty, _) = extract_text_and_font_size_for_box(&chars, &b_empty, scale);
+        assert_eq!(text_empty, "");
+    }
+
+    #[test]
+    fn test_sort_characters_reading_order() {
+        let scale = 200.0 / 72.0;
+        // 乱序的多行字符
+        let chars = vec![
+            ExtractedChar {
+                ch: '行',
+                min_x: 90.0,
+                min_y: 139.0,
+                max_x: 105.0,
+                max_y: 155.0,
+                font_size_pt: 12.0,
+            },
+            ExtractedChar {
+                ch: '一',
+                min_x: 70.0,
+                min_y: 101.0,
+                max_x: 85.0,
+                max_y: 116.0,
+                font_size_pt: 12.0,
+            },
+            ExtractedChar {
+                ch: '第',
+                min_x: 50.0,
+                min_y: 100.0,
+                max_x: 65.0,
+                max_y: 115.0,
+                font_size_pt: 12.0,
+            },
+            ExtractedChar {
+                ch: '二',
+                min_x: 70.0,
+                min_y: 141.0,
+                max_x: 85.0,
+                max_y: 156.0,
+                font_size_pt: 12.0,
+            },
+            ExtractedChar {
+                ch: '行',
+                min_x: 90.0,
+                min_y: 99.0,
+                max_x: 105.0,
+                max_y: 114.0,
+                font_size_pt: 12.0,
+            },
+            ExtractedChar {
+                ch: '第',
+                min_x: 50.0,
+                min_y: 140.0,
+                max_x: 65.0,
+                max_y: 155.0,
+                font_size_pt: 12.0,
+            },
+        ];
+
+        let b = BoundingBox {
+            min_x: 45,
+            min_y: 95,
+            max_x: 110,
+            max_y: 160,
+        };
+
+        let (text, _) = extract_text_and_font_size_for_box(&chars, &b, scale);
+        assert_eq!(text, "第一行\n第二行");
+    }
+
+    #[test]
     fn test_combine_page_regions() {
-        // 高亮框与标签重叠：合并为以高亮框为几何范围，并填充标签文字
+        let scale = 200.0 / 72.0;
         let highlight_boxes = vec![
             BoundingBox {
                 min_x: 50,
@@ -1012,6 +1449,7 @@ mod tests {
                 h: 20,
                 text: "请签名".to_string(),
                 page: 1,
+                font_size: 28,
                 ..TextRegion::default()
             },
             TextRegion {
@@ -1021,26 +1459,57 @@ mod tests {
                 h: 25,
                 text: "独立标签".to_string(),
                 page: 1,
+                font_size: 24,
                 ..TextRegion::default()
             },
         ];
 
-        let combined = combine_page_regions(highlight_boxes, tag_regions, 1);
+        // 字符层中包含 (50, 100) 区域内的文字
+        let page_chars = vec![
+            ExtractedChar {
+                ch: '请',
+                min_x: 60.0,
+                min_y: 105.0,
+                max_x: 80.0,
+                max_y: 125.0,
+                font_size_pt: 12.0,
+            },
+            ExtractedChar {
+                ch: '签',
+                min_x: 85.0,
+                min_y: 105.0,
+                max_x: 105.0,
+                max_y: 125.0,
+                font_size_pt: 12.0,
+            },
+            ExtractedChar {
+                ch: '名',
+                min_x: 110.0,
+                min_y: 105.0,
+                max_x: 130.0,
+                max_y: 125.0,
+                font_size_pt: 12.0,
+            },
+        ];
+
+        let combined = combine_page_regions(highlight_boxes, tag_regions, &page_chars, 1, scale);
         assert_eq!(combined.len(), 3);
 
-        // 1. (50, 100) 处与标签重叠，拥有高亮框尺寸和提取的文字
+        // 1. (50, 100) 处与字符重叠，拥有高亮框尺寸和提取的文字及字号
         let r1 = combined.iter().find(|r| r.x == 50 && r.y == 100).unwrap();
         assert_eq!(r1.w, 201);
         assert_eq!(r1.h, 41);
         assert_eq!(r1.text, "请签名");
         assert_eq!(r1.page, 1);
+        assert_eq!(r1.font_size, (12.0 * scale).round() as i32);
 
         // 2. (100, 300) 处的独立标签
         let r2 = combined.iter().find(|r| r.x == 100 && r.y == 300).unwrap();
         assert_eq!(r2.w, 120);
         assert_eq!(r2.text, "独立标签");
+        assert_eq!(r2.font_size, 24);
 
-        // 3. (300, 500) 处的独立高亮框
+        // 3. (300, 500) 处的独立高亮框（无文字）
         let r3 = combined.iter().find(|r| r.x == 300 && r.y == 500).unwrap();
         assert_eq!(r3.w, 101);
         assert_eq!(r3.text, "");
