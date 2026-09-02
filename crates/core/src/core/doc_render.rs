@@ -1,4 +1,4 @@
-//! 把 PDF / DOCX 渲染成「打印预览」图片，用作手写底图。
+//! 把 PDF / DOCX 渲染成「打印预览」图片，用作手写底图，并自动识别标记的手写区域。
 //!
 //! 对应 Python 版 `core/doc_render.py`：
 //! - PDF 用 pdfium 栅格化（`pdfium-render` 绑定；运行时需要 `pdfium.dll`，
@@ -6,10 +6,16 @@
 //! - DOCX 的忠实排版需要本机排版引擎：优先借助 Microsoft Word（COM 自动化，
 //!   仅 Windows），其次 LibreOffice（`soffice --headless`），转成 PDF 后
 //!   再走同一条栅格化链路。都没有时给出明确的安装提示。
+//! - 自动区域检测：
+//!   1. 图像高亮底色检测（Word 标准黄色/绿色/青色/粉色等高亮矩形区域）
+//!   2. 文本占位符标签检测（`{{...}}` 与 `【...】`）
+//!   3. 自动擦除原图上的高亮色块与占位文字为纯白底色，返回提取的 TextRegion 列表。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+use crate::core::models::TextRegion;
 
 /// 文档渲染错误。
 #[derive(Debug, thiserror::Error)]
@@ -35,29 +41,543 @@ impl From<std::io::Error> for DocRenderError {
     }
 }
 
+/// 像素包围盒。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundingBox {
+    pub min_x: u32,
+    pub min_y: u32,
+    pub max_x: u32,
+    pub max_y: u32,
+}
+
+impl BoundingBox {
+    pub fn width(&self) -> u32 {
+        self.max_x.saturating_sub(self.min_x) + 1
+    }
+
+    pub fn height(&self) -> u32 {
+        self.max_y.saturating_sub(self.min_y) + 1
+    }
+
+    pub fn union(&self, other: &BoundingBox) -> BoundingBox {
+        BoundingBox {
+            min_x: self.min_x.min(other.min_x),
+            min_y: self.min_y.min(other.min_y),
+            max_x: self.max_x.max(other.max_x),
+            max_y: self.max_y.max(other.max_y),
+        }
+    }
+
+    pub fn intersects(&self, other: &BoundingBox) -> bool {
+        self.min_x <= other.max_x
+            && self.max_x >= other.min_x
+            && self.min_y <= other.max_y
+            && self.max_y >= other.min_y
+    }
+}
+
+/// 判断像素是否属于高亮底色（如 Word 标准黄色、绿色、青色、品红、粉红、蓝色、红色等浅色/高饱和度底色）。
+pub fn is_highlight_pixel(r: u8, g: u8, b: u8) -> bool {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let diff = max - min;
+    // 灰度差必须足够大（排除黑白灰背景及文字抗锯齿）
+    if diff < 30 {
+        return false;
+    }
+    // 亮度必须足够（高亮是浅色底色，排除深色文字）
+    if max < 90 {
+        return false;
+    }
+    // 饱和度 diff / max >= 0.20
+    let sat = diff as f32 / max as f32;
+    if sat < 0.20 {
+        return false;
+    }
+    true
+}
+
+/// 检测图像中的高亮区域包围盒。
+pub fn detect_highlight_boxes(img: &image::RgbImage) -> Vec<BoundingBox> {
+    let width = img.width();
+    let height = img.height();
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let mut visited = vec![false; (width * height) as usize];
+    let mut raw_boxes = Vec::new();
+
+    // 8-邻域连通性
+    let dx = [-1, 0, 1, -1, 1, -1, 0, 1];
+    let dy = [-1, -1, -1, 0, 0, 1, 1, 1];
+
+    let mut queue = Vec::new();
+
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * width + x) as usize;
+            if visited[idx] {
+                continue;
+            }
+            let pixel = img.get_pixel(x, y);
+            if !is_highlight_pixel(pixel[0], pixel[1], pixel[2]) {
+                continue;
+            }
+
+            // BFS 收集连通块
+            visited[idx] = true;
+            queue.clear();
+            queue.push((x, y));
+
+            let mut min_x = x;
+            let mut max_x = x;
+            let mut min_y = y;
+            let mut max_y = y;
+            let mut count = 0usize;
+
+            let mut head = 0;
+            while head < queue.len() {
+                let (cx, cy) = queue[head];
+                head += 1;
+                count += 1;
+
+                min_x = min_x.min(cx);
+                max_x = max_x.max(cx);
+                min_y = min_y.min(cy);
+                max_y = max_y.max(cy);
+
+                for dir in 0..8 {
+                    let nx = cx as i32 + dx[dir];
+                    let ny = cy as i32 + dy[dir];
+                    if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
+                        let n_idx = (ny as u32 * width + nx as u32) as usize;
+                        if !visited[n_idx] {
+                            let np = img.get_pixel(nx as u32, ny as u32);
+                            if is_highlight_pixel(np[0], np[1], np[2]) {
+                                visited[n_idx] = true;
+                                queue.push((nx as u32, ny as u32));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let bw = max_x - min_x + 1;
+            let bh = max_y - min_y + 1;
+
+            // 过滤噪声：最小宽度 >= 15，最小高度 >= 8，像素数 >= 30
+            if bw >= 15 && bh >= 8 && count >= 30 {
+                raw_boxes.push(BoundingBox {
+                    min_x,
+                    min_y,
+                    max_x,
+                    max_y,
+                });
+            }
+        }
+    }
+
+    merge_close_boxes(raw_boxes)
+}
+
+fn should_merge_boxes(a: &BoundingBox, b: &BoundingBox) -> bool {
+    // 1. 直接相交或包含
+    if a.intersects(b) {
+        return true;
+    }
+
+    // 2. 同行相邻且水平间隙较小 (gap <= 20 像素，垂直重叠超过较小高度的 40%)
+    let overlap_y = (a.max_y.min(b.max_y) as i32) - (a.min_y.max(b.min_y) as i32) + 1;
+    let min_h = a.height().min(b.height()) as i32;
+    if overlap_y > 0 && overlap_y >= (min_h * 2 / 5) {
+        let gap_x = if a.max_x < b.min_x {
+            b.min_x - a.max_x
+        } else if b.max_x < a.min_x {
+            a.min_x - b.max_x
+        } else {
+            0
+        };
+        if gap_x <= 20 {
+            return true;
+        }
+    }
+
+    // 3. 同一区域内垂直多行连续段 (水平重叠显著，垂直间隙 gap <= 10)
+    let overlap_x = (a.max_x.min(b.max_x) as i32) - (a.min_x.max(b.min_x) as i32) + 1;
+    let min_w = a.width().min(b.width()) as i32;
+    if overlap_x > 0 && overlap_x >= (min_w / 2) {
+        let gap_y = if a.max_y < b.min_y {
+            b.min_y - a.max_y
+        } else if b.max_y < a.min_y {
+            a.min_y - b.max_y
+        } else {
+            0
+        };
+        if gap_y <= 10 {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// 合并相邻或重叠的高亮矩形框。
+pub fn merge_close_boxes(mut boxes: Vec<BoundingBox>) -> Vec<BoundingBox> {
+    if boxes.len() <= 1 {
+        return boxes;
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let mut next = Vec::new();
+        let mut merged = vec![false; boxes.len()];
+
+        for i in 0..boxes.len() {
+            if merged[i] {
+                continue;
+            }
+            let mut current = boxes[i];
+            for j in (i + 1)..boxes.len() {
+                if merged[j] {
+                    continue;
+                }
+                if should_merge_boxes(&current, &boxes[j]) {
+                    current = current.union(&boxes[j]);
+                    merged[j] = true;
+                    changed = true;
+                }
+            }
+            next.push(current);
+        }
+        boxes = next;
+    }
+
+    boxes
+}
+
+/// 在图像上将高亮矩形区域及残留的高亮像素抹白为纯白 `#FFFFFF`。
+pub fn erase_highlight_boxes(img: &mut image::RgbImage, boxes: &[BoundingBox]) {
+    let width = img.width();
+    let height = img.height();
+
+    // 1. 将检测到的包围盒矩形内全部置为纯白
+    for b in boxes {
+        let x0 = b.min_x.min(width.saturating_sub(1));
+        let x1 = b.max_x.min(width.saturating_sub(1));
+        let y0 = b.min_y.min(height.saturating_sub(1));
+        let y1 = b.max_y.min(height.saturating_sub(1));
+
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                img.put_pixel(x, y, image::Rgb([255, 255, 255]));
+            }
+        }
+    }
+
+    // 2. 将整页中任何残留的高亮颜色像素也置为纯白（消除边缘溢色）
+    for y in 0..height {
+        for x in 0..width {
+            let p = img.get_pixel(x, y);
+            if is_highlight_pixel(p[0], p[1], p[2]) {
+                img.put_pixel(x, y, image::Rgb([255, 255, 255]));
+            }
+        }
+    }
+}
+
+/// 匹配到的文本标签结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagMatch {
+    pub start_char_idx: usize,
+    pub end_char_idx: usize,
+    pub inner_text: String,
+}
+
+/// 在字符流中扫描 `{{...}}` 或 `【...】` 占位标签。
+pub fn scan_text_tags(chars: &[char]) -> Vec<TagMatch> {
+    let mut matches = Vec::new();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // 匹配 {{...}}
+        if i + 1 < len && chars[i] == '{' && chars[i + 1] == '{' {
+            let mut j = i + 2;
+            let mut found = false;
+            while j + 1 < len {
+                if chars[j] == '}' && chars[j + 1] == '}' {
+                    let inner: String = chars[(i + 2)..j].iter().collect();
+                    matches.push(TagMatch {
+                        start_char_idx: i,
+                        end_char_idx: j + 1,
+                        inner_text: inner.trim().to_string(),
+                    });
+                    i = j + 2;
+                    found = true;
+                    break;
+                } else if (chars[j] == '{' && chars[j + 1] == '{') || chars[j] == '\n' || chars[j] == '\r' {
+                    i = j;
+                    found = true;
+                    break;
+                }
+                j += 1;
+            }
+            if !found {
+                i += 1;
+            }
+        }
+        // 匹配 【...】
+        else if chars[i] == '【' {
+            let mut j = i + 1;
+            let mut found = false;
+            while j < len {
+                if chars[j] == '】' {
+                    let inner: String = chars[(i + 1)..j].iter().collect();
+                    matches.push(TagMatch {
+                        start_char_idx: i,
+                        end_char_idx: j,
+                        inner_text: inner.trim().to_string(),
+                    });
+                    i = j + 1;
+                    found = true;
+                    break;
+                } else if chars[j] == '【' || chars[j] == '\n' || chars[j] == '\r' {
+                    i = j;
+                    found = true;
+                    break;
+                }
+                j += 1;
+            }
+            if !found {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    matches
+}
+
+struct PdfCharEntry {
+    _ch: char,
+    left: f32,
+    right: f32,
+    bottom: f32,
+    top: f32,
+}
+
+fn extract_pdf_page_tags(
+    page: &pdfium_render::prelude::PdfPage,
+    page_index: usize,
+    dpi: u32,
+    img_width: u32,
+    img_height: u32,
+    img: &mut image::RgbImage,
+) -> Vec<TextRegion> {
+    let text_page = match page.text() {
+        Ok(tp) => tp,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut char_entries: Vec<PdfCharEntry> = Vec::new();
+    let mut chars_vec: Vec<char> = Vec::new();
+
+    for char_obj in text_page.chars().iter() {
+        if let Some(ch) = char_obj.unicode_char() {
+            let (left, right, bottom, top) = if let Ok(rect) =
+                char_obj.loose_bounds().or_else(|_| char_obj.tight_bounds())
+            {
+                (
+                    rect.left().value,
+                    rect.right().value,
+                    rect.bottom().value,
+                    rect.top().value,
+                )
+            } else {
+                (0.0, 0.0, 0.0, 0.0)
+            };
+            char_entries.push(PdfCharEntry {
+                _ch: ch,
+                left,
+                right,
+                bottom,
+                top,
+            });
+            chars_vec.push(ch);
+        }
+    }
+
+    let matches = scan_text_tags(&chars_vec);
+    let scale = dpi as f32 / 72.0;
+    let page_height_pt = page.height().value;
+
+    let mut regions = Vec::new();
+
+    for m in matches {
+        let mut min_left = f32::MAX;
+        let mut max_right = f32::MIN;
+        let mut min_bottom = f32::MAX;
+        let mut max_top = f32::MIN;
+        let mut has_valid_bounds = false;
+
+        for k in m.start_char_idx..=m.end_char_idx {
+            if k < char_entries.len() {
+                let e = &char_entries[k];
+                if e.right > e.left && e.top > e.bottom {
+                    min_left = min_left.min(e.left);
+                    max_right = max_right.max(e.right);
+                    min_bottom = min_bottom.min(e.bottom);
+                    max_top = max_top.max(e.top);
+                    has_valid_bounds = true;
+                }
+            }
+        }
+
+        if !has_valid_bounds {
+            continue;
+        }
+
+        // PDF 点坐标转换为像素坐标（原点在左上角）
+        let x_px = (min_left * scale).round() as i32;
+        let y_px = ((page_height_pt - max_top) * scale).round() as i32;
+        let w_px = ((max_right - min_left) * scale).round().max(1.0) as i32;
+        let h_px = ((max_top - min_bottom) * scale).round().max(1.0) as i32;
+
+        let x = x_px.max(0).min(img_width.saturating_sub(1) as i32);
+        let y = y_px.max(0).min(img_height.saturating_sub(1) as i32);
+        let w = w_px.max(1).min((img_width as i32).saturating_sub(x).max(1));
+        let h = h_px.max(1).min((img_height as i32).saturating_sub(y).max(1));
+
+        // 清理原图上的 {{...}} 标签区域为纯白色（向外扩展 2 像素以消除文字抗锯齿）
+        let pad = 2i32;
+        let erase_x0 = (x - pad).max(0) as u32;
+        let erase_y0 = (y - pad).max(0) as u32;
+        let erase_x1 = ((x + w + pad) as u32).min(img_width);
+        let erase_y1 = ((y + h + pad) as u32).min(img_height);
+
+        for ey in erase_y0..erase_y1 {
+            for ex in erase_x0..erase_x1 {
+                img.put_pixel(ex, ey, image::Rgb([255, 255, 255]));
+            }
+        }
+
+        regions.push(TextRegion {
+            x,
+            y,
+            w,
+            h,
+            text: m.inner_text,
+            printed: false,
+            page: (page_index + 1) as i32,
+            font_size: 0,
+            ..TextRegion::default()
+        });
+    }
+
+    regions
+}
+
+/// 合并高亮区域与文本标签区域。
+pub fn combine_page_regions(
+    highlight_boxes: Vec<BoundingBox>,
+    tag_regions: Vec<TextRegion>,
+    page_num: i32,
+) -> Vec<TextRegion> {
+    let mut final_regions: Vec<TextRegion> = Vec::new();
+    let mut matched_tags = vec![false; tag_regions.len()];
+
+    for b in highlight_boxes {
+        let bx = b.min_x as i32;
+        let by = b.min_y as i32;
+        let bw = b.width() as i32;
+        let bh = b.height() as i32;
+
+        // 查找是否包含或重叠某个 tag_region
+        let mut extracted_text = String::new();
+        for (t_idx, tag) in tag_regions.iter().enumerate() {
+            if matched_tags[t_idx] {
+                continue;
+            }
+            let overlap_x = (bx + bw).min(tag.x + tag.w) - bx.max(tag.x);
+            let overlap_y = (by + bh).min(tag.y + tag.h) - by.max(tag.y);
+            if overlap_x > 0 && overlap_y > 0 {
+                matched_tags[t_idx] = true;
+                if !tag.text.is_empty() {
+                    extracted_text = tag.text.clone();
+                }
+            }
+        }
+
+        final_regions.push(TextRegion {
+            x: bx,
+            y: by,
+            w: bw,
+            h: bh,
+            text: extracted_text,
+            printed: false,
+            page: page_num,
+            font_size: 0,
+            ..TextRegion::default()
+        });
+    }
+
+    // 剩余未与高亮框重叠的 tag 区域直接作为独立的 TextRegion
+    for (t_idx, tag) in tag_regions.into_iter().enumerate() {
+        if !matched_tags[t_idx] {
+            final_regions.push(tag);
+        }
+    }
+
+    // 按照从上到下、从左到右排序
+    final_regions.sort_by(|a, b| {
+        if (a.y - b.y).abs() <= 10 {
+            a.x.cmp(&b.x)
+        } else {
+            a.y.cmp(&b.y)
+        }
+    });
+
+    final_regions
+}
+
+/// 入口：PDF 直接渲染；DOCX 先转 PDF。返回逐页 PNG 路径与自动识别的 TextRegion 列表。
+pub fn document_to_page_images_with_regions(
+    path: &Path,
+    out_dir: &Path,
+    dpi: u32,
+) -> Result<(Vec<PathBuf>, Vec<TextRegion>), DocRenderError> {
+    let suffix = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match suffix.as_str() {
+        "pdf" => pdf_to_images_with_regions(path, out_dir, dpi),
+        "docx" => {
+            let pdf_path = docx_to_pdf(path, out_dir)?;
+            pdf_to_images_with_regions(&pdf_path, out_dir, dpi)
+        }
+        other => Err(DocRenderError::UnsupportedExtension(format!(".{other}"))),
+    }
+}
+
 /// 入口：PDF 直接渲染；DOCX 先转 PDF。返回逐页 PNG 路径（页序即列表序）。
 pub fn document_to_page_images(
     path: &Path,
     out_dir: &Path,
     dpi: u32,
 ) -> Result<Vec<PathBuf>, DocRenderError> {
-    let suffix = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    match suffix.as_str() {
-        "pdf" => pdf_to_images(path, out_dir, dpi),
-        "docx" => {
-            let pdf_path = docx_to_pdf(path, out_dir)?;
-            pdf_to_images(&pdf_path, out_dir, dpi)
-        }
-        other => Err(DocRenderError::UnsupportedExtension(format!(".{other}"))),
-    }
+    document_to_page_images_with_regions(path, out_dir, dpi).map(|(paths, _)| paths)
 }
 
-/// 把 PDF 逐页栅格化为 PNG，返回按页序排列的文件路径列表。
-/// 对齐 Python 版 `pdf_to_images`（默认 200 DPI）。
-pub fn pdf_to_images(pdf_path: &Path, out_dir: &Path, dpi: u32) -> Result<Vec<PathBuf>, DocRenderError> {
+/// 把 PDF 逐页栅格化为 PNG，并自动检测标记区域，返回 (文件路径列表, 识别出的 TextRegion 列表)。
+pub fn pdf_to_images_with_regions(
+    pdf_path: &Path,
+    out_dir: &Path,
+    dpi: u32,
+) -> Result<(Vec<PathBuf>, Vec<TextRegion>), DocRenderError> {
     std::fs::create_dir_all(out_dir)
         .map_err(|e| DocRenderError::Other(format!("创建缓存目录失败：{e}")))?;
     let prefix = page_prefix(pdf_path);
@@ -69,6 +589,8 @@ pub fn pdf_to_images(pdf_path: &Path, out_dir: &Path, dpi: u32) -> Result<Vec<Pa
         .map_err(|e| DocRenderError::Other(format!("打开 PDF 失败：{e}")))?;
     let scale = dpi as f32 / 72.0;
     let mut paths = Vec::new();
+    let mut all_regions = Vec::new();
+
     for (index, page) in document.pages().iter().enumerate() {
         // 目标像素尺寸：页面点数（1/72 英寸）× dpi/72
         let w_px = (page.width().value * scale).round().max(1.0) as i32;
@@ -77,16 +599,46 @@ pub fn pdf_to_images(pdf_path: &Path, out_dir: &Path, dpi: u32) -> Result<Vec<Pa
             .render(w_px, h_px, None)
             .map_err(|e| DocRenderError::Other(format!("第 {} 页渲染失败：{e}", index + 1)))?;
         let image = bitmap.as_image();
-        let rgb = image::DynamicImage::ImageRgb8(image.to_rgb8());
+        let mut rgb_img = image.to_rgb8();
+
+        // 1. 从 PDF 文本层提取 {{...}} / 【...】标签区域，并在图像上抹除标签文字
+        let tag_regions = extract_pdf_page_tags(
+            &page,
+            index,
+            dpi,
+            rgb_img.width(),
+            rgb_img.height(),
+            &mut rgb_img,
+        );
+
+        // 2. 从渲染图像中检测高亮色块，并将其擦除为白色
+        let highlight_boxes = detect_highlight_boxes(&rgb_img);
+        erase_highlight_boxes(&mut rgb_img, &highlight_boxes);
+
+        // 3. 合并高亮框与文本标签区域
+        let page_regions = combine_page_regions(highlight_boxes, tag_regions, (index + 1) as i32);
+        all_regions.extend(page_regions);
+
         let path = out_dir.join(format!("{prefix}_{index}.png"));
-        rgb.save_with_format(&path, image::ImageFormat::Png)
+        rgb_img
+            .save_with_format(&path, image::ImageFormat::Png)
             .map_err(|e| DocRenderError::Other(format!("保存 {} 失败：{e}", path.display())))?;
         paths.push(path);
     }
     if paths.is_empty() {
         return Err(DocRenderError::NoPages(pdf_path.display().to_string()));
     }
-    Ok(paths)
+    Ok((paths, all_regions))
+}
+
+/// 把 PDF 逐页栅格化为 PNG，返回按页序排列的文件路径列表。
+/// 对齐 Python 版 `pdf_to_images`（默认 200 DPI）。
+pub fn pdf_to_images(
+    pdf_path: &Path,
+    out_dir: &Path,
+    dpi: u32,
+) -> Result<Vec<PathBuf>, DocRenderError> {
+    pdf_to_images_with_regions(pdf_path, out_dir, dpi).map(|(paths, _)| paths)
 }
 
 /// 页文件名前缀：文档名（不含扩展名），清理非法字符避免跨平台问题。
@@ -332,8 +884,7 @@ mod tests {
 
     #[test]
     fn unsupported_extension_rejected() {
-        let err = document_to_page_images(Path::new("a.txt"), Path::new("out"), 200)
-            .unwrap_err();
+        let err = document_to_page_images(Path::new("a.txt"), Path::new("out"), 200).unwrap_err();
         assert!(matches!(err, DocRenderError::UnsupportedExtension(_)));
     }
 
@@ -343,9 +894,160 @@ mod tests {
     }
 
     #[test]
+    fn test_highlight_pixel_classifier() {
+        // 标准高亮色
+        assert!(is_highlight_pixel(255, 255, 0)); // 黄色
+        assert!(is_highlight_pixel(0, 255, 0)); // 绿色
+        assert!(is_highlight_pixel(0, 255, 255)); // 青色
+        assert!(is_highlight_pixel(255, 0, 255)); // 品红
+        assert!(is_highlight_pixel(255, 105, 180)); // 粉红
+        assert!(is_highlight_pixel(100, 180, 255)); // 浅蓝
+        assert!(is_highlight_pixel(255, 80, 80)); // 浅红
+
+        // 灰度/黑白背景与文字
+        assert!(!is_highlight_pixel(255, 255, 255)); // 纯白
+        assert!(!is_highlight_pixel(0, 0, 0)); // 纯黑
+        assert!(!is_highlight_pixel(30, 30, 30)); // 深灰文字
+        assert!(!is_highlight_pixel(128, 128, 128)); // 灰色
+        assert!(!is_highlight_pixel(240, 240, 240)); // 浅灰背景
+        assert!(!is_highlight_pixel(200, 205, 202)); // 轻微抗锯齿灰边
+    }
+
+    #[test]
+    fn test_detect_highlight_boxes_and_erase() {
+        let mut img = image::RgbImage::from_pixel(400, 300, image::Rgb([255, 255, 255]));
+
+        // 绘制一个黄色高亮矩形区域：(50, 60), 宽 100, 高 30
+        for y in 60..(60 + 30) {
+            for x in 50..(50 + 100) {
+                img.put_pixel(x, y, image::Rgb([255, 255, 0]));
+            }
+        }
+
+        // 绘制一个青色高亮矩形区域：(200, 150), 宽 80, 高 20
+        for y in 150..(150 + 20) {
+            for x in 200..(200 + 80) {
+                img.put_pixel(x, y, image::Rgb([0, 255, 255]));
+            }
+        }
+
+        // 绘制一个微小噪声噪点：5x5（应被过滤）
+        for y in 10..15 {
+            for x in 10..15 {
+                img.put_pixel(x, y, image::Rgb([255, 0, 0]));
+            }
+        }
+
+        let boxes = detect_highlight_boxes(&img);
+        assert_eq!(boxes.len(), 2, "应检测到 2 个有效高亮框并过滤噪点");
+
+        // 验证第一个黄色框
+        let b1 = boxes.iter().find(|b| b.min_x == 50 && b.min_y == 60).unwrap();
+        assert_eq!(b1.width(), 100);
+        assert_eq!(b1.height(), 30);
+
+        // 验证第二个青色框
+        let b2 = boxes.iter().find(|b| b.min_x == 200 && b.min_y == 150).unwrap();
+        assert_eq!(b2.width(), 80);
+        assert_eq!(b2.height(), 20);
+
+        // 测试擦除
+        erase_highlight_boxes(&mut img, &boxes);
+
+        // 擦除后，高亮区域应变为纯白色 (255, 255, 255)
+        for y in 60..(60 + 30) {
+            for x in 50..(50 + 100) {
+                assert_eq!(img.get_pixel(x, y), &image::Rgb([255, 255, 255]));
+            }
+        }
+        for y in 150..(150 + 20) {
+            for x in 200..(200 + 80) {
+                assert_eq!(img.get_pixel(x, y), &image::Rgb([255, 255, 255]));
+            }
+        }
+    }
+
+    #[test]
+    fn test_scan_text_tags() {
+        let text1: Vec<char> = "请在此处手写：{{ 签名 }}，祝好！".chars().collect();
+        let matches1 = scan_text_tags(&text1);
+        assert_eq!(matches1.len(), 1);
+        assert_eq!(matches1[0].inner_text, "签名");
+
+        let text2: Vec<char> = "意见：【同意批准】 日期：【2026-09-02】".chars().collect();
+        let matches2 = scan_text_tags(&text2);
+        assert_eq!(matches2.len(), 2);
+        assert_eq!(matches2[0].inner_text, "同意批准");
+        assert_eq!(matches2[1].inner_text, "2026-09-02");
+
+        let text3: Vec<char> = "空标签：{{}} 以及未闭合标签 {{ 未闭合".chars().collect();
+        let matches3 = scan_text_tags(&text3);
+        assert_eq!(matches3.len(), 1);
+        assert_eq!(matches3[0].inner_text, "");
+    }
+
+    #[test]
+    fn test_combine_page_regions() {
+        // 高亮框与标签重叠：合并为以高亮框为几何范围，并填充标签文字
+        let highlight_boxes = vec![
+            BoundingBox {
+                min_x: 50,
+                min_y: 100,
+                max_x: 250,
+                max_y: 140,
+            },
+            BoundingBox {
+                min_x: 300,
+                min_y: 500,
+                max_x: 400,
+                max_y: 530,
+            },
+        ];
+
+        let tag_regions = vec![
+            TextRegion {
+                x: 60,
+                y: 105,
+                w: 80,
+                h: 20,
+                text: "请签名".to_string(),
+                page: 1,
+                ..TextRegion::default()
+            },
+            TextRegion {
+                x: 100,
+                y: 300,
+                w: 120,
+                h: 25,
+                text: "独立标签".to_string(),
+                page: 1,
+                ..TextRegion::default()
+            },
+        ];
+
+        let combined = combine_page_regions(highlight_boxes, tag_regions, 1);
+        assert_eq!(combined.len(), 3);
+
+        // 1. (50, 100) 处与标签重叠，拥有高亮框尺寸和提取的文字
+        let r1 = combined.iter().find(|r| r.x == 50 && r.y == 100).unwrap();
+        assert_eq!(r1.w, 201);
+        assert_eq!(r1.h, 41);
+        assert_eq!(r1.text, "请签名");
+        assert_eq!(r1.page, 1);
+
+        // 2. (100, 300) 处的独立标签
+        let r2 = combined.iter().find(|r| r.x == 100 && r.y == 300).unwrap();
+        assert_eq!(r2.w, 120);
+        assert_eq!(r2.text, "独立标签");
+
+        // 3. (300, 500) 处的独立高亮框
+        let r3 = combined.iter().find(|r| r.x == 300 && r.y == 500).unwrap();
+        assert_eq!(r3.w, 101);
+        assert_eq!(r3.text, "");
+    }
+
+    #[test]
     fn pdf_to_images_renders_all_pages() {
-        // 本机有 pdfium.dll（exe 旁 / 当前目录 / PATH）时验证完整栅格化链路；
-        // 无 dll 的环境（CI）优雅跳过。
         let dir = tempfile::tempdir().unwrap();
         let pdf_path = dir.path().join("two_page.pdf");
         {
@@ -353,7 +1055,11 @@ mod tests {
             let mut doc = PdfDocument::new("handwrite-sim-test");
             let empty_ops: Vec<printpdf::Op> = Vec::new();
             doc.with_pages(vec![
-                printpdf::PdfPage::new(printpdf::Mm(210.0), printpdf::Mm(297.0), empty_ops.clone()),
+                printpdf::PdfPage::new(
+                    printpdf::Mm(210.0),
+                    printpdf::Mm(297.0),
+                    empty_ops.clone(),
+                ),
                 printpdf::PdfPage::new(printpdf::Mm(210.0), printpdf::Mm(297.0), empty_ops),
             ]);
             let mut warnings = Vec::new();
@@ -361,19 +1067,20 @@ mod tests {
             std::fs::write(&pdf_path, bytes).unwrap();
         }
         let out_dir = dir.path().join("pages");
-        match pdf_to_images(&pdf_path, &out_dir, 100) {
-            Ok(paths) => {
+        match pdf_to_images_with_regions(&pdf_path, &out_dir, 100) {
+            Ok((paths, regions)) => {
                 assert_eq!(paths.len(), 2, "两页 PDF 应输出两张 PNG");
                 for p in &paths {
                     assert!(p.is_file(), "{} 应存在", p.display());
                     let img = image::open(p).unwrap();
-                    // 100 DPI 下 A4 ≈ 827×1169 px
                     assert!(
                         (img.width(), img.height()).0 > 500 && (img.width(), img.height()).1 > 700,
                         "页面尺寸异常：{:?}",
                         (img.width(), img.height())
                     );
                 }
+                // 空白测试 PDF 没有高亮与标签
+                assert!(regions.is_empty());
             }
             Err(DocRenderError::PdfiumUnavailable(_)) => {
                 eprintln!("跳过：未找到 pdfium.dll");
@@ -384,9 +1091,6 @@ mod tests {
 
     #[test]
     fn docx_conversion_never_panics() {
-        // 结果依赖本机是否装有 Word/LibreOffice（Word 的文本恢复甚至能把
-        // 伪 docx 当纯文本打开转出 PDF），因此只验证：不 panic；
-        // 成功时产物存在；失败时报错信息可读。
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("fake.docx");
         std::fs::write(&fake, b"not a real docx").unwrap();
