@@ -18,6 +18,7 @@ import {
 import ParaEditor from "./ParaEditor.vue";
 import RegionList from "./RegionList.vue";
 import RegionDialog from "./RegionDialog.vue";
+import RoleManager from "./RoleManager.vue";
 import {
   chooseBackground,
   chooseFont,
@@ -101,6 +102,9 @@ const presetOptions = computed(() =>
 
       <!-- ============ 框选文字区域 ============ -->
       <RegionList />
+
+      <!-- ============ 笔迹角色管理 ============ -->
+      <RoleManager />
 
       <!-- ============ 字体 / 背景 / 文档底图 ============ -->
       <div class="field-row" style="margin-top: 10px">

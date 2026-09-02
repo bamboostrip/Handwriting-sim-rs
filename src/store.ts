@@ -8,7 +8,7 @@ import { reactive, watch } from "vue";
 import { createDiscreteApi } from "naive-ui";
 import { useDebounceFn } from "@vueuse/core";
 import { api, assetUrl, dialogs } from "./api";
-import type { UiParams, UiRegion, UpdateInfo } from "./types";
+import type { UiHandwritingRole, UiParams, UiRegion, UiTextRun, UpdateInfo } from "./types";
 
 /** 当前版本号与开源仓库地址 */
 export const APP_VERSION = "0.3.3";
@@ -61,16 +61,31 @@ export interface Para {
   text: string;
   align: 0 | 1 | 2;
   indentEm: number;
+  runs?: UiTextRun[];
 }
 
 export type Region = UiRegion;
 
+export const defaultRoles = (): UiHandwritingRole[] => [
+  { id: 0, name: "默认手写 (主字体)", fontPath: "", printed: false, fill: null },
+  { id: 1, name: "打印体 (无扰动)", fontPath: "", printed: true, fill: null },
+  { id: 2, name: "手写角色 1 (黄色高亮)", fontPath: "", printed: false, fill: null },
+  { id: 3, name: "手写角色 2 (绿色高亮)", fontPath: "", printed: false, fill: null },
+  { id: 4, name: "手写角色 3 (青色高亮)", fontPath: "", printed: false, fill: null },
+];
+
 let paraSeq = 1;
-export const newPara = (text = "", align: 0 | 1 | 2 = 0, indentEm = 0): Para => ({
+export const newPara = (
+  text = "",
+  align: 0 | 1 | 2 = 0,
+  indentEm = 0,
+  runs?: UiTextRun[],
+): Para => ({
   id: paraSeq++,
   text,
   align,
   indentEm,
+  runs,
 });
 
 /** 清理外来文本特殊字符（对齐后端 clean_text / 原 to_ui_spaces） */
@@ -104,6 +119,9 @@ export const store = reactive({
   boundsColor: "#4ca6a6",
   endChars: "，。",
   startChars: "",
+
+  // ---- 笔迹角色 ----
+  roles: defaultRoles(),
 
   // ---- 逐段编辑器 ----
   paragraphs: [newPara()] as Para[],
@@ -261,9 +279,19 @@ const num = (v: number | null | undefined, fallback: number) =>
 /** 收集表单为引擎参数（对齐原 collect_params 的段落/纯文本分支语义）。 */
 export function buildParams(): UiParams {
   const paras = store.paragraphs
-    .filter((r) => cleanText(r.text).trim() !== "")
-    .map((r) => ({ text: cleanText(r.text), align: r.align, indentEm: r.indentEm }));
-  const hasFormat = store.paragraphs.some((r) => r.align !== 0 || r.indentEm !== 0);
+    .filter((r) => cleanText(r.text).trim() !== "" || (r.runs && r.runs.some((run) => cleanText(run.text).trim() !== "")))
+    .map((r) => ({
+      text: cleanText(r.text),
+      align: r.align,
+      indentEm: r.indentEm,
+      runs: r.runs?.map((run) => ({
+        text: cleanText(run.text),
+        style: run.style ? { ...run.style } : undefined,
+      })),
+    }));
+  const hasFormat = store.paragraphs.some(
+    (r) => r.align !== 0 || r.indentEm !== 0 || (r.runs && r.runs.length > 0),
+  );
 
   let text = "";
   let outParas = paras;
@@ -297,6 +325,7 @@ export function buildParams(): UiParams {
     text,
     paragraphs: outParas,
     regions: store.regions.map((r) => ({ ...r })),
+    roles: store.roles.map((r) => ({ ...r })),
     endChars: store.endChars,
     startChars: store.startChars,
     boundsVisible: store.boundsVisible,
@@ -404,9 +433,18 @@ export async function importDocx(): Promise<void> {
   if (!p) return;
   try {
     const rows = await api.importDocx(p, num(store.fontSize, 36));
-    const fs = num(store.fontSize, 36);
     setParagraphs(
-      rows.map(([t, align, indentPx]) => newPara(cleanText(t), align as 0 | 1 | 2, fs > 0 ? indentPx / fs : 0)),
+      rows.map((row) =>
+        newPara(
+          cleanText(row.text),
+          (row.align ?? 0) as 0 | 1 | 2,
+          row.indentEm ?? 0,
+          row.runs?.map((r) => ({
+            text: cleanText(r.text),
+            style: r.style ? { ...r.style } : undefined,
+          })),
+        ),
+      ),
     );
     focusPara(store.paragraphs[0].id, 0);
     store.status = `已导入 ${rows.length} 个段落，回车分段、按钮设格式`;
@@ -468,6 +506,9 @@ export function applyPreset(p: UiParams, msg?: string): void {
   store.boundsColor = normalizeHex(p.boundsColor || "#4ca6a6");
   store.endChars = p.endChars ?? "，。";
   store.startChars = p.startChars ?? "";
+  if (p.roles && p.roles.length > 0) {
+    store.roles = p.roles.map((r) => ({ ...r }));
+  }
   store.docPages = null;
   store.docStatus = "";
   if (msg) store.status = msg;
@@ -883,11 +924,14 @@ export async function importDocxToDraft(): Promise<void> {
   try {
     const rows = await api.importDocx(p, draftFontSize(d));
     if (!rows.length) throw new Error("文档为空");
-    const fs = draftFontSize(d);
-    d.paragraphs = rows.map(([t, align, indentPx]) => ({
-      text: cleanText(t),
-      align: align as 0 | 1 | 2,
-      indentEm: fs > 0 ? indentPx / fs : 0,
+    d.paragraphs = rows.map((row) => ({
+      text: cleanText(row.text),
+      align: (row.align ?? 0) as 0 | 1 | 2,
+      indentEm: row.indentEm ?? 0,
+      runs: row.runs?.map((r) => ({
+        text: cleanText(r.text),
+        style: r.style ? { ...r.style } : undefined,
+      })),
     }));
     d.text = d.paragraphs.map((r) => r.text).join("\n");
     d.align = d.paragraphs[0]?.align ?? 0;
@@ -1035,4 +1079,62 @@ export async function startupCheckUpdate(): Promise<void> {
     console.warn("启动检查更新失败:", e);
   }
 }
+
+// ---------------------------------------------------------------- 角色管理
+
+export function addRole(name?: string, printed = false): UiHandwritingRole {
+  const maxId = store.roles.reduce((m, r) => Math.max(m, r.id), -1);
+  const nextId = maxId + 1;
+  const newRole: UiHandwritingRole = {
+    id: nextId,
+    name: name || (printed ? `打印角色 ${nextId}` : `手写角色 ${nextId}`),
+    fontPath: "",
+    printed,
+    fill: null,
+  };
+  store.roles.push(newRole);
+  scheduleRender();
+  return newRole;
+}
+
+export function deleteRole(id: number): void {
+  const idx = store.roles.findIndex((r) => r.id === id);
+  if (idx >= 0) {
+    store.roles.splice(idx, 1);
+    scheduleRender();
+  }
+}
+
+export async function chooseRoleFont(id: number): Promise<void> {
+  const role = store.roles.find((r) => r.id === id);
+  if (!role) return;
+  const p = await dialogs.pickFont();
+  if (typeof p === "string") {
+    role.fontPath = p;
+    scheduleRender();
+  }
+}
+
+export function resetRoles(): void {
+  store.roles = defaultRoles();
+  scheduleRender();
+}
+
+export function roleHasOverrides(r: UiHandwritingRole): boolean {
+  return (
+    r.fontSize != null ||
+    r.fill != null ||
+    r.wordSpacing != null ||
+    r.lineSpacing != null ||
+    r.fontSizeSigma != null ||
+    r.wordSpacingSigma != null ||
+    r.lineSpacingSigma != null ||
+    r.perturbXSigma != null ||
+    r.perturbYSigma != null ||
+    r.perturbThetaSigma != null ||
+    r.miswriteRate != null ||
+    r.miswriteStrikeoutStyleIndex != null
+  );
+}
+
 

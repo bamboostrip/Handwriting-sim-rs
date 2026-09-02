@@ -1,11 +1,44 @@
 //! 前端 ↔ 后端共享类型：与 src-tauri/src/params.rs 的 UiParams 镜像（camelCase）。
 
+export interface UiTextRunStyle {
+  roleId?: number;
+  fontPath?: string | null;
+  fontSize?: number | null;
+  fill?: string | null;
+  printed?: boolean;
+}
+
+export interface UiTextRun {
+  text: string;
+  style?: UiTextRunStyle;
+}
+
 export interface UiParagraph {
   text: string;
   /** 0 左对齐 / 1 居中 / 2 右对齐 */
   align: number;
   /** 首行缩进（字符数 em） */
   indentEm: number;
+  runs?: UiTextRun[];
+}
+
+export interface UiHandwritingRole {
+  id: number;
+  name: string;
+  fontPath: string;
+  printed: boolean;
+  fontSize?: number | null;
+  fill?: string | null;
+  wordSpacing?: number | null;
+  lineSpacing?: number | null;
+  fontSizeSigma?: number | null;
+  wordSpacingSigma?: number | null;
+  lineSpacingSigma?: number | null;
+  perturbXSigma?: number | null;
+  perturbYSigma?: number | null;
+  perturbThetaSigma?: number | null;
+  miswriteRate?: number | null;
+  miswriteStrikeoutStyleIndex?: number | null;
 }
 
 /** 框选文字区域（背景原始像素坐标） */
@@ -72,6 +105,7 @@ export interface UiParams {
   text: string;
   paragraphs: UiParagraph[];
   regions: UiRegion[];
+  roles?: UiHandwritingRole[];
   endChars: string;
   startChars: string;
   boundsVisible: boolean;
