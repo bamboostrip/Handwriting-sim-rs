@@ -226,6 +226,10 @@ jobs:
           cp packaging/fonts-README.txt staging/fonts/README.txt
           cd staging
           zip -r "../${{ matrix.artifact }}.zip" .
+          cd ..
+          # 单文件升级包：老用户直接替换旧二进制即可
+          cp "target/release/${{ matrix.exe_name }}" "${{ matrix.artifact }}"
+          chmod +x "${{ matrix.artifact }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -234,13 +238,21 @@ jobs:
           path: ${{ matrix.artifact }}.zip
           if-no-files-found: error
 
-      # 单文件版：老用户升级无需下载整包，直接替换旧 exe 即可
+      # 单文件版：老用户升级无需下载整包，直接替换旧二进制即可
       - name: Upload single-file exe (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}-exe
           path: ${{ matrix.artifact }}.exe
+          if-no-files-found: error
+
+      - name: Upload single-file binary (Linux / macOS)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}-exe
+          path: ${{ matrix.artifact }}
           if-no-files-found: error
 
   # ── Windows 便携版（内置 WebView2 Fixed Runtime，解压即用，无需安装）──
@@ -405,7 +417,6 @@ jobs:
       - name: Publish Release
         uses: softprops/action-gh-release@v3
         with:
-          files: |
-            artifacts/**/*.zip
-            artifacts/**/*.exe
+          # 每个 artifact 均为单文件：3 平台 zip + 3 平台单文件 + Windows webview2 zip
+          files: artifacts/**/*
           body_path: RELEASE_NOTES.md

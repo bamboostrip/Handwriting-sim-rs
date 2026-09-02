@@ -16,6 +16,7 @@
   - 检查更新在 api.github.com 不可达（限流 / 网络受限）时新增免 API 容灾路径：从 Releases Atom 订阅源抓取更新说明并按规则展示（自动截去「下载说明 / 字体说明 / Linux 依赖」等每版重复的固定样板），从 expanded_assets 资产页解析当前平台更新包直链，「立即自动更新」不再退化为打开浏览器。
   - 自动更新支持 zip 便携包：下载后自动解压定位 exe 再覆盖重启。
   - CI 新增 Windows 单文件升级资产 `handwrite-sim-windows-x86_64.exe`：老用户升级只需直接替换旧 exe（约 30 MB，应用内自动更新也优先使用该单文件，无需下载整包解压）。
+  - CI 同步产出 Linux / macOS 单文件升级资产（`handwrite-sim-linux-x86_64` / `handwrite-sim-macos-arm64`），Release 说明新增「产物下载」直达链接区（按 tag 自动生成本版资产链接，点击即下，无需翻找 Assets 列表）。
 
 ### Fixed
 
