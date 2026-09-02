@@ -354,7 +354,9 @@ pub fn layout_text(
 
     let mut i = start;
     let mut y = if force_first_line {
-        if params.top_margin > 0.0 {
+        if height as f32 > params.font_size * 1.8 {
+            params.top_margin
+        } else if params.top_margin > 0.0 {
             params.top_margin
         } else {
             ((height as f32 - params.font_size) / 2.0).max(0.0)
@@ -1579,6 +1581,46 @@ mod tests {
             y < 44 && row.iter().any(|&b| b)
         });
         assert!(has_ink_in_bounds, "前景像素必须落在 [0, 44) 范围内");
+    }
+
+    #[test]
+    fn test_multiline_region_renders_with_clean_line_spacing() {
+        let Some(path) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let font_size = 30.0;
+        let font = FontFace::load(&path, font_size).unwrap();
+        let p = HandwritingParams {
+            font_size,
+            line_spacing: 12.0, // 自然行间距
+            left_margin: 0.0,
+            right_margin: 0.0,
+            top_margin: 0.0,
+            bottom_margin: 0.0,
+            word_spacing_sigma: 0.0,
+            line_spacing_sigma: 0.0,
+            font_size_sigma: 0.0,
+            ..HandwritingParams::default()
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let text = "第一行测试内容\n第二行排版内容\n第三行验证内容";
+        // 多行区域：宽 300，高 150，字号 30 (> 30 * 1.8 = 54)
+        let res = layout_text(&p, &font, &mut rng, text, 0, 300, 150, true);
+        assert_eq!(res.consumed, text.chars().count(), "多行区域应消费全部字符");
+
+        // 统计各行的墨迹行垂直分布，验证行与行之间有清晰的分隔，无重叠
+        let rows: Vec<bool> = res
+            .mask
+            .chunks(300)
+            .map(|r| r.iter().any(|&b| b))
+            .collect();
+        let bands = split_text_rows(&rows);
+        assert_eq!(bands.len(), 3, "3 行文本应产生 3 个独立的墨迹带，且互不重叠");
+        for i in 0..bands.len() - 1 {
+            let gap = bands[i + 1].0 as i32 - bands[i].1 as i32;
+            assert!(gap >= 0, "相邻行之间应有正间距，无重叠像素");
+        }
     }
 }
 

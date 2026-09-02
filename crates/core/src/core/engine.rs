@@ -253,15 +253,11 @@ impl DefaultEngine {
         rp.top_margin = region.margin_top.unwrap_or(0.0);
         rp.bottom_margin = region.margin_bottom.unwrap_or(0.0);
 
-        // 默认行间距：区域内默认行间距为 0.0（单行紧凑排版），避免继承整页预设的大行距（如 97px）
-        if region.line_spacing.is_none() {
-            rp.line_spacing = 0.0;
-        }
-
         let mut is_printed = region.printed;
 
         // 1. 继承 HandwritingRole (匹配 region.role_id)
-        if let Some(role) = params.roles.iter().find(|r| r.id == region.role_id && r.id != 0) {
+        let role = params.roles.iter().find(|r| r.id == region.role_id && r.id != 0);
+        if let Some(role) = role {
             if !role.font_path.is_empty() && region.font_path.is_empty() {
                 rp.font_path = role.font_path.clone();
             }
@@ -281,11 +277,6 @@ impl DefaultEngine {
             if let Some(ws) = role.word_spacing {
                 if region.word_spacing.is_none() {
                     rp.word_spacing = ws;
-                }
-            }
-            if let Some(ls) = role.line_spacing {
-                if region.line_spacing.is_none() {
-                    rp.line_spacing = ls;
                 }
             }
             if let Some(s) = role.font_size_sigma {
@@ -337,11 +328,21 @@ impl DefaultEngine {
         if region.font_size > 0 {
             rp.font_size = region.font_size as f32;
         }
-        if let Some(v) = region.word_spacing {
-            rp.word_spacing = v;
-        }
+
+        // 行间距处理：
+        // - 若 region.line_spacing 为 Some(v)，则 rp.line_spacing = v；
+        // - 若 region.line_spacing 为 None：
+        //   - 若关联 role 指定了 line_spacing，则继承 role.line_spacing；
+        //   - 若为多行区域 (h > font_size * 2.0)，自动设置自然行间距 (font_size * 0.35).round()；
+        //   - 若为单行区域 (h <= font_size * 2.0)，行间距为 0.0。
         if let Some(v) = region.line_spacing {
             rp.line_spacing = v;
+        } else if let Some(role_ls) = role.and_then(|r| r.line_spacing) {
+            rp.line_spacing = role_ls;
+        } else if region.h as f32 > rp.font_size * 2.0 {
+            rp.line_spacing = (rp.font_size * 0.35).round();
+        } else {
+            rp.line_spacing = 0.0;
         }
         if let Some(v) = region.word_spacing_sigma {
             rp.word_spacing_sigma = v;

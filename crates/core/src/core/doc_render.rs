@@ -247,6 +247,11 @@ pub fn detect_highlight_boxes(img: &image::RgbImage) -> Vec<BoundingBox> {
 }
 
 fn should_merge_boxes(a: &BoundingBox, b: &BoundingBox) -> bool {
+    // 0. 高亮颜色不同不合并
+    if a.highlight != b.highlight {
+        return false;
+    }
+
     // 1. 直接相交或包含
     if a.intersects(b) {
         return true;
@@ -268,10 +273,10 @@ fn should_merge_boxes(a: &BoundingBox, b: &BoundingBox) -> bool {
         }
     }
 
-    // 3. 同一区域内垂直多行连续段 (水平重叠显著，垂直间隙 gap <= 10)
+    // 3. 多行段落垂直连续段 (同色，水平重叠 >= 40% 较小宽度，垂直间隙 gap_y <= max_h * 3 / 2)
     let overlap_x = (a.max_x.min(b.max_x) as i32) - (a.min_x.max(b.min_x) as i32) + 1;
     let min_w = a.width().min(b.width()) as i32;
-    if overlap_x > 0 && overlap_x >= (min_w / 2) {
+    if overlap_x > 0 && overlap_x >= (min_w * 2 / 5) {
         let gap_y = if a.max_y < b.min_y {
             b.min_y - a.max_y
         } else if b.max_y < a.min_y {
@@ -279,7 +284,8 @@ fn should_merge_boxes(a: &BoundingBox, b: &BoundingBox) -> bool {
         } else {
             0
         };
-        if gap_y <= 10 {
+        let max_h = a.height().max(b.height()) as i32;
+        if (gap_y as i32) <= (max_h * 3 / 2) {
             return true;
         }
     }
@@ -597,18 +603,18 @@ pub fn extract_pdf_page_chars(
     chars
 }
 
-/// 从字符列表中提取落在高亮包围盒内的文字与字号。
+/// 从字符列表中提取落在高亮包围盒内的文字与字号、行距、缩进。
 /// - 自动过滤掉不在包围盒内的字符（带 4 像素容差）；
 /// - 按阅读顺序分行排序（行内从左到右，行间从上到下）；
 /// - 清理占位标签语法（如 `{{...}}`、`【...】`、`{{手写:...}}` 等）；
-/// - 计算匹配字符的平均字号（像素）。
+/// - 计算匹配字符的平均字号（像素）、行距与首行缩进。
 pub fn extract_text_and_font_size_for_box(
     chars: &[ExtractedChar],
     b: &BoundingBox,
     scale: f32,
-) -> (String, i32) {
+) -> (String, i32, f32, f32) {
     if chars.is_empty() {
-        return (String::new(), 0);
+        return (String::new(), 0, 0.0, 0.0);
     }
 
     let pad = 4.0f32;
@@ -644,7 +650,7 @@ pub fn extract_text_and_font_size_for_box(
     }
 
     if matched.is_empty() {
-        return (String::new(), 0);
+        return (String::new(), 0, 0.0, 0.0);
     }
 
     // 计算平均字号 (pt -> px)
@@ -717,6 +723,39 @@ pub fn extract_text_and_font_size_for_box(
         });
     }
 
+    // 行距与首行缩进检测
+    let mut detected_line_spacing = 0.0f32;
+    if lines.len() >= 2 {
+        let line_centers: Vec<f32> = lines
+            .iter()
+            .map(|line| {
+                line.iter().map(|ch| (ch.min_y + ch.max_y) / 2.0).sum::<f32>() / line.len() as f32
+            })
+            .collect();
+        let total_pitch_diff: f32 = line_centers
+            .windows(2)
+            .map(|w| (w[1] - w[0]).max(0.0))
+            .sum();
+        let avg_line_pitch = total_pitch_diff / (line_centers.len() - 1) as f32;
+        detected_line_spacing = (avg_line_pitch - font_size_px as f32).max(0.0);
+    }
+
+    let mut detected_indent_em = 0.0f32;
+    if lines.len() >= 2 && font_size_px > 0 {
+        let line1_min_x = lines[0].iter().map(|c| c.min_x).fold(f32::INFINITY, f32::min);
+        let min_other_x = lines[1..]
+            .iter()
+            .flat_map(|line| line.iter().map(|c| c.min_x))
+            .fold(f32::INFINITY, f32::min);
+
+        if line1_min_x.is_finite()
+            && min_other_x.is_finite()
+            && line1_min_x > min_other_x + font_size_px as f32 * 0.8
+        {
+            detected_indent_em = ((line1_min_x - min_other_x) / font_size_px as f32).round().max(0.0);
+        }
+    }
+
     let mut raw_text = String::new();
     for (i, line) in lines.iter().enumerate() {
         if i > 0 {
@@ -728,7 +767,7 @@ pub fn extract_text_and_font_size_for_box(
     }
 
     let clean_text = strip_tag_syntax(&raw_text);
-    (clean_text, font_size_px)
+    (clean_text, font_size_px, detected_line_spacing, detected_indent_em)
 }
 
 fn extract_pdf_page_tags(
@@ -872,8 +911,8 @@ pub fn combine_page_regions_with_role_map(
             (0, None)
         };
 
-        // 从字符中提取文字与字号
-        let (extracted_text, detected_font_size) =
+        // 从字符中提取文字与字号、行距、缩进
+        let (extracted_text, detected_font_size, detected_line_spacing, detected_indent_em) =
             extract_text_and_font_size_for_box(page_chars, &b, scale);
 
         // 查找是否包含或重叠某个 tag_region
@@ -894,12 +933,21 @@ pub fn combine_page_regions_with_role_map(
             }
         }
 
-        let (text, font_size) = if !extracted_text.is_empty() {
-            (extracted_text, detected_font_size)
+        let (text, font_size, line_spacing, indent_em) = if !extracted_text.is_empty() {
+            (
+                extracted_text,
+                detected_font_size,
+                if detected_line_spacing > 0.0 {
+                    Some(detected_line_spacing)
+                } else {
+                    None
+                },
+                detected_indent_em,
+            )
         } else if !tag_text.is_empty() {
-            (tag_text, tag_font_size)
+            (tag_text, tag_font_size, None, 0.0)
         } else {
-            (String::new(), detected_font_size)
+            (String::new(), detected_font_size, None, 0.0)
         };
 
         final_regions.push(TextRegion {
@@ -913,6 +961,8 @@ pub fn combine_page_regions_with_role_map(
             printed: false,
             page: page_num,
             font_size,
+            line_spacing,
+            indent_em,
             ..TextRegion::default()
         });
     }
@@ -1440,14 +1490,14 @@ mod tests {
 
         let b1 = BoundingBox::new(95, 45, 150, 75);
 
-        let (text1, fs1) = extract_text_and_font_size_for_box(&chars, &b1, scale);
+        let (text1, fs1, _, _) = extract_text_and_font_size_for_box(&chars, &b1, scale);
         assert_eq!(text1, "张三");
         let expected_fs = (12.0 * scale).round() as i32;
         assert_eq!(fs1, expected_fs);
 
         // 空高亮框
         let b_empty = BoundingBox::new(300, 300, 350, 330);
-        let (text_empty, _) = extract_text_and_font_size_for_box(&chars, &b_empty, scale);
+        let (text_empty, _, _, _) = extract_text_and_font_size_for_box(&chars, &b_empty, scale);
         assert_eq!(text_empty, "");
     }
 
@@ -1508,8 +1558,118 @@ mod tests {
 
         let b = BoundingBox::new(45, 95, 110, 160);
 
-        let (text, _) = extract_text_and_font_size_for_box(&chars, &b, scale);
+        let (text, _, _, _) = extract_text_and_font_size_for_box(&chars, &b, scale);
         assert_eq!(text, "第一行\n第二行");
+    }
+
+    #[test]
+    fn test_merge_four_consecutive_line_highlight_boxes() {
+        // 4 行高亮框，每行宽 300，高 20，间距 25px
+        let boxes = vec![
+            BoundingBox::with_highlight(100, 50, 400, 70, "yellow"),
+            BoundingBox::with_highlight(100, 95, 400, 115, "yellow"),
+            BoundingBox::with_highlight(100, 140, 400, 160, "yellow"),
+            BoundingBox::with_highlight(100, 185, 400, 205, "yellow"),
+        ];
+
+        let merged = merge_close_boxes(boxes);
+        assert_eq!(merged.len(), 1, "4 行间距 25px 的连续同色高亮框应合并为 1 个段落包围盒");
+        assert_eq!(merged[0].min_x, 100);
+        assert_eq!(merged[0].max_x, 400);
+        assert_eq!(merged[0].min_y, 50);
+        assert_eq!(merged[0].max_y, 205);
+        assert_eq!(merged[0].highlight, Some("yellow".into()));
+    }
+
+    #[test]
+    fn test_extract_multiline_line_spacing_and_indent() {
+        let scale = 1.0;
+        let font_size = 30.0;
+        // Line 1 (首行缩进 60px = 2em, y 中心 50): "第一行"
+        // Line 2 (无缩进, y 中心 90): "第二行"
+        // Line 3 (无缩进, y 中心 130): "第三行"
+        // Line pitch = 40, detected line spacing = 40 - 30 = 10
+        let chars = vec![
+            ExtractedChar {
+                ch: '第',
+                min_x: 120.0,
+                min_y: 35.0,
+                max_x: 150.0,
+                max_y: 65.0,
+                font_size_pt: font_size,
+            },
+            ExtractedChar {
+                ch: '一',
+                min_x: 155.0,
+                min_y: 35.0,
+                max_x: 185.0,
+                max_y: 65.0,
+                font_size_pt: font_size,
+            },
+            ExtractedChar {
+                ch: '行',
+                min_x: 190.0,
+                min_y: 35.0,
+                max_x: 220.0,
+                max_y: 65.0,
+                font_size_pt: font_size,
+            },
+            ExtractedChar {
+                ch: '第',
+                min_x: 60.0,
+                min_y: 75.0,
+                max_x: 90.0,
+                max_y: 105.0,
+                font_size_pt: font_size,
+            },
+            ExtractedChar {
+                ch: '二',
+                min_x: 95.0,
+                min_y: 75.0,
+                max_x: 125.0,
+                max_y: 105.0,
+                font_size_pt: font_size,
+            },
+            ExtractedChar {
+                ch: '行',
+                min_x: 130.0,
+                min_y: 75.0,
+                max_x: 160.0,
+                max_y: 105.0,
+                font_size_pt: font_size,
+            },
+            ExtractedChar {
+                ch: '第',
+                min_x: 60.0,
+                min_y: 115.0,
+                max_x: 90.0,
+                max_y: 145.0,
+                font_size_pt: font_size,
+            },
+            ExtractedChar {
+                ch: '三',
+                min_x: 95.0,
+                min_y: 115.0,
+                max_x: 125.0,
+                max_y: 145.0,
+                font_size_pt: font_size,
+            },
+            ExtractedChar {
+                ch: '行',
+                min_x: 130.0,
+                min_y: 115.0,
+                max_x: 160.0,
+                max_y: 145.0,
+                font_size_pt: font_size,
+            },
+        ];
+
+        let b = BoundingBox::new(50, 30, 250, 150);
+        let (text, fs, ls, indent) = extract_text_and_font_size_for_box(&chars, &b, scale);
+        assert_eq!(text, "第一行\n第二行\n第三行");
+        assert_eq!(fs, 30);
+        assert!((ls - 10.0).abs() < 1e-3);
+        assert_eq!(indent, 2.0);
     }
 
     #[test]
