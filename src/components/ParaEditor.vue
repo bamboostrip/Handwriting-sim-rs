@@ -7,6 +7,9 @@ import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue"
 import {
   cleanText,
   curParaIndex,
+  getHighlightInfo,
+  getRoleBadgeInfo,
+  isDarkActive,
   newPara,
   pendingFocus,
   registerRoleApplier,
@@ -35,24 +38,37 @@ function isEmpty(): boolean {
   );
 }
 
-function getRoleTagClass(roleId: number): string {
+function getRoleTagClass(roleId: number, highlight?: string | null): string {
   if (roleId === 1) return "role-printed";
+  if (highlight) {
+    const hl = getHighlightInfo(highlight);
+    if (hl) return `role-${hl.key.toLowerCase()}`;
+  }
   if (roleId === 2) return "role-yellow";
   if (roleId === 3) return "role-green";
   if (roleId === 4) return "role-cyan";
+  if (roleId === 5) return "role-magenta";
   return "role-custom";
 }
 
-function getRoleTagTitle(roleId: number): string {
+function getRoleTagTitle(roleId: number, highlight?: string | null, fill?: string | null): string {
+  const role = store.roles.find((r) => r.id === roleId);
+  if (role) return role.name;
   if (roleId === 1) return "打印体";
-  if (roleId === 2) return "手写角色 1 (黄色高亮)";
-  if (roleId === 3) return "手写角色 2 (绿色高亮)";
-  if (roleId === 4) return "手写角色 3 (青色高亮)";
-  return `手写角色 ${roleId}`;
+  const hl = getHighlightInfo(highlight);
+  if (hl) return `手写角色 (Word ${hl.name}高亮)`;
+  if (fill) return `手写角色 (墨水 ${fill})`;
+  return `手写角色 ${roleId - 1}`;
 }
 
 /** 递归从 DOM 节点提取 UiTextRun 列表 */
-function extractRunsFromNode(node: Node, parentRoleId = 0, parentPrinted = false): UiTextRun[] {
+function extractRunsFromNode(
+  node: Node,
+  parentRoleId = 0,
+  parentPrinted = false,
+  parentHighlight?: string | null,
+  parentFill?: string | null,
+): UiTextRun[] {
   const result: UiTextRun[] = [];
 
   if (node.nodeType === Node.TEXT_NODE) {
@@ -63,6 +79,8 @@ function extractRunsFromNode(node: Node, parentRoleId = 0, parentPrinted = false
         style: {
           roleId: parentRoleId,
           printed: parentPrinted || parentRoleId === 1,
+          highlight: parentHighlight ?? null,
+          fill: parentFill ?? null,
         },
       });
     }
@@ -77,6 +95,8 @@ function extractRunsFromNode(node: Node, parentRoleId = 0, parentPrinted = false
 
     let roleId = parentRoleId;
     let printed = parentPrinted;
+    let highlight = parentHighlight ?? null;
+    let fill = parentFill ?? null;
 
     if (el.dataset.role !== undefined) {
       const parsed = parseInt(el.dataset.role, 10);
@@ -89,17 +109,27 @@ function extractRunsFromNode(node: Node, parentRoleId = 0, parentPrinted = false
       printed = true;
     } else if (el.classList.contains("role-yellow")) {
       roleId = 2;
+      highlight = "yellow";
     } else if (el.classList.contains("role-green")) {
       roleId = 3;
+      highlight = "green";
     } else if (el.classList.contains("role-cyan")) {
       roleId = 4;
-    } else if (el.classList.contains("role-custom")) {
-      const parsed = parseInt(el.dataset.role ?? "", 10);
-      if (!isNaN(parsed)) roleId = parsed;
+      highlight = "cyan";
+    } else if (el.classList.contains("role-magenta")) {
+      roleId = 5;
+      highlight = "magenta";
+    }
+
+    if (el.dataset.highlight) {
+      highlight = el.dataset.highlight;
+    }
+    if (el.dataset.fill) {
+      fill = el.dataset.fill;
     }
 
     for (const child of Array.from(el.childNodes)) {
-      result.push(...extractRunsFromNode(child, roleId, printed));
+      result.push(...extractRunsFromNode(child, roleId, printed, highlight, fill));
     }
   }
 
@@ -116,8 +146,18 @@ function mergeAdjacentRuns(runs: UiTextRun[]): UiTextRun[] {
     const curRoleId = run.style?.roleId ?? 0;
     const prevPrinted = Boolean(prev?.style?.printed);
     const curPrinted = Boolean(run.style?.printed);
+    const prevHl = prev?.style?.highlight ?? null;
+    const curHl = run.style?.highlight ?? null;
+    const prevFill = prev?.style?.fill ?? null;
+    const curFill = run.style?.fill ?? null;
 
-    if (prev && prevRoleId === curRoleId && prevPrinted === curPrinted) {
+    if (
+      prev &&
+      prevRoleId === curRoleId &&
+      prevPrinted === curPrinted &&
+      prevHl === curHl &&
+      prevFill === curFill
+    ) {
       prev.text += run.text;
     } else {
       merged.push({
@@ -125,6 +165,8 @@ function mergeAdjacentRuns(runs: UiTextRun[]): UiTextRun[] {
         style: {
           roleId: curRoleId,
           printed: curPrinted || curRoleId === 1,
+          highlight: curHl,
+          fill: curFill,
         },
       });
     }
@@ -143,12 +185,38 @@ function renderRowContent(row: HTMLElement, p: Para): void {
       const roleId = run.style?.roleId ?? 0;
       const printed = Boolean(run.style?.printed || roleId === 1);
       const effectiveRole = printed ? 1 : roleId;
+      const targetRole = store.roles.find((r) => r.id === effectiveRole);
 
-      if (effectiveRole > 0) {
+      // Determine highlight & fill
+      const highlight =
+        run.style?.highlight ??
+        targetRole?.highlight ??
+        (effectiveRole === 2 ? "yellow" : effectiveRole === 3 ? "green" : effectiveRole === 4 ? "cyan" : null);
+      const fill = run.style?.fill ?? targetRole?.fill ?? null;
+
+      if (effectiveRole > 0 || highlight || fill) {
         const span = document.createElement("span");
-        span.className = `run-tag ${getRoleTagClass(effectiveRole)}`;
+        const tagClass = getRoleTagClass(effectiveRole, highlight);
+        span.className = `run-tag ${tagClass}`;
         span.dataset.role = String(effectiveRole);
-        span.title = getRoleTagTitle(effectiveRole);
+        if (highlight) span.dataset.highlight = highlight;
+        if (fill) span.dataset.fill = fill;
+        span.title = getRoleTagTitle(effectiveRole, highlight, fill);
+
+        // Apply dynamic color style if custom highlight or role badge
+        const hlInfo = getHighlightInfo(highlight);
+        const isDark = isDarkActive();
+        if (hlInfo) {
+          span.style.backgroundColor = isDark ? hlInfo.darkBg : hlInfo.bg;
+          span.style.color = isDark ? hlInfo.darkColor : hlInfo.color;
+        } else if (targetRole) {
+          const badge = getRoleBadgeInfo(targetRole, isDark);
+          span.style.backgroundColor = badge.bg;
+          span.style.color = badge.color;
+        } else if (fill) {
+          span.style.color = fill;
+        }
+
         span.textContent = run.text;
         row.appendChild(span);
       } else {
@@ -196,7 +264,11 @@ function syncStoreToDom(force = false): void {
         const sRole = storeRuns[j].style?.roleId ?? 0;
         const mPr = Boolean(merged[j].style?.printed);
         const sPr = Boolean(storeRuns[j].style?.printed);
-        if (mRole !== sRole || mPr !== sPr) return false;
+        const mHl = merged[j].style?.highlight ?? null;
+        const sHl = storeRuns[j].style?.highlight ?? null;
+        const mFill = merged[j].style?.fill ?? null;
+        const sFill = storeRuns[j].style?.fill ?? null;
+        if (mRole !== sRole || mPr !== sPr || mHl !== sHl || mFill !== sFill) return false;
       }
       return true;
     });
@@ -281,7 +353,13 @@ function syncDomToStore(): void {
     const extracted = extractRunsFromNode(el);
     const mergedRuns = mergeAdjacentRuns(extracted);
     const fullText = mergedRuns.map((r) => r.text).join("");
-    const hasRoles = mergedRuns.some((r) => (r.style?.roleId ?? 0) > 0 || r.style?.printed);
+    const hasRoles = mergedRuns.some(
+      (r) =>
+        (r.style?.roleId ?? 0) > 0 ||
+        r.style?.printed ||
+        Boolean(r.style?.highlight) ||
+        Boolean(r.style?.fill),
+    );
 
     let rawText = el.innerText.replace(/\r?\n$/, "");
     if (rawText === "\n") rawText = "";
@@ -458,27 +536,45 @@ function applyRoleToSelection(roleId: number): void {
     }
 
     const extracted = extractRunsFromNode(row);
-    const charRuns: { char: string; roleId: number; printed: boolean }[] = [];
+    const charRuns: {
+      char: string;
+      roleId: number;
+      printed: boolean;
+      highlight: string | null;
+      fill: string | null;
+    }[] = [];
 
     if (extracted.length > 0) {
       for (const r of extracted) {
         const rId = r.style?.roleId ?? 0;
         const rPr = Boolean(r.style?.printed || rId === 1);
+        const rHl = r.style?.highlight ?? null;
+        const rFill = r.style?.fill ?? null;
         for (const ch of r.text) {
-          charRuns.push({ char: ch, roleId: rId, printed: rPr });
+          charRuns.push({ char: ch, roleId: rId, printed: rPr, highlight: rHl, fill: rFill });
         }
       }
     } else {
       const txt = row.textContent || "";
       for (const ch of txt) {
-        charRuns.push({ char: ch, roleId: 0, printed: false });
+        charRuns.push({ char: ch, roleId: 0, printed: false, highlight: null, fill: null });
       }
     }
 
-    const targetPrinted = roleId === 1;
+    const targetRole = store.roles.find((r) => r.id === roleId);
+    const targetPrinted = roleId === 1 || Boolean(targetRole?.printed);
+    const targetHighlight =
+      roleId === 0
+        ? null
+        : targetRole?.highlight ??
+          (roleId === 2 ? "yellow" : roleId === 3 ? "green" : roleId === 4 ? "cyan" : null);
+    const targetFill = roleId === 0 ? null : targetRole?.fill ?? null;
+
     for (let i = startChar; i < endChar && i < charRuns.length; i++) {
       charRuns[i].roleId = roleId;
       charRuns[i].printed = targetPrinted;
+      charRuns[i].highlight = targetHighlight;
+      charRuns[i].fill = targetFill;
     }
 
     const newRuns: UiTextRun[] = [];
@@ -487,7 +583,9 @@ function applyRoleToSelection(roleId: number): void {
       if (
         last &&
         (last.style?.roleId ?? 0) === cr.roleId &&
-        Boolean(last.style?.printed) === cr.printed
+        Boolean(last.style?.printed) === cr.printed &&
+        (last.style?.highlight ?? null) === (cr.highlight ?? null) &&
+        (last.style?.fill ?? null) === (cr.fill ?? null)
       ) {
         last.text += cr.char;
       } else {
@@ -496,6 +594,8 @@ function applyRoleToSelection(roleId: number): void {
           style: {
             roleId: cr.roleId,
             printed: cr.printed,
+            highlight: cr.highlight ?? null,
+            fill: cr.fill ?? null,
           },
         });
       }
@@ -504,7 +604,13 @@ function applyRoleToSelection(roleId: number): void {
     const rowId = Number(row.dataset.id);
     const existingPara = store.paragraphs.find((p) => p.id === rowId);
     const fullText = newRuns.map((r) => r.text).join("");
-    const hasRoles = newRuns.some((r) => (r.style?.roleId ?? 0) > 0 || r.style?.printed);
+    const hasRoles = newRuns.some(
+      (r) =>
+        (r.style?.roleId ?? 0) > 0 ||
+        r.style?.printed ||
+        Boolean(r.style?.highlight) ||
+        Boolean(r.style?.fill),
+    );
 
     const updatedPara: Para = existingPara
       ? { ...existingPara, text: fullText, runs: hasRoles ? newRuns : undefined }
@@ -827,45 +933,30 @@ onMounted(() => {
       @mousedown.prevent
     >
       <button
+        v-for="role in store.roles.filter((r) => r.id > 0)"
+        :key="role.id"
         type="button"
-        class="bubble-btn btn-printed"
-        title="打印体"
+        class="bubble-btn"
+        :title="role.name"
         @mousedown.prevent
-        @click="applyRoleToSelection(1)"
+        @click="applyRoleToSelection(role.id)"
       >
-        🖨️ 打印体
-      </button>
-      <button
-        type="button"
-        class="bubble-btn btn-yellow"
-        title="手写角色 1 (黄色高亮)"
-        @mousedown.prevent
-        @click="applyRoleToSelection(2)"
-      >
-        🟨 角色 1
-      </button>
-      <button
-        type="button"
-        class="bubble-btn btn-green"
-        title="手写角色 2 (绿色高亮)"
-        @mousedown.prevent
-        @click="applyRoleToSelection(3)"
-      >
-        🟩 角色 2
-      </button>
-      <button
-        type="button"
-        class="bubble-btn btn-cyan"
-        title="手写角色 3 (青色高亮)"
-        @mousedown.prevent
-        @click="applyRoleToSelection(4)"
-      >
-        🟦 角色 3
+        <span
+          class="bubble-color-dot"
+          :style="{
+            backgroundColor: getRoleBadgeInfo(role, isDarkActive()).bg,
+            color: getRoleBadgeInfo(role, isDarkActive()).color,
+            borderColor: getRoleBadgeInfo(role, isDarkActive()).color,
+          }"
+        >
+          {{ getRoleBadgeInfo(role, isDarkActive()).icon }}
+        </span>
+        {{ role.name }}
       </button>
       <button
         type="button"
         class="bubble-btn btn-clear"
-        title="清除标记"
+        title="清除标记 (恢复默认手写)"
         @mousedown.prevent
         @click="applyRoleToSelection(0)"
       >

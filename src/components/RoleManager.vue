@@ -26,6 +26,9 @@ import {
   addRole,
   chooseRoleFont,
   deleteRole,
+  getHighlightInfo,
+  getRoleBadgeInfo,
+  isDarkActive,
   resetRoles,
   roleHasOverrides,
   store,
@@ -33,6 +36,25 @@ import {
 import type { UiHandwritingRole } from "../types";
 
 const expandedRoles = ref<number[]>([0]);
+
+const highlightSelectOptions = [
+  { label: "无 / 自定义", value: "" },
+  { label: "🟨 黄色 (Yellow)", value: "yellow" },
+  { label: "🟩 绿色 (Green)", value: "green" },
+  { label: "🟦 青色 (Cyan)", value: "cyan" },
+  { label: "🟪 品红 (Magenta)", value: "magenta" },
+  { label: "🟦 蓝色 (Blue)", value: "blue" },
+  { label: "🟥 红色 (Red)", value: "red" },
+  { label: "🟦 深蓝 (DarkBlue)", value: "darkBlue" },
+  { label: "🟦 深青 (DarkCyan)", value: "darkCyan" },
+  { label: "🟩 深绿 (DarkGreen)", value: "darkGreen" },
+  { label: "🟪 深品红 (DarkMagenta)", value: "darkMagenta" },
+  { label: "🟥 深红 (DarkRed)", value: "darkRed" },
+  { label: "🟨 深黄 (DarkYellow)", value: "darkYellow" },
+  { label: "⬛ 浅灰 (LightGray)", value: "lightGray" },
+  { label: "⬛ 深灰 (DarkGray)", value: "darkGray" },
+  { label: "⬛ 黑色 (Black)", value: "black" },
+];
 
 const strikeoutOptions = [
   { label: "跟随主设置", value: -1 },
@@ -55,31 +77,17 @@ function isRoleExpanded(id: number): boolean {
   return expandedRoles.value.includes(id);
 }
 
-function getRoleBadge(id: number, printed: boolean) {
-  if (id === 0) {
-    return { label: "主字体", color: "#64748b", bg: "rgba(100, 116, 139, 0.12)", icon: "🖊️" };
-  }
-  if (id === 1 || printed) {
-    return { label: "打印体 (灰高亮)", color: "#71717a", bg: "rgba(113, 113, 122, 0.16)", icon: "⬛" };
-  }
-  if (id === 2) {
-    return { label: "角色 1 (黄高亮)", color: "#ca8a04", bg: "rgba(234, 179, 8, 0.16)", icon: "🟨" };
-  }
-  if (id === 3) {
-    return { label: "角色 2 (绿高亮)", color: "#16a34a", bg: "rgba(34, 197, 94, 0.16)", icon: "🟩" };
-  }
-  if (id === 4) {
-    return { label: "角色 3 (青高亮)", color: "#0891b2", bg: "rgba(6, 182, 212, 0.16)", icon: "🟦" };
-  }
-  if (id === 5) {
-    return { label: "角色 4 (洋红高亮)", color: "#c026d3", bg: "rgba(217, 70, 239, 0.16)", icon: "🟪" };
-  }
-  return { label: `角色 ${id}`, color: "var(--accent)", bg: "var(--accent-soft)", icon: "🏷️" };
-}
-
 function onAddNewRole(): void {
   const newRole = addRole();
   expandedRoles.value.push(newRole.id);
+}
+
+function onHighlightChange(role: UiHandwritingRole, val: string): void {
+  role.highlight = val ? val : null;
+  const hlInfo = getHighlightInfo(role.highlight);
+  if (hlInfo && (role.name.startsWith("手写角色") || role.name.startsWith("打印角色") || role.name === `角色 ${role.id}`)) {
+    role.name = role.printed ? `打印角色 ${role.id} (${hlInfo.name})` : `手写角色 ${role.id - 1} (${hlInfo.name})`;
+  }
 }
 
 function onFillInput(role: UiHandwritingRole, val: string): void {
@@ -126,11 +134,11 @@ function onFillInput(role: UiHandwritingRole, val: string): void {
             <span
               class="role-badge"
               :style="{
-                color: getRoleBadge(role.id, role.printed).color,
-                background: getRoleBadge(role.id, role.printed).bg,
+                color: getRoleBadgeInfo(role, isDarkActive()).color,
+                background: getRoleBadgeInfo(role, isDarkActive()).bg,
               }"
             >
-              {{ getRoleBadge(role.id, role.printed).icon }} {{ getRoleBadge(role.id, role.printed).label }}
+              {{ getRoleBadgeInfo(role, isDarkActive()).icon }} {{ getRoleBadgeInfo(role, isDarkActive()).label }}
             </span>
             <NInput
               v-model:value="role.name"
@@ -155,7 +163,7 @@ function onFillInput(role: UiHandwritingRole, val: string): void {
             <span
               v-if="roleHasOverrides(role)"
               class="override-tag"
-              title="已自定义专属排版或扰动参数"
+              title="已自定义专属排版、扰动或高亮颜色"
             >
               ⚙️ 已自定义
             </span>
@@ -191,6 +199,40 @@ function onFillInput(role: UiHandwritingRole, val: string): void {
               <NCheckbox v-model:checked="role.printed">
                 设为打印体（排版整齐，无笔画扰动与错字）
               </NCheckbox>
+            </div>
+          </div>
+
+          <!-- Word 高亮颜色映射与预览 -->
+          <div class="role-row">
+            <span class="role-label">Word高亮</span>
+            <div class="role-control">
+              <NSelect
+                :value="role.highlight ?? ''"
+                size="small"
+                :options="highlightSelectOptions"
+                style="width: 160px"
+                placeholder="对应Word高亮颜色"
+                @update:value="onHighlightChange(role, $event)"
+              />
+              <span
+                v-if="role.highlight && getHighlightInfo(role.highlight)"
+                class="highlight-preview-swatch"
+                :style="{
+                  backgroundColor: isDarkActive() ? getHighlightInfo(role.highlight)!.darkBg : getHighlightInfo(role.highlight)!.bg,
+                  color: isDarkActive() ? getHighlightInfo(role.highlight)!.darkColor : getHighlightInfo(role.highlight)!.color,
+                  border: '1px solid ' + (isDarkActive() ? getHighlightInfo(role.highlight)!.darkColor : getHighlightInfo(role.highlight)!.color)
+                }"
+              >
+                {{ getHighlightInfo(role.highlight)!.icon }} {{ getHighlightInfo(role.highlight)!.name }}
+              </span>
+              <NButton
+                v-if="role.highlight"
+                size="small"
+                quaternary
+                @click="role.highlight = null"
+              >
+                清除
+              </NButton>
             </div>
           </div>
 
@@ -396,7 +438,7 @@ function onFillInput(role: UiHandwritingRole, val: string): void {
 
     <!-- 混排语法提示 -->
     <div class="hint-line role-footer-hint">
-      💡 <b>混排提示</b>：在 Word 中使用高亮标记（🟨黄=角色1, 🟩绿=角色2, 🟦青=角色3, ⬛灰=打印体）或在文本中书写 <code>&#123;&#123;角色名:内容&#125;&#125;</code> / <code>&#123;&#123;打印:内容&#125;&#125;</code> 即可实现多笔迹混排。
+      💡 <b>混排提示</b>：在 Word 中使用任意高亮颜色（黄/绿/青/品红/蓝/红等15种标准高亮）或在文本中书写 <code>&#123;&#123;角色名:内容&#125;&#125;</code> / <code>&#123;&#123;打印:内容&#125;&#125;</code> 即可实现多笔迹混排。
     </div>
   </div>
 </template>
@@ -530,6 +572,17 @@ function onFillInput(role: UiHandwritingRole, val: string): void {
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+.highlight-preview-swatch {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
 }
 
 .role-subcard {

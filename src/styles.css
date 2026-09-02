@@ -381,32 +381,50 @@ body,
   transition: background-color 0.15s, color 0.15s;
 }
 
-.run-tag.role-yellow {
-  background-color: #fef08a;
-  color: #713f12;
-}
-html.dark .run-tag.role-yellow {
-  background-color: #713f12;
-  color: #fef08a;
-}
+.run-tag.role-yellow { background-color: #fef08a; color: #713f12; }
+html.dark .run-tag.role-yellow { background-color: #713f12; color: #fef08a; }
 
-.run-tag.role-green {
-  background-color: #bbf7d0;
-  color: #14532d;
-}
-html.dark .run-tag.role-green {
-  background-color: #14532d;
-  color: #bbf7d0;
-}
+.run-tag.role-green { background-color: #bbf7d0; color: #14532d; }
+html.dark .run-tag.role-green { background-color: #14532d; color: #bbf7d0; }
 
-.run-tag.role-cyan {
-  background-color: #bae6fd;
-  color: #0c4a6e;
-}
-html.dark .run-tag.role-cyan {
-  background-color: #0c4a6e;
-  color: #bae6fd;
-}
+.run-tag.role-cyan { background-color: #bae6fd; color: #0c4a6e; }
+html.dark .run-tag.role-cyan { background-color: #0c4a6e; color: #bae6fd; }
+
+.run-tag.role-magenta { background-color: #fbcfe8; color: #831843; }
+html.dark .run-tag.role-magenta { background-color: #831843; color: #fbcfe8; }
+
+.run-tag.role-blue { background-color: #bfdbfe; color: #1e3a8a; }
+html.dark .run-tag.role-blue { background-color: #1e3a8a; color: #bfdbfe; }
+
+.run-tag.role-red { background-color: #fecaca; color: #7f1d1d; }
+html.dark .run-tag.role-red { background-color: #7f1d1d; color: #fecaca; }
+
+.run-tag.role-darkblue { background-color: #93c5fd; color: #172554; }
+html.dark .run-tag.role-darkblue { background-color: #172554; color: #93c5fd; }
+
+.run-tag.role-darkcyan { background-color: #67e8f9; color: #083344; }
+html.dark .run-tag.role-darkcyan { background-color: #083344; color: #67e8f9; }
+
+.run-tag.role-darkgreen { background-color: #86efac; color: #052e16; }
+html.dark .run-tag.role-darkgreen { background-color: #052e16; color: #86efac; }
+
+.run-tag.role-darkmagenta { background-color: #f472b6; color: #500724; }
+html.dark .run-tag.role-darkmagenta { background-color: #500724; color: #f472b6; }
+
+.run-tag.role-darkred { background-color: #f87171; color: #450a0a; }
+html.dark .run-tag.role-darkred { background-color: #450a0a; color: #f87171; }
+
+.run-tag.role-darkyellow { background-color: #fde047; color: #422006; }
+html.dark .run-tag.role-darkyellow { background-color: #422006; color: #fde047; }
+
+.run-tag.role-lightgray { background-color: #e2e8f0; color: #334155; }
+html.dark .run-tag.role-lightgray { background-color: #334155; color: #e2e8f0; }
+
+.run-tag.role-darkgray { background-color: #94a3b8; color: #0f172a; }
+html.dark .run-tag.role-darkgray { background-color: #0f172a; color: #94a3b8; }
+
+.run-tag.role-black { background-color: #334155; color: #ffffff; }
+html.dark .run-tag.role-black { background-color: #0f172a; color: #f8fafc; }
 
 .run-tag.role-printed {
   background-color: #e2e8f0;
@@ -445,6 +463,8 @@ html.dark .run-tag.role-custom {
   user-select: none;
   animation: fadeInBubble 0.15s ease-out;
   pointer-events: auto;
+  max-width: 90vw;
+  overflow-x: auto;
 }
 
 @keyframes fadeInBubble {
@@ -461,9 +481,9 @@ html.dark .run-tag.role-custom {
 .bubble-btn {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 3px;
   font-size: 11px;
-  padding: 2px 5px;
+  padding: 2px 6px;
   border-radius: 4px;
   border: 1px solid var(--border);
   cursor: pointer;
@@ -479,33 +499,17 @@ html.dark .run-tag.role-custom {
   border-color: var(--accent);
 }
 
-.bubble-btn.btn-printed {
-  font-family: monospace, sans-serif;
+.bubble-color-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  font-size: 9px;
+  border-radius: 3px;
+  flex-shrink: 0;
 }
-.bubble-btn.btn-yellow:hover {
-  background: #fef08a;
-  color: #713f12;
-}
-html.dark .bubble-btn.btn-yellow:hover {
-  background: #713f12;
-  color: #fef08a;
-}
-.bubble-btn.btn-green:hover {
-  background: #bbf7d0;
-  color: #14532d;
-}
-html.dark .bubble-btn.btn-green:hover {
-  background: #14532d;
-  color: #bbf7d0;
-}
-.bubble-btn.btn-cyan:hover {
-  background: #bae6fd;
-  color: #0c4a6e;
-}
-html.dark .bubble-btn.btn-cyan:hover {
-  background: #0c4a6e;
-  color: #bae6fd;
-}
+
 .bubble-btn.btn-clear {
   color: var(--text-sub);
 }
@@ -524,6 +528,35 @@ html.dark .bubble-btn.btn-cyan:hover {
   color: var(--text-sub);
   margin-right: 2px;
   font-weight: 600;
+}
+
+.role-tag-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  outline: none;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.role-tag-btn:hover {
+  filter: brightness(0.95);
+  transform: translateY(-1px);
+}
+
+html.dark .role-tag-btn:hover {
+  filter: brightness(1.15);
+}
+
+.role-tag-btn:active {
+  transform: translateY(0);
 }
 
 

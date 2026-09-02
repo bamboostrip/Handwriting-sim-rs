@@ -53,8 +53,250 @@ export function getSkippedVersion(): string {
 /** 组件树外的离散弹窗（store 层的阻断性错误提示用） */
 const { dialog: appDialog, message: appMessage } = createDiscreteApi(["dialog", "message"]);
 
-// ---------------------------------------------------------------- 数据模型
+// ---------------------------------------------------------------- 数据模型与高亮角色定义
 
+export interface WordHighlightColor {
+  key: string;
+  name: string;
+  bg: string;
+  color: string;
+  darkBg: string;
+  darkColor: string;
+  icon: string;
+}
+
+export const WORD_HIGHLIGHT_MAP: Record<string, WordHighlightColor> = {
+  yellow: {
+    key: "yellow",
+    name: "黄色",
+    bg: "#fef08a",
+    color: "#713f12",
+    darkBg: "#713f12",
+    darkColor: "#fef08a",
+    icon: "🟨",
+  },
+  green: {
+    key: "green",
+    name: "绿色",
+    bg: "#bbf7d0",
+    color: "#14532d",
+    darkBg: "#14532d",
+    darkColor: "#bbf7d0",
+    icon: "🟩",
+  },
+  cyan: {
+    key: "cyan",
+    name: "青色",
+    bg: "#bae6fd",
+    color: "#0c4a6e",
+    darkBg: "#0c4a6e",
+    darkColor: "#bae6fd",
+    icon: "🟦",
+  },
+  magenta: {
+    key: "magenta",
+    name: "品红",
+    bg: "#fbcfe8",
+    color: "#831843",
+    darkBg: "#831843",
+    darkColor: "#fbcfe8",
+    icon: "🟪",
+  },
+  blue: {
+    key: "blue",
+    name: "蓝色",
+    bg: "#bfdbfe",
+    color: "#1e3a8a",
+    darkBg: "#1e3a8a",
+    darkColor: "#bfdbfe",
+    icon: "🟦",
+  },
+  red: {
+    key: "red",
+    name: "红色",
+    bg: "#fecaca",
+    color: "#7f1d1d",
+    darkBg: "#7f1d1d",
+    darkColor: "#fecaca",
+    icon: "🟥",
+  },
+  darkBlue: {
+    key: "darkBlue",
+    name: "深蓝",
+    bg: "#93c5fd",
+    color: "#172554",
+    darkBg: "#172554",
+    darkColor: "#93c5fd",
+    icon: "🟦",
+  },
+  darkCyan: {
+    key: "darkCyan",
+    name: "深青",
+    bg: "#67e8f9",
+    color: "#083344",
+    darkBg: "#083344",
+    darkColor: "#67e8f9",
+    icon: "🟦",
+  },
+  darkGreen: {
+    key: "darkGreen",
+    name: "深绿",
+    bg: "#86efac",
+    color: "#052e16",
+    darkBg: "#052e16",
+    darkColor: "#86efac",
+    icon: "🟩",
+  },
+  darkMagenta: {
+    key: "darkMagenta",
+    name: "深品红",
+    bg: "#f472b6",
+    color: "#500724",
+    darkBg: "#500724",
+    darkColor: "#f472b6",
+    icon: "🟪",
+  },
+  darkRed: {
+    key: "darkRed",
+    name: "深红",
+    bg: "#f87171",
+    color: "#450a0a",
+    darkBg: "#450a0a",
+    darkColor: "#f87171",
+    icon: "🟥",
+  },
+  darkYellow: {
+    key: "darkYellow",
+    name: "深黄",
+    bg: "#fde047",
+    color: "#422006",
+    darkBg: "#422006",
+    darkColor: "#fde047",
+    icon: "🟨",
+  },
+  lightGray: {
+    key: "lightGray",
+    name: "浅灰",
+    bg: "#e2e8f0",
+    color: "#334155",
+    darkBg: "#334155",
+    darkColor: "#e2e8f0",
+    icon: "⬛",
+  },
+  darkGray: {
+    key: "darkGray",
+    name: "深灰",
+    bg: "#94a3b8",
+    color: "#0f172a",
+    darkBg: "#0f172a",
+    darkColor: "#94a3b8",
+    icon: "⬛",
+  },
+  black: {
+    key: "black",
+    name: "黑色",
+    bg: "#334155",
+    color: "#ffffff",
+    darkBg: "#0f172a",
+    darkColor: "#f8fafc",
+    icon: "⬛",
+  },
+};
+
+/** 查找高亮信息（不区分大小写及下划线/连字符） */
+export function getHighlightInfo(key?: string | null): WordHighlightColor | null {
+  if (!key) return null;
+  const raw = key.trim();
+  if (WORD_HIGHLIGHT_MAP[raw]) return WORD_HIGHLIGHT_MAP[raw];
+  const norm = raw.toLowerCase().replace(/[-_\s]/g, "");
+  if (norm === "pink") return WORD_HIGHLIGHT_MAP.magenta;
+  if (norm === "gray" || norm === "grey") return WORD_HIGHLIGHT_MAP.lightGray;
+  for (const k of Object.keys(WORD_HIGHLIGHT_MAP)) {
+    if (k.toLowerCase() === norm) return WORD_HIGHLIGHT_MAP[k];
+  }
+  return null;
+}
+
+/** 获取角色的徽章样式信息（背景色、文本色、图标、名称） */
+export function getRoleBadgeInfo(role: UiHandwritingRole, isDark = isDarkActive()) {
+  if (role.id === 0) {
+    return {
+      label: "主字体",
+      icon: "🖊️",
+      color: isDark ? "#94a3b8" : "#64748b",
+      bg: isDark ? "rgba(148, 163, 184, 0.18)" : "rgba(100, 116, 139, 0.12)",
+      highlightName: "主字体",
+    };
+  }
+  if (role.id === 1 || role.printed) {
+    const hl = getHighlightInfo(role.highlight) || WORD_HIGHLIGHT_MAP.lightGray;
+    return {
+      label: role.name || "打印体",
+      icon: "🖨️",
+      color: isDark ? hl.darkColor : hl.color,
+      bg: isDark ? hl.darkBg : hl.bg,
+      highlightName: hl.name,
+    };
+  }
+
+  // 1. 若角色指定了显式高亮
+  const hl = getHighlightInfo(role.highlight);
+  if (hl) {
+    return {
+      label: role.name,
+      icon: hl.icon,
+      color: isDark ? hl.darkColor : hl.color,
+      bg: isDark ? hl.darkBg : hl.bg,
+      highlightName: hl.name,
+    };
+  }
+
+  // 2. 预设默认角色 ID (2:黄, 3:绿, 4:青, 5:品红)
+  if (role.id === 2) {
+    const y = WORD_HIGHLIGHT_MAP.yellow;
+    return { label: role.name, icon: y.icon, color: isDark ? y.darkColor : y.color, bg: isDark ? y.darkBg : y.bg, highlightName: y.name };
+  }
+  if (role.id === 3) {
+    const g = WORD_HIGHLIGHT_MAP.green;
+    return { label: role.name, icon: g.icon, color: isDark ? g.darkColor : g.color, bg: isDark ? g.darkBg : g.bg, highlightName: g.name };
+  }
+  if (role.id === 4) {
+    const c = WORD_HIGHLIGHT_MAP.cyan;
+    return { label: role.name, icon: c.icon, color: isDark ? c.darkColor : c.color, bg: isDark ? c.darkBg : c.bg, highlightName: c.name };
+  }
+  if (role.id === 5) {
+    const m = WORD_HIGHLIGHT_MAP.magenta;
+    return { label: role.name, icon: m.icon, color: isDark ? m.darkColor : m.color, bg: isDark ? m.darkBg : m.bg, highlightName: m.name };
+  }
+
+  // 3. 若角色配置了专属墨水颜色
+  if (role.fill) {
+    return {
+      label: role.name,
+      icon: "🎨",
+      color: role.fill,
+      bg: isDark ? `${role.fill}44` : `${role.fill}1a`,
+      highlightName: `墨水 ${role.fill}`,
+    };
+  }
+
+  // 4. 其余角色的循环调色板
+  const palette = [
+    { name: "紫色", bg: "#f3e8ff", color: "#6b21a8", darkBg: "#581c87", darkColor: "#f3e8ff", icon: "🟣" },
+    { name: "橙色", bg: "#ffedd5", color: "#9a3412", darkBg: "#7c2d12", darkColor: "#ffedd5", icon: "🟠" },
+    { name: "粉红", bg: "#ffe4e6", color: "#9f1239", darkBg: "#881337", darkColor: "#ffe4e6", icon: "🌸" },
+    { name: "青绿", bg: "#ccfbf1", color: "#115e59", darkBg: "#134e4a", darkColor: "#ccfbf1", icon: "🟢" },
+    { name: "靛蓝", bg: "#e0e7ff", color: "#3730a3", darkBg: "#312e81", darkColor: "#e0e7ff", icon: "🔵" },
+  ];
+  const p = palette[(role.id - 6 + palette.length) % palette.length];
+  return {
+    label: role.name,
+    icon: p.icon,
+    color: isDark ? p.darkColor : p.color,
+    bg: isDark ? p.darkBg : p.bg,
+    highlightName: p.name,
+  };
+}
 
 export interface Para {
   id: number;
@@ -67,11 +309,11 @@ export interface Para {
 export type Region = UiRegion;
 
 export const defaultRoles = (): UiHandwritingRole[] => [
-  { id: 0, name: "默认手写 (主字体)", fontPath: "", printed: false, fill: null },
-  { id: 1, name: "打印体 (无扰动)", fontPath: "", printed: true, fill: null },
-  { id: 2, name: "手写角色 1 (黄色高亮)", fontPath: "", printed: false, fill: null },
-  { id: 3, name: "手写角色 2 (绿色高亮)", fontPath: "", printed: false, fill: null },
-  { id: 4, name: "手写角色 3 (青色高亮)", fontPath: "", printed: false, fill: null },
+  { id: 0, name: "默认手写 (主字体)", fontPath: "", printed: false, fill: null, highlight: null },
+  { id: 1, name: "打印体 (无扰动)", fontPath: "", printed: true, fill: null, highlight: "lightGray" },
+  { id: 2, name: "手写角色 1 (黄色高亮)", fontPath: "", printed: false, fill: null, highlight: "yellow" },
+  { id: 3, name: "手写角色 2 (绿色高亮)", fontPath: "", printed: false, fill: null, highlight: "green" },
+  { id: 4, name: "手写角色 3 (青色高亮)", fontPath: "", printed: false, fill: null, highlight: "cyan" },
 ];
 
 let paraSeq = 1;
@@ -446,6 +688,56 @@ export async function importDocx(): Promise<void> {
         ),
       ),
     );
+
+    // 动态提取并自适应角色（收集 roleId >= 2 及对应的 highlight/fill）
+    const detectedRoles = new Map<number, { highlight?: string | null; fill?: string | null }>();
+    for (const row of rows) {
+      if (row.runs) {
+        for (const run of row.runs) {
+          const rId = run.style?.roleId;
+          if (rId && rId >= 2) {
+            if (!detectedRoles.has(rId)) {
+              detectedRoles.set(rId, {
+                highlight: run.style?.highlight ?? null,
+                fill: run.style?.fill ?? null,
+              });
+            } else {
+              const cur = detectedRoles.get(rId)!;
+              if (!cur.highlight && run.style?.highlight) cur.highlight = run.style.highlight;
+              if (!cur.fill && run.style?.fill) cur.fill = run.style.fill;
+            }
+          }
+        }
+      }
+    }
+
+    if (detectedRoles.size > 0) {
+      for (const [rId, info] of detectedRoles.entries()) {
+        const hlInfo = getHighlightInfo(info.highlight);
+        const highlightLabel = hlInfo?.name;
+        const colorLabel = info.fill ? `颜色 ${info.fill}` : null;
+        const subLabel = highlightLabel || colorLabel || "自定颜色";
+        const roleName = `手写角色 ${rId - 1} (${subLabel})`;
+
+        const existingRole = store.roles.find((r) => r.id === rId);
+        if (existingRole) {
+          existingRole.highlight = info.highlight ?? existingRole.highlight;
+          if (info.fill && !existingRole.fill) existingRole.fill = info.fill;
+          existingRole.name = roleName;
+        } else {
+          store.roles.push({
+            id: rId,
+            name: roleName,
+            fontPath: "",
+            printed: false,
+            highlight: info.highlight ?? null,
+            fill: info.fill ?? null,
+          });
+        }
+      }
+      store.roles.sort((a, b) => a.id - b.id);
+    }
+
     focusPara(store.paragraphs[0].id, 0);
     store.status = `已导入 ${rows.length} 个段落，回车分段、按钮设格式`;
     scheduleRender();
@@ -1098,14 +1390,17 @@ export async function startupCheckUpdate(): Promise<void> {
 
 // ---------------------------------------------------------------- 角色管理
 
-export function addRole(name?: string, printed = false): UiHandwritingRole {
+export function addRole(name?: string, printed = false, highlight?: string | null): UiHandwritingRole {
   const maxId = store.roles.reduce((m, r) => Math.max(m, r.id), -1);
-  const nextId = maxId + 1;
+  const nextId = Math.max(maxId + 1, 2);
+  const hlInfo = getHighlightInfo(highlight);
+  const hlLabel = hlInfo ? ` (${hlInfo.name})` : "";
   const newRole: UiHandwritingRole = {
     id: nextId,
-    name: name || (printed ? `打印角色 ${nextId}` : `手写角色 ${nextId}`),
+    name: name || (printed ? `打印角色 ${nextId}` : `手写角色 ${nextId - 1}${hlLabel}`),
     fontPath: "",
     printed,
+    highlight: highlight ?? null,
     fill: null,
   };
   store.roles.push(newRole);
@@ -1140,6 +1435,7 @@ export function roleHasOverrides(r: UiHandwritingRole): boolean {
   return (
     r.fontSize != null ||
     r.fill != null ||
+    (r.highlight != null && r.highlight !== "") ||
     r.wordSpacing != null ||
     r.lineSpacing != null ||
     r.fontSizeSigma != null ||

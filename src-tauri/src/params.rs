@@ -510,6 +510,7 @@ impl UiParams {
                                     text: clean_text(&r.text),
                                     style: TextRunStyle {
                                         role_id: r.style.role_id,
+                                        highlight: r.style.highlight.clone(),
                                         font_path: r.style.font_path.clone().filter(|s| !s.trim().is_empty()),
                                         font_size: r.style.font_size,
                                         fill,
@@ -645,6 +646,7 @@ mod tests {
                 UiHandwritingRole {
                     id: 1,
                     name: "角色1".into(),
+                    highlight: None,
                     font_path: "fonts/role1.ttf".into(),
                     printed: false,
                     font_size: Some(30.0),
@@ -663,6 +665,7 @@ mod tests {
                 UiHandwritingRole {
                     id: 2,
                     name: "打印角色".into(),
+                    highlight: Some("lightGray".into()),
                     font_path: "fonts/print.ttf".into(),
                     printed: true,
                     font_size: None,
@@ -689,6 +692,7 @@ mod tests {
                             text: "标题前缀".into(),
                             style: UiTextRunStyle {
                                 role_id: 1,
+                                highlight: None,
                                 font_path: Some("fonts/custom.ttf".into()),
                                 font_size: Some(28.0),
                                 fill: Some("#00ff00".into()),
@@ -699,6 +703,7 @@ mod tests {
                             text: "标题正文".into(),
                             style: UiTextRunStyle {
                                 role_id: 2,
+                                highlight: Some("lightGray".into()),
                                 font_path: None,
                                 font_size: None,
                                 fill: None,

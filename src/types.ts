@@ -2,6 +2,7 @@
 
 export interface UiTextRunStyle {
   roleId?: number;
+  highlight?: string | null;
   fontPath?: string | null;
   fontSize?: number | null;
   fill?: string | null;
@@ -25,6 +26,7 @@ export interface UiParagraph {
 export interface UiHandwritingRole {
   id: number;
   name: string;
+  highlight?: string | null;
   fontPath: string;
   printed: boolean;
   fontSize?: number | null;

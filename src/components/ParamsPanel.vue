@@ -27,6 +27,7 @@ import {
   doRender,
   exportFiles,
   exportPdf,
+  getRoleBadgeInfo,
   importDocx,
   importDocument,
   isDarkActive,
@@ -100,18 +101,22 @@ const presetOptions = computed(() =>
       </div>
       <div class="field-row role-tag-bar" style="flex-wrap: wrap; gap: 4px; margin-top: 2px">
         <span class="tag-bar-label">选区角色:</span>
-        <NButton size="tiny" secondary type="default" @mousedown.prevent @click="applyRoleToSelection(1)">
-          🖨️ 打印体
-        </NButton>
-        <NButton size="tiny" secondary type="warning" @mousedown.prevent @click="applyRoleToSelection(2)">
-          🟨 角色 1
-        </NButton>
-        <NButton size="tiny" secondary type="success" @mousedown.prevent @click="applyRoleToSelection(3)">
-          🟩 角色 2
-        </NButton>
-        <NButton size="tiny" secondary type="info" @mousedown.prevent @click="applyRoleToSelection(4)">
-          🟦 角色 3
-        </NButton>
+        <button
+          v-for="role in store.roles.filter((r) => r.id > 0)"
+          :key="role.id"
+          type="button"
+          class="role-tag-btn"
+          :style="{
+            backgroundColor: getRoleBadgeInfo(role, isDarkActive()).bg,
+            color: getRoleBadgeInfo(role, isDarkActive()).color,
+            borderColor: getRoleBadgeInfo(role, isDarkActive()).color,
+          }"
+          :title="`选区标记为：${role.name}`"
+          @mousedown.prevent
+          @click="applyRoleToSelection(role.id)"
+        >
+          {{ getRoleBadgeInfo(role, isDarkActive()).icon }} {{ role.name }}
+        </button>
         <NButton size="tiny" tertiary @mousedown.prevent @click="applyRoleToSelection(0)">
           ✕ 清除标记
         </NButton>
