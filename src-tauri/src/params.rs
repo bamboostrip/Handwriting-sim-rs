@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 /// 清理外来文本的特殊字符（与原 Slint 版 to_ui_spaces 一致）：
 /// WORD JOINER 移除，NBSP/FFA0 还原普通空格。
 fn clean_text(s: &str) -> String {
-    s.replace('\u{2060}', "").replace(['\u{00a0}', '\u{ffa0}'], " ")
+    s.replace('\u{2060}', "")
+        .replace(['\u{00a0}', '\u{ffa0}'], " ")
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -123,15 +124,15 @@ impl From<&TextRegion> for UiRegion {
             perturb_y_sigma: r.perturb_y_sigma,
             perturb_theta_sigma: r.perturb_theta_sigma,
             miswrite_rate: r.miswrite_rate,
-            miswrite_strikeout_style_index: r
-                .miswrite_strikeout_style
-                .map(|s| match s {
-                    StrikeoutStyle::Line => 0,
-                    StrikeoutStyle::DoubleLine => 1,
-                    StrikeoutStyle::Slash => 2,
-                    StrikeoutStyle::Cross => 3,
-                }),
-            fill: r.fill.map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])),
+            miswrite_strikeout_style_index: r.miswrite_strikeout_style.map(|s| match s {
+                StrikeoutStyle::Line => 0,
+                StrikeoutStyle::DoubleLine => 1,
+                StrikeoutStyle::Slash => 2,
+                StrikeoutStyle::Cross => 3,
+            }),
+            fill: r
+                .fill
+                .map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])),
             margin_top: r.margin_top,
             margin_bottom: r.margin_bottom,
             margin_left: r.margin_left,
@@ -274,7 +275,11 @@ impl UiParams {
                     ),
                     _ => None,
                 };
-                let region_fs = if r.font_size > 0 { r.font_size as f32 } else { self.font_size };
+                let region_fs = if r.font_size > 0 {
+                    r.font_size as f32
+                } else {
+                    self.font_size
+                };
                 let region_paras: Vec<Paragraph> = r
                     .paragraphs
                     .iter()

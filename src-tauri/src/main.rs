@@ -12,7 +12,6 @@
 mod params;
 mod updater;
 
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,7 +20,6 @@ use handwrite_sim::core::{doc_render, docx_io, engine, models, presets};
 use params::UiParams;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
-
 
 /// 全局状态：随机种子计数器（每次预览 +1，导出复用当前值——对齐 Slint 版语义）。
 struct AppState {
@@ -56,7 +54,8 @@ fn checked_params(p: &UiParams) -> Result<models::HandwritingParams, String> {
     let hp = p
         .to_handwriting_params()
         .map_err(|e| format!("参数错误：{e}"))?;
-    hp.validate_with(false).map_err(|e| format!("参数错误：{e}"))?;
+    hp.validate_with(false)
+        .map_err(|e| format!("参数错误：{e}"))?;
     Ok(hp)
 }
 
@@ -109,8 +108,7 @@ fn render_preview(
     let t0 = std::time::Instant::now();
     let mut pages = engine::render_all_pages_preview(&hp, seed).map_err(|e| e.to_string())?;
     if params.bounds_visible {
-        let color =
-            models::parse_color(params.bounds_color.trim()).unwrap_or([76, 166, 166]);
+        let color = models::parse_color(params.bounds_color.trim()).unwrap_or([76, 166, 166]);
         for page in pages.iter_mut() {
             *page = engine::overlay_bounds(page, &hp, color);
         }
@@ -153,7 +151,11 @@ fn render_preview(
 
 /// 全分辨率批量导出 PNG（0.png、1.png…）。目录由前端对话框选定后传入。
 #[tauri::command]
-fn export_files(state: State<'_, AppState>, params: UiParams, dir: String) -> Result<Vec<String>, String> {
+fn export_files(
+    state: State<'_, AppState>,
+    params: UiParams,
+    dir: String,
+) -> Result<Vec<String>, String> {
     let hp = checked_params(&params)?;
     let seed = state.seed.load(Ordering::SeqCst);
     let files = engine::export(&hp, Path::new(dir.trim()), seed).map_err(|e| e.to_string())?;
@@ -197,12 +199,8 @@ fn import_docx(path: String, font_size: f32) -> Result<Vec<(String, i32, f32)>, 
 #[tauri::command]
 fn import_document(app: AppHandle, path: String) -> Result<Vec<String>, String> {
     let out_dir = doc_cache_dir(&app)?;
-    let pages = doc_render::document_to_page_images(
-        Path::new(path.trim()),
-        &out_dir,
-        200,
-    )
-    .map_err(|e| format!("导入文档失败：{e}"))?;
+    let pages = doc_render::document_to_page_images(Path::new(path.trim()), &out_dir, 200)
+        .map_err(|e| format!("导入文档失败：{e}"))?;
     Ok(pages
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
@@ -218,9 +216,7 @@ fn list_presets() -> Vec<PresetItem> {
         let mut files: Vec<PathBuf> = rd
             .flatten()
             .map(|e| e.path())
-            .filter(|p| {
-                p.is_file() && p.extension().map(|e| e == "json").unwrap_or(false)
-            })
+            .filter(|p| p.is_file() && p.extension().map(|e| e == "json").unwrap_or(false))
             .collect();
         files.sort();
         for f in files {
@@ -256,10 +252,7 @@ fn save_preset(params: UiParams, path: String) -> Result<(), String> {
 /// 预设默认保存目录（对话框起始位置）。
 #[tauri::command]
 fn default_preset_dir() -> String {
-    assets_root()
-        .join("presets")
-        .to_string_lossy()
-        .into_owned()
+    assets_root().join("presets").to_string_lossy().into_owned()
 }
 
 /// 路径存在性检查（区域打印字体校验等，对齐 Python 版 _on_region_selected）。
@@ -336,7 +329,11 @@ fn check_for_updates(current_version: String) -> Result<updater::UpdateInfo, Str
 
 /// 分块下载更新包
 #[tauri::command]
-fn download_update(app: AppHandle, url: String, file_name: Option<String>) -> Result<String, String> {
+fn download_update(
+    app: AppHandle,
+    url: String,
+    file_name: Option<String>,
+) -> Result<String, String> {
     updater::download_update(&app, &url, file_name)
 }
 
@@ -413,11 +410,9 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-
         .expect("手写模拟器启动失败");
 }
 
 fn main() {
     run()
 }
-
