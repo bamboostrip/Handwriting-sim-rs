@@ -21,6 +21,7 @@ import {
   closeAboutModal,
   manualCheckUpdate,
   openExternalUrl,
+  openHelpModal,
   setAutoCheckUpdate,
   setThemePreference,
   store,
@@ -54,6 +55,17 @@ import {
       <div class="about-desc">
         基于自研笔画扰动渲染引擎的国风手写字迹模拟与排版生成工具。<br />
         支持背景底图模板、笔画高斯扰动、错字涂改、图文混排与多页 PDF 导出。
+      </div>
+
+      <!-- 使用指南引导卡片 -->
+      <div class="about-help-bar">
+        <div class="help-bar-info">
+          <span class="help-bar-icon">📖</span>
+          <span>试卷填空、PDF导入与手写微调说明</span>
+        </div>
+        <NButton size="small" type="primary" secondary @click="closeAboutModal(); openHelpModal()">
+          使用指南
+        </NButton>
       </div>
 
       <!-- 开源项目与重构版 -->
@@ -204,6 +216,30 @@ import {
   border: 1px solid var(--border, #eef3f1);
   border-radius: 6px;
   padding: 8px 12px;
+}
+
+.about-help-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  background: var(--accent-soft, rgba(46, 125, 116, 0.08));
+  border: 1px dashed var(--accent, #2e7d74);
+  border-radius: 6px;
+}
+
+.help-bar-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-main, #24312e);
+  font-weight: 500;
+}
+
+.help-bar-icon {
+  font-size: 16px;
 }
 
 .about-section {

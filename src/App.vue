@@ -5,6 +5,7 @@ import type { GlobalThemeOverrides } from "naive-ui";
 import PreviewPane from "./components/PreviewPane.vue";
 import ParamsPanel from "./components/ParamsPanel.vue";
 import AboutModal from "./components/AboutModal.vue";
+import HelpModal from "./components/HelpModal.vue";
 import UpdateModal from "./components/UpdateModal.vue";
 import {
   APP_VERSION,
@@ -16,6 +17,7 @@ import {
   isDarkActive,
   loadBgDimensions,
   openAboutModal,
+  openHelpModal,
   refreshPresets,
   scheduleRender,
   startupCheckUpdate,
@@ -126,12 +128,19 @@ void doRender();
           </div>
           <footer class="status-bar">
             <span class="status-text">{{ store.status }}</span>
-            <span class="status-version" @click="openAboutModal()" title="查看软件版本与开源项目">
-              v{{ APP_VERSION }} · 关于与更新
-            </span>
+            <div class="status-actions">
+              <span class="status-link" @click="openHelpModal()" title="查看软件使用教程与技巧">
+                📖 使用教程
+              </span>
+              <span class="status-sep">·</span>
+              <span class="status-link" @click="openAboutModal()" title="查看软件版本与开源项目">
+                v{{ APP_VERSION }} · 关于与更新
+              </span>
+            </div>
           </footer>
         </div>
 
+        <HelpModal />
         <AboutModal />
         <UpdateModal />
       </NMessageProvider>

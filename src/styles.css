@@ -302,7 +302,15 @@ body,
   text-overflow: ellipsis;
 }
 
-.status-bar .status-version {
+.status-bar .status-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  flex-shrink: 0;
+}
+
+.status-bar .status-link {
   cursor: pointer;
   padding: 1px 6px;
   border-radius: 4px;
@@ -311,12 +319,17 @@ body,
   user-select: none;
   font-family: inherit;
   font-size: 11.5px;
-  margin-left: 8px;
 }
 
-.status-bar .status-version:hover {
+.status-bar .status-link:hover {
   background: var(--accent-soft);
   text-decoration: underline;
+}
+
+.status-bar .status-sep {
+  color: var(--text-sub);
+  opacity: 0.5;
+  font-size: 11px;
 }
 
 

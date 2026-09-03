@@ -400,6 +400,7 @@ export const store = reactive({
 
   // ---- 关于与版本更新 ----
   aboutModalOpen: false,
+  helpModalOpen: false,
   updateModalOpen: false,
   updateInfo: null as UpdateInfo | null,
   checkingUpdate: false,
@@ -1551,6 +1552,14 @@ export function openAboutModal(): void {
 
 export function closeAboutModal(): void {
   store.aboutModalOpen = false;
+}
+
+export function openHelpModal(): void {
+  store.helpModalOpen = true;
+}
+
+export function closeHelpModal(): void {
+  store.helpModalOpen = false;
 }
 
 export function openUpdateModal(info?: UpdateInfo): void {
