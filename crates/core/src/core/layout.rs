@@ -372,6 +372,7 @@ pub fn layout_text(
     {
         first_line = false;
         let mut x = params.left_margin;
+        let line_start_i = i;
         loop {
             if i >= text_len {
                 return LayoutResult { mask, consumed: i };
@@ -382,13 +383,16 @@ pub fn layout_text(
                 break;
             }
             // 换行规则：末尾禁止字符 / 行首禁止字符（与 Python 版一致）
-            if x > width_f - params.right_margin - 2.0 * params.font_size
-                && start_chars.contains(ch)
-            {
-                break;
-            }
-            if x > width_f - params.right_margin - params.font_size && !end_chars.contains(ch) {
-                break;
+            // 保护：必须至少放置了一个字符后，才允许根据边距或禁止字符换行，避免行首直接 break 导致死循环
+            if i > line_start_i {
+                if x > width_f - params.right_margin - 2.0 * params.font_size
+                    && start_chars.contains(ch)
+                {
+                    break;
+                }
+                if x > width_f - params.right_margin - params.font_size && !end_chars.contains(ch) {
+                    break;
+                }
             }
 
             // 行纵向扰动（每字符独立，与 Python 版 rand.gauss 顺序一致）
@@ -438,6 +442,9 @@ pub fn layout_text(
             if i >= text_len {
                 return LayoutResult { mask, consumed: i };
             }
+        }
+        if i == line_start_i && i < text_len {
+            i += 1;
         }
         y += line_spacing;
     }
@@ -588,7 +595,7 @@ pub fn layout_paragraph_styled<'f>(
         }
     }
 
-    if resolved_chars.is_empty() {
+    if resolved_chars.is_empty() || width == 0 {
         return Vec::new();
     }
 
@@ -619,6 +626,7 @@ pub fn layout_paragraph_styled<'f>(
     while i < text_len {
         line_ys.push(y);
         let mut x = params.left_margin + (if i == 0 { paragraph.first_line_indent } else { 0.0 });
+        let line_start_i = i;
         while i < text_len {
             let sc = &resolved_chars[i];
             let ch = sc.ch;
@@ -626,11 +634,14 @@ pub fn layout_paragraph_styled<'f>(
                 i += 1;
                 break;
             }
-            if x > width_f - params.right_margin - 2.0 * sc.font_size && start_chars.contains(ch) {
-                break;
-            }
-            if x > width_f - params.right_margin - sc.font_size && !end_chars.contains(ch) {
-                break;
+            // 换行规则：当前行必须至少放置了 1 个字符后，才允许根据边距或禁止字符换行，避免行首直接 break 导致死循环
+            if i > line_start_i {
+                if x > width_f - params.right_margin - 2.0 * sc.font_size && start_chars.contains(ch) {
+                    break;
+                }
+                if x > width_f - params.right_margin - sc.font_size && !end_chars.contains(ch) {
+                    break;
+                }
             }
 
             let yj = if sc.line_spacing_sigma > 0.0 {
@@ -692,6 +703,9 @@ pub fn layout_paragraph_styled<'f>(
             if is_miswrite && params.miswrite_rewrite_mode == MiswriteMode::Rewrite {
                 x += sc.font.glyph_width(ch, size) + sc.word_spacing;
             }
+        }
+        if i == line_start_i {
+            i += 1;
         }
         line_x_ends.push(x);
         y += line_spacing;
@@ -1640,6 +1654,41 @@ mod tests {
             let gap = bands[i + 1].0 as i32 - bands[i].1 as i32;
             assert!(gap >= 0, "相邻行之间应有正间距，无重叠像素");
         }
+    }
+
+    #[test]
+    fn test_narrow_width_never_infinite_loops() {
+        let Some(path) = system_font() else {
+            eprintln!("跳过：未找到系统 CJK 字体");
+            return;
+        };
+        let font_size = 40.0;
+        let font = std::sync::Arc::new(FontFace::load(&path, font_size).unwrap());
+        let p = HandwritingParams {
+            font_size,
+            line_spacing: 10.0,
+            left_margin: 0.0,
+            right_margin: 0.0,
+            top_margin: 0.0,
+            bottom_margin: 0.0,
+            ..HandwritingParams::default()
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let paragraphs = vec![Paragraph {
+            text: "极窄宽度防止死循环测试".to_string(),
+            align: Align::Left,
+            first_line_indent: 0.0,
+            font_family: None,
+            runs: Vec::new(),
+        }];
+
+        // 测试段落排版在极小宽度（8px，远小于 40px 字号）下能正常终止且不卡死
+        let pages = layout_paragraphs_styled(&p, &font, None, &mut rng, &paragraphs, 8, 32);
+        assert!(!pages.is_empty(), "极窄宽度应正常完成排版返回页面，不发生死循环");
+
+        // 测试文本排版在极小宽度（8px）下也能正常终止
+        let res = layout_text(&p, &font, &mut rng, "极窄宽度防止死循环测试", 0, 8, 32, true);
+        assert!(res.consumed > 0, "文本排版在极窄宽度下应推进消费字符");
     }
 }
 

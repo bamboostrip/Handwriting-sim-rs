@@ -17,6 +17,7 @@ import { NButton, NTooltip } from "naive-ui";
 import {
   clampRect,
   cancelRegionEdit,
+  jumpToRegion,
   nextPage,
   openEditRegionDialog,
   openNewRegionDialog,
@@ -151,6 +152,24 @@ const ZONE_CURSORS: Record<string, string> = {
   move: "move",
 };
 
+/** 命中当前页某个已有区域判定（返回索引，无则 -1） */
+function findRegionAt(px: number, py: number): number {
+  if (!hasPreview.value) return -1;
+  const f = factor.value;
+  for (let i = store.regions.length - 1; i >= 0; i--) {
+    const r = store.regions[i];
+    if (r.page - 1 !== store.pageIndex) continue;
+    const x = r.x * f;
+    const y = r.y * f;
+    const w = r.w * f;
+    const h = r.h * f;
+    if (px >= x && px <= x + w && py >= y && py <= y + h) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 const cursorStyle = computed(() => {
   if (adjusting.value) return ZONE_CURSORS[zone.value] ?? "default";
   if (hasPreview.value && hasEdit.value) {
@@ -158,6 +177,9 @@ const cursorStyle = computed(() => {
     if (z !== "outside") return ZONE_CURSORS[z];
   }
   if (store.regionMode) return "crosshair";
+  if (hasPreview.value && findRegionAt(hover.x, hover.y) >= 0) {
+    return "pointer";
+  }
   return "default";
 });
 
@@ -187,17 +209,27 @@ function finishRect(display: {
   return clampRect(s.x, s.y, s.w, s.h, store.bgNatW, store.bgNatH);
 }
 
+// 记录调整开始时的基准矩形（防止重复读取中间态导致清零漂移）
+const startBox = reactive({ x: 0, y: 0, w: 0, h: 0 });
+
 function beginAdjust(z: Zone, p: { x: number; y: number }): void {
+  // 必须在 adjusting = true 之前从 ebBase 抓取当前真实矩形
+  const base = ebBase.value ?? { x: 0, y: 0, w: 0, h: 0 };
+  startBox.x = base.x;
+  startBox.y = base.y;
+  startBox.w = base.w;
+  startBox.h = base.h;
+
+  rb.x = base.x;
+  rb.y = base.y;
+  rb.w = base.w;
+  rb.h = base.h;
+
   adjusting.value = true;
   zone.value = z;
   const cp = clampPt(p);
   press.x = cp.x;
   press.y = cp.y;
-  const base = cur();
-  rb.x = base.x;
-  rb.y = base.y;
-  rb.w = base.w;
-  rb.h = base.h;
 }
 
 function onDown(e: PointerEvent): void {
@@ -208,17 +240,19 @@ function onDown(e: PointerEvent): void {
   hover.x = p.x;
   hover.y = p.y;
 
-  // 已有编辑框优先命中：抓取移动/缩放（即使处于新建模式，对齐 mousePressEvent）
+  // 1. 已有编辑框优先命中：抓取移动/缩放（即使处于新建模式，对齐 mousePressEvent）
   if (hasEdit.value) {
     const z = zoneAt(p.x, p.y);
     if (z !== "outside") {
       beginAdjust(z, p);
       return;
     }
+    // 点击编辑框外：结束当前调整态
+    cancelRegionEdit();
   }
+
+  // 2. 新建框选模式
   if (store.regionMode) {
-    // 新建框选拖拽；若处于编辑态先退出（对齐 finish_edit(emit=True)）
-    if (hasEdit.value) cancelRegionEdit();
     adjusting.value = false;
     zone.value = "outside";
     press.x = p.x;
@@ -230,9 +264,11 @@ function onDown(e: PointerEvent): void {
     rubberLive.value = true;
     return;
   }
-  if (hasEdit.value) {
-    // 非新建模式下点击框外：结束调整（emit=True）
-    cancelRegionEdit();
+
+  // 3. 普通模式下点击框外：如果命中了当前页已有区域，则选中切换；否则已退出调整态
+  const hit = findRegionAt(p.x, p.y);
+  if (hit >= 0) {
+    jumpToRegion(hit);
   }
 }
 
@@ -243,34 +279,36 @@ function applyAdjust(p: { x: number; y: number }): void {
   const cp = clampPt(p);
   const z = zone.value;
   if (z === "move") {
-    // 整体平移：钳制在图纸范围内
+    // 整体平移：基于 startBox 与鼠标位移计算，钳制在图纸范围内
     const dx = cp.x - press.x;
     const dy = cp.y - press.y;
-    rb.x = Math.max(0, Math.min(rb.x + dx, draw.value.w - rb.w));
-    rb.y = Math.max(0, Math.min(rb.y + dy, draw.value.h - rb.h));
-    press.x = cp.x;
-    press.y = cp.y;
+    rb.x = Math.max(0, Math.min(startBox.x + dx, draw.value.w - startBox.w));
+    rb.y = Math.max(0, Math.min(startBox.y + dy, draw.value.h - startBox.h));
+    rb.w = startBox.w;
+    rb.h = startBox.h;
     return;
   }
-  let l = rb.x;
-  let t = rb.y;
-  let r = rb.x + rb.w;
-  let b = rb.y + rb.h;
+
+  let l = startBox.x;
+  let t = startBox.y;
+  let r = startBox.x + startBox.w;
+  let b = startBox.y + startBox.h;
+
   if (z.includes("l")) l = cp.x;
   if (z.includes("r")) r = cp.x;
   if (z.includes("t")) t = cp.y;
   if (z.includes("b")) b = cp.y;
-  // 过小的增量直接忽略，保持上一几何（对齐 new.width() >= 4）
+
   const nx = Math.min(l, r);
   const ny = Math.min(t, b);
   const nw = Math.abs(r - l);
   const nh = Math.abs(b - t);
-  if (nw >= 4 && nh >= 4) {
-    rb.x = nx;
-    rb.y = ny;
-    rb.w = nw;
-    rb.h = nh;
-  }
+
+  // 保证最小显示尺寸 8px 并钳制在图纸范围内
+  rb.x = Math.max(0, Math.min(nx, draw.value.w - 8));
+  rb.y = Math.max(0, Math.min(ny, draw.value.h - 8));
+  rb.w = Math.max(8, Math.min(nw, draw.value.w - rb.x));
+  rb.h = Math.max(8, Math.min(nh, draw.value.h - rb.y));
 }
 
 function onMove(e: PointerEvent): void {
@@ -328,16 +366,16 @@ function onCancel(): void {
 function onDblClick(e: MouseEvent): void {
   if (!hasPreview.value || store.dialogOpen) return;
   const p = localPoint(e);
-  const f = factor.value;
-  for (let i = store.regions.length - 1; i >= 0; i--) {
-    const r = store.regions[i];
-    if (r.page - 1 !== store.pageIndex) continue;
-    const x = r.x * f;
-    const y = r.y * f;
-    if (p.x >= x && p.x <= x + r.w * f && p.y >= y && p.y <= y + r.h * f) {
-      openEditRegionDialog(i);
-      return;
-    }
+  const hit = findRegionAt(p.x, p.y);
+  if (hit >= 0) {
+    openEditRegionDialog(hit);
+  }
+}
+
+/** 点击预览视口外侧空白灰色背景：退出区域调整态与选中态 */
+function onBoxDown(e: PointerEvent): void {
+  if (e.target === boxEl.value) {
+    cancelRegionEdit();
   }
 }
 
@@ -369,7 +407,12 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
 
 <template>
   <div class="preview-col">
-    <div ref="boxEl" class="preview-box" :style="{ background: boxBackground }">
+    <div
+      ref="boxEl"
+      class="preview-box"
+      :style="{ background: boxBackground }"
+      @pointerdown="onBoxDown"
+    >
       <template v-if="hasPreview">
         <div class="draw-area" :style="drawStyle">
           <img class="page-img" :src="currentPage.url" alt="" />

@@ -99,7 +99,7 @@ onMounted(() => {
 
 // Esc：退出区域调整态（正在输入框/编辑器里打字时不劫持）
 function onKeydown(e: KeyboardEvent): void {
-  if (e.key !== "Escape" || store.editingIndex < 0) return;
+  if (e.key !== "Escape" || (store.editingIndex < 0 && store.selectedRegionIndex < 0)) return;
   const el = e.target as HTMLElement | null;
   if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) {
     return;

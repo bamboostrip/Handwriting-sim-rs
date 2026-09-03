@@ -1510,6 +1510,8 @@ export function updateRegionGeometry(index: number, rect: [number, number, numbe
 
 export function cancelRegionEdit(): void {
   store.editingIndex = -1;
+  store.selectedRegionIndex = -1;
+  store.highlightIndex = -1;
 }
 
 /** 列表点击：跳到该页并进入调整态。 */
