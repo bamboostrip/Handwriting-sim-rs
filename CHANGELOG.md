@@ -20,6 +20,10 @@
 
 ### Fixed
 
+- **修复预览与导出观感不一致（预览中手写字挤在一起、笔画碎裂）**：
+  - 根因：预览降采样阈值 `PREVIEW_MAX_WIDTH=1280` 把常见文档底图（A4@200dpi 宽 1654）压到 1280 宽再交给前端二次缩放显示，字间隙与笔画细节被压缩后视觉上"挤在一起"；Python 版早已用 4096 阈值修复过同样问题（其注释：避免降采样导致笔画变细碎裂、扰动后发丑）。
+  - `PREVIEW_MAX_WIDTH` 1280 → 4096 对齐 Python：常见信纸/文档底图预览按全分辨率渲染，同 seed 同参数下预览与导出**逐像素一致**；仅超大背景（>4096）仍兜底降采样控内存。
+  - 补齐 `scaled_params_for` 中区域逐项覆盖（word_spacing / 各扰动 σ）的等比缩放，对齐 Python 版 `_downsample_preview`。
 - **修复微软雅黑等字体渲染整体偏小、字距挤在一起**（同预设下与 Python 版差异明显的根源）：
   - 根因：ab_glyph 以 `ascent - descent`（hhea 纵向排印范围）为"em"换算像素，而 FreeType/PIL 以 `units_per_em` 为准。msyh 的范围 2167+536=2703 ≠ upem 2048，字形与步进被整体缩小到 2048/2703≈0.758 倍（simhei/simsun 两者相等故未暴露）。
   - 修复：`FontFace` 统一按 upem 基准换算 PxScale（`em_px`），全角字符 advance 恢复为恰等于字号、ascent 恢复 FreeType 语义；隔离对比下与 Python 版字符步进逐像素一致（28 号字+5 字距均为 33px）。

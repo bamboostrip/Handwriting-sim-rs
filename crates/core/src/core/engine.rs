@@ -39,9 +39,11 @@ pub enum EngineError {
 }
 
 /// 预览降采样的最大背景宽度阈值。
-/// 2048 宽对 ~800px 的预览区已远超显示精度；比 4096 减少 4 倍渲染/内存开销
-/// （千万像素级背景逐页缓存 4096 宽时每页可达 ~95MB）。
-const PREVIEW_MAX_WIDTH: u32 = 1280;
+/// 对齐 Python 版 `_preview_max_width = 4096`：常见信纸/文档底图（A4@200dpi
+/// 1654 宽、@300dpi 2480 宽）预览按全分辨率渲染，避免降采样把手写笔画
+/// 变细碎裂、字间隙压缩后视觉上"挤在一起"（与导出观感不一致）；仅对
+/// 超大背景（>4096，如高分辨扫描）兜底降采样控内存。
+const PREVIEW_MAX_WIDTH: u32 = 4096;
 
 /// 预览背景缓存（路径+修改时间 → (原始宽度, 缩略图)）。
 ///
@@ -104,6 +106,26 @@ fn scaled_params_for(params: &HandwritingParams, src_w: u32) -> HandwritingParam
             // 检测行距同为空间参数（PDF 像素），必须随预览降采样等比缩放，
             // 否则预览中区域行距相对字号偏大、与导出行数不一致
             if let Some(m) = r.line_spacing.as_mut() {
+                *m *= scale;
+            }
+            // 区域逐项覆盖的空间参数（字距/扰动 σ）同样缩放（对齐 Python 版
+            // _downsample_preview；旋转 σ 为弧度量纲不缩放）
+            if let Some(m) = r.word_spacing.as_mut() {
+                *m *= scale;
+            }
+            if let Some(m) = r.word_spacing_sigma.as_mut() {
+                *m *= scale;
+            }
+            if let Some(m) = r.line_spacing_sigma.as_mut() {
+                *m *= scale;
+            }
+            if let Some(m) = r.font_size_sigma.as_mut() {
+                *m *= scale;
+            }
+            if let Some(m) = r.perturb_x_sigma.as_mut() {
+                *m *= scale;
+            }
+            if let Some(m) = r.perturb_y_sigma.as_mut() {
                 *m *= scale;
             }
             if let Some(m) = r.margin_top.as_mut() { *m *= scale; }
@@ -1359,15 +1381,15 @@ mod tests {
             font_family: None,
             runs: Vec::new(),
         }];
-        // 背景宽 2560（> PREVIEW_MAX_WIDTH 1280）→ scale = 0.5
-        let scaled = scaled_params_for(&params, 2560);
+        // 背景宽 8192（> PREVIEW_MAX_WIDTH 4096）→ scale = 0.5
+        let scaled = scaled_params_for(&params, 8192);
         assert_eq!(scaled.font_size, 70.0);
         assert_eq!(
             scaled.paragraphs[0].first_line_indent, 140.0,
             "缩进应随字号等比缩放，保持 2 字宽"
         );
-        // 未超阈值：不缩放
-        let unscaled = scaled_params_for(&params, 1024);
+        // 未超阈值（常见 A4@300dpi 2480 宽也全分辨率预览）：不缩放
+        let unscaled = scaled_params_for(&params, 2560);
         assert_eq!(unscaled.paragraphs[0].first_line_indent, 280.0);
     }
 
