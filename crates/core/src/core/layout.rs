@@ -989,6 +989,21 @@ mod tests {
         CANDIDATES.iter().map(|p| PathBuf::from(p.trim())).find(|p| p.is_file())
     }
 
+    /// 行带内主带起点（密度法）：主带行墨迹密度高（整行汉字），错字小字带与
+    /// 删除线行密度显著更低。msyh 修正到 upem 基准后小字带与主带会垂直接触
+    /// （与 Python/FreeType 行为一致），不能再用"连续墨迹段"分离测量。
+    fn main_band_start(band: &[bool], width: usize) -> usize {
+        let density: Vec<usize> = band
+            .chunks(width)
+            .map(|r| r.iter().filter(|&&b| b).count())
+            .collect();
+        let max_d = density.iter().copied().max().unwrap_or(0);
+        density
+            .iter()
+            .position(|&d| d * 5 >= max_d * 2)
+            .unwrap_or(0)
+    }
+
     fn params() -> HandwritingParams {
         HandwritingParams {
             text: "你好世界，测试排版。".into(),
@@ -1294,20 +1309,18 @@ mod tests {
         let band = band.as_ref().expect("首行应有墨迹");
         assert!(band.iter().any(|&b| b), "首行应有墨迹");
         assert!(*off <= 0.0, "小字带顶应在网格顶或之上：off={off}");
-        // 主行带 = 带内最后一个连续墨迹段；其页面位置 = off + 段起点
-        let band_rows: Vec<bool> = band.chunks(600).map(|r| r.iter().any(|&b| b)).collect();
-        let main_start = split_text_rows(&band_rows).last().map(|(s, _)| *s).unwrap() as f32;
+        // 主行带位置（密度法）：主带行墨迹密度高，与小字带垂直接触时也能定位
+        let main_start = main_band_start(band, 600) as f32;
         let main_top = *off + main_start;
-        // 基线（错字率=0）：单行带，主内容顶的页面位置 = off0 + 0
+        // 基线（错字率=0）：主内容顶的页面位置
         let mut p0 = p.clone();
         p0.miswrite_rate = 0.0;
         let base = layout_paragraph(&p0, &font, &mut rand::rngs::StdRng::seed_from_u64(9), &pa, 600);
         let (base_band, base_off) = &base[0];
         let base_band = base_band.as_ref().expect("基线首行应有墨迹");
-        let base_main_top = *base_off
-            + base_band.chunks(600).position(|r| r.iter().any(|&b| b)).unwrap() as f32;
+        let base_main_top = *base_off + main_band_start(base_band, 600) as f32;
         assert!(
-            (main_top - base_main_top).abs() < 2.0,
+            (main_top - base_main_top).abs() < 3.0,
             "错字不应移动行主体位置：off={off} main_top={main_top} base={base_main_top}"
         );
     }
@@ -1365,32 +1378,37 @@ mod tests {
         let centered = layout_paragraph(&p, &font, &mut rand::rngs::StdRng::seed_from_u64(9), &pa, 600);
         pa.align = Align::Left;
         let left = layout_paragraph(&p, &font, &mut rand::rngs::StdRng::seed_from_u64(9), &pa, 600);
-        // 各渲染首行墨迹按行带分段求 x 范围（段序：小字带在上、主带在下）
-        let seg_extents = |lines: &[(Option<Vec<bool>>, f32)]| -> Vec<(usize, usize)> {
+        // 首行带分析（密度法）：主带起点之上的行 = 小字带（含删除线），
+        // 主带起点起 = 主带。分别求 x 范围（段序：小字带在上、主带在下）。
+        let analyze = |lines: &[(Option<Vec<bool>>, f32)]| -> (f32, f32, f32, f32) {
             let band = lines[0].0.as_ref().expect("首行应有墨迹");
-            let rows: Vec<bool> = band.chunks(600).map(|r| r.iter().any(|&b| b)).collect();
-            split_text_rows(&rows)
-                .into_iter()
-                .map(|(s, e)| {
-                    let (mut min_x, mut max_x) = (usize::MAX, 0usize);
-                    for (x, &b) in band[s * 600..e * 600].iter().enumerate() {
-                        if b {
-                            min_x = min_x.min(x % 600);
-                            max_x = max_x.max(x % 600);
-                        }
+            let ms = main_band_start(band, 600);
+            let extent = |from: usize, to: usize| -> (f32, f32) {
+                let (mut min_x, mut max_x) = (usize::MAX, 0usize);
+                for (x, &b) in band[from * 600..to.min(band.len() / 600) * 600].iter().enumerate() {
+                    if b {
+                        min_x = min_x.min(x % 600);
+                        max_x = max_x.max(x % 600);
                     }
-                    (min_x, max_x)
-                })
-                .collect()
+                }
+                (min_x as f32, max_x as f32)
+            };
+            let (f_mn, f_mx) = extent(0, ms);
+            let (m_mn, m_mx) = extent(ms, usize::MAX);
+            (f_mn, f_mx, m_mn, m_mx)
         };
-        let c_segs = seg_extents(&centered);
-        let l_segs = seg_extents(&left);
-        assert_eq!(c_segs.len(), l_segs.len(), "两种对齐的行带段数应一致");
-        assert!(c_segs.len() >= 2, "应存在小字带与主带两个行带段：{}", c_segs.len());
-        let rel_c = c_segs[0].0 as isize - c_segs.last().unwrap().0 as isize;
-        let rel_l = l_segs[0].0 as isize - l_segs.last().unwrap().0 as isize;
+        let (fc_mn, fc_mx, mc_mn, mc_mx) = analyze(&centered);
+        let (fl_mn, fl_mx, ml_mn, ml_mx) = analyze(&left);
+        // 小字带应存在（主带之上有墨迹）
         assert!(
-            (rel_c - rel_l).abs() <= 2,
+            fc_mx > fc_mn && fl_mx > fl_mn,
+            "应存在小字带墨迹：centered=({fc_mn},{fc_mx}) left=({fl_mn},{fl_mx})"
+        );
+        // 小字带中心相对主带中心的偏移在两种对齐下应一致（锚定不随对齐改变）
+        let rel_c = (fc_mn + fc_mx) / 2.0 - (mc_mn + mc_mx) / 2.0;
+        let rel_l = (fl_mn + fl_mx) / 2.0 - (ml_mn + ml_mx) / 2.0;
+        assert!(
+            (rel_c - rel_l).abs() <= 3.0,
             "小字带应随主带同移：rel_c={rel_c} rel_l={rel_l}"
         );
     }

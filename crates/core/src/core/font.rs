@@ -46,19 +46,40 @@ impl FontFace {
         self.size
     }
 
+    /// 把请求的像素字号换算为 ab_glyph 的 PxScale 值。
+    ///
+    /// ab_glyph 以 `ascent - descent`（纵向排印范围）为"em"换算像素，而
+    /// FreeType / PIL 以 `units_per_em` 为准。两者不一致的字体（如
+    /// msyh：2167+536=2703 ≠ upem 2048）会被整体缩小（2048/2703≈0.758），
+    /// 字距与字形同步变小、视觉上"挤在一起"，且与 Python 版渲染不一致。
+    /// 这里把 PxScale 放大 extent/upem 倍，使有效换算回到 upem 基准。
+    fn em_px(&self, size: f32) -> f32 {
+        let upem = self.font.units_per_em().unwrap_or(0.0);
+        if upem <= 0.0 {
+            return size;
+        }
+        let extent = self.font.ascent_unscaled() - self.font.descent_unscaled();
+        if (extent - upem).abs() <= 1.0 || extent <= 0.0 {
+            size
+        } else {
+            size * extent / upem
+        }
+    }
+
     fn scaled(&self, size: f32) -> impl ab_glyph::ScaleFont<&FontArc> {
-        self.font.as_scaled(PxScale::from(size))
+        self.font
+            .as_scaled(PxScale::from(self.em_px(size.max(1.0))))
     }
 
     /// 字形横向推进宽度（advance width，替代 PIL `font.getbbox` 宽度）。
     pub fn glyph_width(&self, ch: char, size: f32) -> f32 {
-        let scaled = self.scaled(size.max(1.0));
+        let scaled = self.scaled(size);
         scaled.h_advance(scaled.glyph_id(ch))
     }
 
     /// 基线到字形顶部的距离（把"顶部坐标"换算为"基线坐标"用）。
     pub fn ascent(&self, size: f32) -> f32 {
-        self.scaled(size.max(1.0)).ascent()
+        self.scaled(size).ascent()
     }
 
     /// 取 (ch, size) 的缓存轮廓（None 表示缺字），未命中时生成并缓存。
@@ -72,7 +93,7 @@ impl FontFace {
         }
         // outline 与 scale_factor 均与 glyph position 无关，可安全复用
         let id = self.font.glyph_id(ch);
-        let scale = PxScale::from(size.max(1.0));
+        let scale = PxScale::from(self.em_px(size.max(1.0)));
         let Some(outline) = self.font.outline(id) else {
             self.glyph_cache.lock().unwrap().insert(key, None);
             return None; // 缺字（tofu）时跳过
@@ -108,7 +129,7 @@ impl FontFace {
         };
         let glyph = Glyph {
             id: self.font.glyph_id(ch),
-            scale: PxScale::from(size.max(1.0)),
+            scale: PxScale::from(self.em_px(size.max(1.0))),
             position: point(origin_x, origin_y),
         };
         // 与原实现 outline_glyph(glyph) 相同的构造序列，px_bounds 含真实 position
@@ -162,6 +183,36 @@ mod tests {
         assert!(w > 0.0, "中文字形宽度应为正");
         assert!(w > 20.0, "36px 中文字宽应接近字号：{w}");
         assert!(face.ascent(36.0) > 0.0);
+    }
+
+    /// 回归：ab_glyph 以 hhea 纵向范围（ascent-descent）为"em"换算像素，
+    /// 而 FreeType/PIL 以 units_per_em 为准。msyh 的范围 2703 ≠ upem 2048，
+    /// 未修正时 advance/字形整体缩小到 0.758 倍（字距视觉上挤在一起）。
+    /// 修正后全角字符的 advance 应恰为字号（1 em），与 PIL getlength 一致。
+    #[test]
+    fn cjk_advance_matches_font_size_on_upem_basis() {
+        let fonts = [
+            ("C:\\Windows\\Fonts\\msyh.ttc", true),   // upem != extent，必须修正
+            ("C:\\Windows\\Fonts\\simhei.ttf", false), // upem == extent，天然一致
+        ];
+        let mut checked = 0;
+        for (path, expect_correction) in fonts {
+            let p = PathBuf::from(path);
+            if !p.is_file() {
+                continue;
+            }
+            let face = FontFace::load(&p, 28.0).expect("字体加载失败");
+            let adv = face.glyph_width('永', 28.0);
+            assert!(
+                (adv - 28.0).abs() < 0.5,
+                "{path}: 全角字符 advance 应为字号 28（FreeType/upem 基准），实际 {adv:.2}"
+            );
+            let _ = expect_correction;
+            checked += 1;
+        }
+        if checked == 0 {
+            eprintln!("跳过：未找到测试字体");
+        }
     }
 
     #[test]
