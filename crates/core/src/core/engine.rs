@@ -90,22 +90,27 @@ fn scaled_params_for(params: &HandwritingParams, src_w: u32) -> HandwritingParam
     }
     // 框选区域同样按比例缩放到预览坐标（对齐 Python 版 `_scale_params_for_preview`：
     // 区域矩形 × scale、区域字号 × scale；深拷贝不污染原始参数）
-    for r in scaled.regions.iter_mut() {
-        r.x = (r.x as f64 * scale as f64).round() as i32;
-        r.y = (r.y as f64 * scale as f64).round() as i32;
-        r.w = ((r.w as f64 * scale as f64).round() as i32).max(1);
-        r.h = ((r.h as f64 * scale as f64).round() as i32).max(1);
-        if r.font_size > 0 {
-            r.font_size = ((r.font_size as f64 * scale as f64).round() as i32).max(1);
+        for r in scaled.regions.iter_mut() {
+            r.x = (r.x as f64 * scale as f64).round() as i32;
+            r.y = (r.y as f64 * scale as f64).round() as i32;
+            r.w = ((r.w as f64 * scale as f64).round() as i32).max(1);
+            r.h = ((r.h as f64 * scale as f64).round() as i32).max(1);
+            if r.font_size > 0 {
+                r.font_size = ((r.font_size as f64 * scale as f64).round() as i32).max(1);
+            }
+            for p in r.paragraphs.iter_mut() {
+                p.first_line_indent *= scale;
+            }
+            // 检测行距同为空间参数（PDF 像素），必须随预览降采样等比缩放，
+            // 否则预览中区域行距相对字号偏大、与导出行数不一致
+            if let Some(m) = r.line_spacing.as_mut() {
+                *m *= scale;
+            }
+            if let Some(m) = r.margin_top.as_mut() { *m *= scale; }
+            if let Some(m) = r.margin_bottom.as_mut() { *m *= scale; }
+            if let Some(m) = r.margin_left.as_mut() { *m *= scale; }
+            if let Some(m) = r.margin_right.as_mut() { *m *= scale; }
         }
-        for p in r.paragraphs.iter_mut() {
-            p.first_line_indent *= scale;
-        }
-        if let Some(m) = r.margin_top.as_mut() { *m *= scale; }
-        if let Some(m) = r.margin_bottom.as_mut() { *m *= scale; }
-        if let Some(m) = r.margin_left.as_mut() { *m *= scale; }
-        if let Some(m) = r.margin_right.as_mut() { *m *= scale; }
-    }
     scaled
 }
 
@@ -417,6 +422,37 @@ impl DefaultEngine {
             rp.perturb_theta_sigma = 0.0;
             rp.miswrite_rate = 0.0;
         }
+
+        // 噪声类参数按区域字号相对主字号的比例缩放：sigma 是绝对像素值，在主
+        // 文字字号下调出来的数值直接套到小字号区域会相对放大数倍（视觉上字被
+        // "摇散"）。均值类（字间距/行距）与旋转（弧度量）保持原值不缩放。
+        let k = rp.font_size / params.font_size.max(1.0);
+        if (k - 1.0).abs() > 1e-3 {
+            rp.word_spacing_sigma *= k;
+            rp.line_spacing_sigma *= k;
+            rp.font_size_sigma *= k;
+            rp.perturb_x_sigma *= k;
+            rp.perturb_y_sigma *= k;
+        }
+
+        // 行距按盒高收敛：多行区域（带换行的提取文本）若按检测行距放不下，
+        // 会把末尾行挤出盒外被裁掉。估计行数需计入行内换行余量（逐行 ceil），
+        // 以"每行均分盒高"为上限收紧行距，保证内容完整优先于行距还原。
+        let split_lines: Vec<&str> = region.text.split('\n').collect();
+        if split_lines.len() >= 2 {
+            let char_budget =
+                ((region.w as f32 - rp.left_margin - rp.right_margin) / rp.font_size * 0.95)
+                    .floor()
+                    .max(1.0);
+            let est_lines: usize = split_lines
+                .iter()
+                .map(|l| ((l.chars().count() as f32 / char_budget).ceil() as usize).max(1))
+                .sum();
+            let ls_fit = region.h as f32 / est_lines as f32 - rp.font_size;
+            if ls_fit > 0.0 && rp.line_spacing > ls_fit {
+                rp.line_spacing = ls_fit;
+            }
+        }
         rp
     }
 
@@ -638,7 +674,9 @@ fn generate_pages_with(
             )
         };
         let rrand = &mut StdRng::seed_from_u64(DefaultEngine::region_seed(seed, index));
-        // 区域排版：仅排版在所属单页内（超出框选区域的内容直接截断不跨页延伸）
+        // 区域排版：仅排版在所属单页内（超出框选区域的内容直接截断不跨页延伸）。
+        // 排版画布高度给足 4 倍盒高，避免"最后一行放不下被分到下一页"而被
+        // next() 整行丢弃——越界墨迹最终仍由 to_combined_mask 裁剪到盒高。
         let mask: Vec<bool> = if !rp.paragraphs.is_empty() {
             let resolver = |p: &str| font_map.get(p).map(|f| f.as_ref());
             layout::layout_paragraphs_styled(
@@ -648,7 +686,7 @@ fn generate_pages_with(
                 rrand,
                 &rp.paragraphs,
                 rw,
-                rh,
+                rh.saturating_mul(4),
             )
             .into_iter()
             .next()

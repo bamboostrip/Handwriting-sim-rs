@@ -273,7 +273,10 @@ fn should_merge_boxes(a: &BoundingBox, b: &BoundingBox) -> bool {
         }
     }
 
-    // 3. 多行段落垂直连续段 (同色，水平重叠 >= 40% 较小宽度，垂直间隙 gap_y <= max_h * 3 / 2)
+    // 3. 多行段落垂直连续段 (同色，水平重叠 >= 40% 较小宽度，垂直间隙 gap_y <= min_h * 3 / 2)
+    //    注意用两框中较小的高度（行框高度）做基准：合并是迭代进行的，current 已是
+    //    增长后的累计大框，若按 max_h 计算阈值，串起来的框会吞并下方任意远的内容
+    //    （包括两段高亮之间未高亮的标题行）。
     let overlap_x = (a.max_x.min(b.max_x) as i32) - (a.min_x.max(b.min_x) as i32) + 1;
     let min_w = a.width().min(b.width()) as i32;
     if overlap_x > 0 && overlap_x >= (min_w * 2 / 5) {
@@ -284,8 +287,8 @@ fn should_merge_boxes(a: &BoundingBox, b: &BoundingBox) -> bool {
         } else {
             0
         };
-        let max_h = a.height().max(b.height()) as i32;
-        if (gap_y as i32) <= (max_h * 3 / 2) {
+        let min_h = a.height().min(b.height()) as i32;
+        if (gap_y as i32) <= (min_h * 3 / 2) {
             return true;
         }
     }
@@ -723,6 +726,22 @@ pub fn extract_text_and_font_size_for_box(
         });
     }
 
+    // 行距与首行缩进检测前，先按行收集（行内去首尾空白：PDF 文本层的行尾空格
+    // 会与排版换行叠加产生空行槽，把后续行整体推低一行）
+    let mut trimmed_lines: Vec<Vec<&ExtractedChar>> = Vec::new();
+    for line in &lines {
+        let mut l = line.clone();
+        while l.last().map(|c| c.ch == ' ').unwrap_or(false) {
+            l.pop();
+        }
+        while l.first().map(|c| c.ch == ' ').unwrap_or(false) {
+            l.remove(0);
+        }
+        if !l.is_empty() {
+            trimmed_lines.push(l);
+        }
+    }
+
     // 行距与首行缩进检测
     let mut detected_line_spacing = 0.0f32;
     if lines.len() >= 2 {
@@ -757,7 +776,7 @@ pub fn extract_text_and_font_size_for_box(
     }
 
     let mut raw_text = String::new();
-    for (i, line) in lines.iter().enumerate() {
+    for (i, line) in trimmed_lines.iter().enumerate() {
         if i > 0 {
             raw_text.push('\n');
         }
@@ -1579,6 +1598,25 @@ mod tests {
         assert_eq!(merged[0].min_y, 50);
         assert_eq!(merged[0].max_y, 205);
         assert_eq!(merged[0].highlight, Some("yellow".into()));
+    }
+
+    #[test]
+    fn test_merge_does_not_swallow_across_unhighlighted_lines() {
+        // 回归：段落间被未高亮内容（如标题行）隔开时，垂直间隙远大于行框高度，
+        // 不得因累计合并框已变高（max_h 增长）而把下方内容吞进同一区域。
+        let boxes = vec![
+            BoundingBox::with_highlight(100, 50, 400, 70, "yellow"),
+            BoundingBox::with_highlight(100, 95, 400, 115, "yellow"),
+            BoundingBox::with_highlight(100, 140, 400, 160, "yellow"),
+            BoundingBox::with_highlight(100, 185, 400, 205, "yellow"),
+            // 与上一框间隙 109px（跨过一行未高亮文字），水平部分重叠
+            BoundingBox::with_highlight(150, 314, 350, 334, "yellow"),
+        ];
+
+        let merged = merge_close_boxes(boxes);
+        assert_eq!(merged.len(), 2, "间隔 109px 的同色高亮框不应合并");
+        assert_eq!(merged[0].max_y, 205);
+        assert_eq!(merged[1].min_y, 314);
     }
 
     #[test]
