@@ -693,8 +693,21 @@ fn generate_pages_with(
             .map(|p| p.to_combined_mask(rw, rh))
             .unwrap_or_else(|| vec![false; rw * rh])
         } else {
-            let result = layout::layout_text(&rp, &font_r, rrand, &region.text, 0, rw, rh, true);
-            result.mask
+            // 纯文本路径同样给足 4 倍盒高（与段落路径一致），避免换行后的
+            // 行因"放不下"被整行丢弃；超出盒高的墨迹由 truncate 裁剪回盒内
+            let result = layout::layout_text(
+                &rp,
+                &font_r,
+                rrand,
+                &region.text,
+                0,
+                rw,
+                rh.saturating_mul(4),
+                true,
+            );
+            let mut mask = result.mask;
+            mask.truncate(rw * rh);
+            mask
         };
         entries.push(RegionEntry {
             local_params: rp,

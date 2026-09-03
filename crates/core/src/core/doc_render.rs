@@ -440,6 +440,53 @@ pub struct ExtractedChar {
     pub max_x: f32,
     pub max_y: f32,
     pub font_size_pt: f32,
+    /// 紧包围盒（tight bounds）的字符高度（点）。全角字符的紧包围盒高 ≈ 字号，
+    /// 用于校准 scaled_font_size 对嵌入字体矩阵的偏差（如 Word 中文 PDF 返回
+    /// 值偏大 ~6%，会让原文恰好占满行宽的文本在区域内放不下而整行折行）。
+    pub glyph_h_pt: f32,
+}
+
+/// 是否为全角（CJK 表意文字 / 假名 / 谚文）字符：其紧包围盒高度 ≈ 字号，
+/// 可用于字号校准。标点与西文不包括在内（紧包围盒远小于字号）。
+fn is_full_width_char(ch: char) -> bool {
+    let c = ch as u32;
+    // CJK 统一表意文字及扩展 A / B..
+    (0x3400..=0x4DBF).contains(&c)
+        || (0x4E00..=0x9FFF).contains(&c)
+        || (0x20000..=0x2FA1F).contains(&c)
+        // CJK 兼容表意文字
+        || (0xF900..=0xFAFF).contains(&c)
+        // 平假名 / 片假名
+        || (0x3041..=0x30FF).contains(&c)
+        // 谚文音节
+        || (0xAC00..=0xD7A3).contains(&c)
+}
+
+/// 从匹配字符解析字号（像素）。
+///
+/// `scaled_font_size` 对嵌入非标准 FontMatrix 的字体（如 Word 导出的中文
+/// PDF）会整体偏大约 5%~10%；存在全角字符时用其紧包围盒高度（≈字号的
+/// 0.95~0.97 倍）做上限校准，取二者较小值——宁可略小也不放不下。
+fn resolve_font_size_px(chars: &[&ExtractedChar], avg_scaled_pt: f32, scale: f32) -> i32 {
+    let scaled_px = if avg_scaled_pt > 0.0 {
+        (avg_scaled_pt * scale).round() as i32
+    } else {
+        0
+    };
+    let fw_glyphs: Vec<f32> = chars
+        .iter()
+        .filter(|c| is_full_width_char(c.ch) && c.glyph_h_pt > 0.0)
+        .map(|c| c.glyph_h_pt)
+        .collect();
+    if !fw_glyphs.is_empty() {
+        // 取最大值避免标点/小字形拉低
+        let glyph_px = (fw_glyphs.iter().cloned().fold(0.0_f32, f32::max) * scale).round() as i32;
+        if scaled_px > 0 {
+            return scaled_px.min(glyph_px);
+        }
+        return glyph_px;
+    }
+    scaled_px
 }
 
 /// 清理提取文本中可能包含的模板标签语法（如 `{{...}}`、`【...】`、`{{手写:...}}` 等）。
@@ -580,6 +627,10 @@ pub fn extract_pdf_page_chars(
                     (top - bottom).abs()
                 }
             };
+            let glyph_h_pt = char_obj
+                .tight_bounds()
+                .map(|r| (r.top().value - r.bottom().value).abs())
+                .unwrap_or(0.0);
 
             let min_x = (left * scale).min(right * scale);
             let max_x = (left * scale).max(right * scale);
@@ -595,6 +646,7 @@ pub fn extract_pdf_page_chars(
                 max_x,
                 max_y,
                 font_size_pt,
+                glyph_h_pt,
             });
         }
     }
@@ -652,7 +704,7 @@ pub fn extract_text_and_font_size_for_box(
         return (String::new(), 0, 0.0, 0.0);
     }
 
-    // 计算平均字号 (pt -> px)
+    // 计算平均字号 (pt -> px)：全角字符存在时用紧包围盒高度校准（见 resolve_font_size_px）
     let valid_font_sizes: Vec<f32> = matched
         .iter()
         .map(|c| c.font_size_pt)
@@ -672,12 +724,15 @@ pub fn extract_text_and_font_size_for_box(
         .sum::<f32>()
         / matched.len().max(1) as f32;
 
-    let font_size_px = if avg_font_size_pt > 0.0 {
-        (avg_font_size_pt * scale).round() as i32
-    } else if avg_char_h > 2.0 {
-        avg_char_h.round() as i32
-    } else {
-        (b.height() as f32 * 0.8).round().max(1.0) as i32
+    let font_size_px = {
+        let resolved = resolve_font_size_px(&matched, avg_font_size_pt, scale);
+        if resolved > 0 {
+            resolved
+        } else if avg_char_h > 2.0 {
+            avg_char_h.round() as i32
+        } else {
+            (b.height() as f32 * 0.8).round().max(1.0) as i32
+        }
     };
 
     // 按阅读顺序排序：先按垂直中心坐标粗排
@@ -805,6 +860,7 @@ fn extract_pdf_page_tags(
         let mut min_y = f32::MAX;
         let mut max_y = f32::MIN;
         let mut font_sizes = Vec::new();
+        let mut tag_chars: Vec<&ExtractedChar> = Vec::new();
         let mut has_valid_bounds = false;
 
         for k in m.start_char_idx..=m.end_char_idx {
@@ -818,6 +874,7 @@ fn extract_pdf_page_tags(
                     if e.font_size_pt > 0.0 {
                         font_sizes.push(e.font_size_pt);
                     }
+                    tag_chars.push(e);
                     has_valid_bounds = true;
                 }
             }
@@ -838,12 +895,12 @@ fn extract_pdf_page_tags(
         let w = w_px.max(1).min((img_width as i32).saturating_sub(x).max(1));
         let h = h_px.max(1).min((img_height as i32).saturating_sub(y).max(1));
 
-        let font_size = if !font_sizes.is_empty() {
-            let avg_fs = font_sizes.iter().sum::<f32>() / font_sizes.len() as f32;
-            (avg_fs * scale).round() as i32
+        let avg_fs = if !font_sizes.is_empty() {
+            font_sizes.iter().sum::<f32>() / font_sizes.len() as f32
         } else {
-            0
+            0.0
         };
+        let font_size = resolve_font_size_px(&tag_chars, avg_fs, scale);
 
         // 清理原图上的 {{...}} 标签区域为纯白色（向外扩展 2 像素以消除文字抗锯齿）
         let pad = 2i32;
@@ -1474,6 +1531,80 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_font_size_calibrates_with_full_width_glyph() {
+        // 回归：Word 导出的中文 PDF 中 scaled_font_size 偏大约 6%（11.16pt vs
+        // 真实 10.5pt），原文恰好占满行宽的文本在区域内会整行折行放不下。
+        // 存在全角字符时用其紧包围盒高度（≈字号）做上限校准，取较小值。
+        let scale = 200.0 / 72.0;
+        let chars = vec![
+            ExtractedChar {
+                ch: '张',
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 29.2,
+                max_y: 58.7,
+                font_size_pt: 11.16,
+                glyph_h_pt: 10.18,
+            },
+            ExtractedChar {
+                ch: '三',
+                min_x: 29.2,
+                min_y: 0.0,
+                max_x: 58.4,
+                max_y: 58.7,
+                font_size_pt: 11.16,
+                glyph_h_pt: 10.19,
+            },
+            ExtractedChar {
+                ch: '丰',
+                min_x: 58.4,
+                min_y: 0.0,
+                max_x: 87.6,
+                max_y: 58.7,
+                font_size_pt: 11.16,
+                glyph_h_pt: 10.15,
+            },
+        ];
+        let refs: Vec<&ExtractedChar> = chars.iter().collect();
+        assert_eq!(
+            resolve_font_size_px(&refs, 11.16, scale),
+            (10.19 * scale).round() as i32
+        );
+
+        // 纯西文（无全角字符）：保持 scaled 值（西文紧包围盒远小于字号，不可校准）
+        let latin = vec![ExtractedChar {
+            ch: 'H',
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 18.0,
+            max_y: 26.78,
+            font_size_pt: 24.0,
+            glyph_h_pt: 17.3,
+        }];
+        let latin_refs: Vec<&ExtractedChar> = latin.iter().collect();
+        assert_eq!(
+            resolve_font_size_px(&latin_refs, 24.0, scale),
+            (24.0 * scale).round() as i32
+        );
+
+        // 无字形信息（glyph=0，如旧数据/异常 PDF）：保持 scaled 值
+        let no_glyph = vec![ExtractedChar {
+            ch: '字',
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 29.2,
+            max_y: 58.7,
+            font_size_pt: 12.0,
+            glyph_h_pt: 0.0,
+        }];
+        let no_glyph_refs: Vec<&ExtractedChar> = no_glyph.iter().collect();
+        assert_eq!(
+            resolve_font_size_px(&no_glyph_refs, 12.0, scale),
+            (12.0 * scale).round() as i32
+        );
+    }
+
+    #[test]
     fn test_extract_text_and_font_size_for_box() {
         let scale = 200.0 / 72.0;
         let chars = vec![
@@ -1484,6 +1615,7 @@ mod tests {
                 max_x: 120.0,
                 max_y: 70.0,
                 font_size_pt: 12.0,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '三',
@@ -1492,6 +1624,7 @@ mod tests {
                 max_x: 145.0,
                 max_y: 70.0,
                 font_size_pt: 12.0,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '外',
@@ -1500,6 +1633,7 @@ mod tests {
                 max_x: 520.0,
                 max_y: 520.0,
                 font_size_pt: 10.0,
+                glyph_h_pt: 0.0,
             },
         ];
 
@@ -1528,6 +1662,7 @@ mod tests {
                 max_x: 105.0,
                 max_y: 155.0,
                 font_size_pt: 12.0,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '一',
@@ -1536,6 +1671,7 @@ mod tests {
                 max_x: 85.0,
                 max_y: 116.0,
                 font_size_pt: 12.0,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '第',
@@ -1544,6 +1680,7 @@ mod tests {
                 max_x: 65.0,
                 max_y: 115.0,
                 font_size_pt: 12.0,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '二',
@@ -1552,6 +1689,7 @@ mod tests {
                 max_x: 85.0,
                 max_y: 156.0,
                 font_size_pt: 12.0,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '行',
@@ -1560,6 +1698,7 @@ mod tests {
                 max_x: 105.0,
                 max_y: 114.0,
                 font_size_pt: 12.0,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '第',
@@ -1568,6 +1707,7 @@ mod tests {
                 max_x: 65.0,
                 max_y: 155.0,
                 font_size_pt: 12.0,
+                glyph_h_pt: 0.0,
             },
         ];
 
@@ -1631,6 +1771,7 @@ mod tests {
                 max_x: 150.0,
                 max_y: 65.0,
                 font_size_pt: font_size,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '一',
@@ -1639,6 +1780,7 @@ mod tests {
                 max_x: 185.0,
                 max_y: 65.0,
                 font_size_pt: font_size,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '行',
@@ -1647,6 +1789,7 @@ mod tests {
                 max_x: 220.0,
                 max_y: 65.0,
                 font_size_pt: font_size,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '第',
@@ -1655,6 +1798,7 @@ mod tests {
                 max_x: 90.0,
                 max_y: 105.0,
                 font_size_pt: font_size,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '二',
@@ -1663,6 +1807,7 @@ mod tests {
                 max_x: 125.0,
                 max_y: 105.0,
                 font_size_pt: font_size,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '行',
@@ -1671,6 +1816,7 @@ mod tests {
                 max_x: 160.0,
                 max_y: 105.0,
                 font_size_pt: font_size,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '第',
@@ -1679,6 +1825,7 @@ mod tests {
                 max_x: 90.0,
                 max_y: 145.0,
                 font_size_pt: font_size,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '三',
@@ -1687,6 +1834,7 @@ mod tests {
                 max_x: 125.0,
                 max_y: 145.0,
                 font_size_pt: font_size,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '行',
@@ -1695,6 +1843,7 @@ mod tests {
                 max_x: 160.0,
                 max_y: 145.0,
                 font_size_pt: font_size,
+                glyph_h_pt: 0.0,
             },
         ];
 
@@ -1746,6 +1895,7 @@ mod tests {
                 max_x: 80.0,
                 max_y: 125.0,
                 font_size_pt: 12.0,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '签',
@@ -1754,6 +1904,7 @@ mod tests {
                 max_x: 105.0,
                 max_y: 125.0,
                 font_size_pt: 12.0,
+                glyph_h_pt: 0.0,
             },
             ExtractedChar {
                 ch: '名',
@@ -1762,6 +1913,7 @@ mod tests {
                 max_x: 130.0,
                 max_y: 125.0,
                 font_size_pt: 12.0,
+                glyph_h_pt: 0.0,
             },
         ];
 
