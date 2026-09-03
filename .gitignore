@@ -30,6 +30,7 @@ Thumbs.db
 
 # 临时
 .staging-rust-new/
+*.pgm
 
 # pdfium 动态库（PDF 底图栅格化运行时依赖，体积大不入库；
 # 本地从 Python 项目 .venv 的 pypdfium2_raw\pdfium.dll 复制，打包脚本负责分发）

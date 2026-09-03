@@ -263,10 +263,8 @@ fn should_merge_boxes(a: &BoundingBox, b: &BoundingBox) -> bool {
     if overlap_y > 0 && overlap_y >= (min_h * 2 / 5) {
         let gap_x = if a.max_x < b.min_x {
             b.min_x - a.max_x
-        } else if b.max_x < a.min_x {
-            a.min_x - b.max_x
         } else {
-            0
+            a.min_x.saturating_sub(b.max_x)
         };
         if gap_x <= 20 {
             return true;
@@ -282,10 +280,8 @@ fn should_merge_boxes(a: &BoundingBox, b: &BoundingBox) -> bool {
     if overlap_x > 0 && overlap_x >= (min_w * 2 / 5) {
         let gap_y = if a.max_y < b.min_y {
             b.min_y - a.max_y
-        } else if b.max_y < a.min_y {
-            a.min_y - b.max_y
         } else {
-            0
+            a.min_y.saturating_sub(b.max_y)
         };
         let min_h = a.height().min(b.height()) as i32;
         if (gap_y as i32) <= (min_h * 3 / 2) {

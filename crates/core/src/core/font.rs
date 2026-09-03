@@ -5,9 +5,9 @@
 //! 与 PIL 的关键差异在于坐标约定：本模块统一以**基线原点**放置字形，
 //! 排版本层负责把"顶部坐标"换算为"基线坐标"。
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 
 use ab_glyph::{point, Font, FontArc, Glyph, Outline, OutlinedGlyph, PxScale, PxScaleFactor, ScaleFont};
 
@@ -29,7 +29,7 @@ struct CachedGlyph {
 pub struct FontFace {
     font: FontArc,
     size: f32,
-    glyph_cache: RefCell<HashMap<(char, u32), Option<CachedGlyph>>>,
+    glyph_cache: Mutex<HashMap<(char, u32), Option<CachedGlyph>>>,
 }
 
 impl FontFace {
@@ -38,7 +38,7 @@ impl FontFace {
         let bytes = std::fs::read(path).map_err(|e| format!("读取字体 {path:?} 失败：{e}"))?;
         let font =
             FontArc::try_from_vec(bytes).map_err(|e| format!("解析字体 {path:?} 失败：{e}"))?;
-        Ok(Self { font, size, glyph_cache: RefCell::new(HashMap::new()) })
+        Ok(Self { font, size, glyph_cache: Mutex::new(HashMap::new()) })
     }
 
     /// 字体颜色（用于日志/调试）。
@@ -64,19 +64,22 @@ impl FontFace {
     /// 取 (ch, size) 的缓存轮廓（None 表示缺字），未命中时生成并缓存。
     fn cached_glyph(&self, ch: char, size: f32) -> Option<CachedGlyph> {
         let key = (ch, size.to_bits());
-        if let Some(entry) = self.glyph_cache.borrow().get(&key) {
-            return entry.clone();
+        {
+            let cache = self.glyph_cache.lock().unwrap();
+            if let Some(entry) = cache.get(&key) {
+                return entry.clone();
+            }
         }
         // outline 与 scale_factor 均与 glyph position 无关，可安全复用
         let id = self.font.glyph_id(ch);
         let scale = PxScale::from(size.max(1.0));
         let Some(outline) = self.font.outline(id) else {
-            self.glyph_cache.borrow_mut().insert(key, None);
+            self.glyph_cache.lock().unwrap().insert(key, None);
             return None; // 缺字（tofu）时跳过
         };
         let scale_factor = self.font.as_scaled(scale).scale_factor();
         let entry = CachedGlyph { outline, scale_factor };
-        let mut cache = self.glyph_cache.borrow_mut();
+        let mut cache = self.glyph_cache.lock().unwrap();
         if cache.len() >= GLYPH_CACHE_LIMIT {
             cache.clear();
         }

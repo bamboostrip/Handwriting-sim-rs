@@ -10,6 +10,9 @@ use rand_distr::{Distribution, Normal};
 use crate::core::font::FontFace;
 use crate::core::models::{Align, HandwritingParams, MiswriteMode, Paragraph, StrikeoutStyle};
 
+/// 字体解析器函数类型别名。
+pub type FontResolver<'a, 'f> = dyn Fn(&str) -> Option<&'f FontFace> + 'a;
+
 /// 单个样式层的扰动与颜色参数。
 #[derive(Debug, Clone, PartialEq)]
 pub struct PerturbStyle {
@@ -354,9 +357,7 @@ pub fn layout_text(
 
     let mut i = start;
     let mut y = if force_first_line {
-        if height as f32 > params.font_size * 1.8 {
-            params.top_margin
-        } else if params.top_margin > 0.0 {
+        if height as f32 > params.font_size * 1.8 || params.top_margin > 0.0 {
             params.top_margin
         } else {
             ((height as f32 - params.font_size) / 2.0).max(0.0)
@@ -465,7 +466,7 @@ fn split_text_rows(rows: &[bool]) -> Vec<(usize, usize)> {
 pub fn layout_paragraph_styled<'f>(
     params: &HandwritingParams,
     default_font: &'f FontFace,
-    font_resolver: Option<&dyn Fn(&str) -> Option<&'f FontFace>>,
+    font_resolver: Option<&FontResolver<'_, 'f>>,
     rng: &mut impl Rng,
     paragraph: &Paragraph,
     width: usize,
@@ -497,7 +498,7 @@ pub fn layout_paragraph_styled<'f>(
         let style = &run.style;
         let role = params.roles.iter().find(|r| r.id == style.role_id);
 
-        let is_printed = style.printed || role.map_or(false, |r| r.printed) || style.role_id == 1;
+        let is_printed = style.printed || role.is_some_and(|r| r.printed) || style.role_id == 1;
         let font_size = style
             .font_size
             .or_else(|| role.and_then(|r| r.font_size))
@@ -873,7 +874,7 @@ pub fn layout_paragraph(
 pub fn layout_paragraphs_styled<'f>(
     params: &HandwritingParams,
     default_font: &'f FontFace,
-    font_resolver: Option<&dyn Fn(&str) -> Option<&'f FontFace>>,
+    font_resolver: Option<&FontResolver<'_, 'f>>,
     rng: &mut impl Rng,
     paragraphs: &[Paragraph],
     width: usize,

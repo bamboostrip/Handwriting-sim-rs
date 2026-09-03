@@ -401,15 +401,14 @@ impl UiParams {
     /// 转换为引擎参数。只做映射，不做校验（校验由调用方 validate_with 完成），
     /// 颜色解析失败返回可读错误。
     pub fn to_handwriting_params(&self) -> Result<HandwritingParams, String> {
-        let mut p = HandwritingParams::default();
-        p.font_path = self.font_path.trim().to_string();
-        p.background_path = self.background_path.trim().to_string();
-        p.background_pages = self.background_pages.clone();
-        p.fill = models::parse_color(self.fill.trim()).map_err(|e| format!("文字颜色：{e}"))?;
-        p.text = clean_text(&self.text);
+        let font_path = self.font_path.trim().to_string();
+        let background_path = self.background_path.trim().to_string();
+        let background_pages = self.background_pages.clone();
+        let fill = models::parse_color(self.fill.trim()).map_err(|e| format!("文字颜色：{e}"))?;
+        let mut text = clean_text(&self.text);
 
         // 角色转换
-        p.roles = self
+        let roles = self
             .roles
             .iter()
             .enumerate()
@@ -446,7 +445,7 @@ impl UiParams {
             .collect::<Result<Vec<_>, String>>()?;
 
         // 段落路径：非空即走段落（单段无格式的回退由前端负责——它只填 text）
-        p.paragraphs = self
+        let paragraphs = self
             .paragraphs
             .iter()
             .filter(|row| {
@@ -494,10 +493,10 @@ impl UiParams {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        if !p.paragraphs.is_empty() {
-            p.text.clear(); // 段落模式优先
+        if !paragraphs.is_empty() {
+            text.clear(); // 段落模式优先
         }
-        p.regions = self
+        let regions = self
             .regions
             .iter()
             .map(|r| -> Result<TextRegion, String> {
@@ -596,25 +595,35 @@ impl UiParams {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        p.font_size = self.font_size;
-        p.word_spacing = self.word_spacing;
-        p.line_spacing = self.line_spacing;
-        p.left_margin = self.margin_left;
-        p.right_margin = self.margin_right;
-        p.top_margin = self.margin_top;
-        p.bottom_margin = self.margin_bottom;
-        p.word_spacing_sigma = self.word_spacing_sigma;
-        p.line_spacing_sigma = self.line_spacing_sigma;
-        p.font_size_sigma = self.font_size_sigma;
-        p.perturb_x_sigma = self.perturb_x_sigma;
-        p.perturb_y_sigma = self.perturb_y_sigma;
-        p.perturb_theta_sigma = self.perturb_theta_sigma;
-        p.miswrite_rate = self.miswrite_rate;
-        p.miswrite_rewrite_mode = miswrite_mode_of(self.miswrite_mode_index);
-        p.miswrite_strikeout_style = strikeout_style_of(self.miswrite_strikeout_style_index);
-        p.end_chars = self.end_chars.clone();
-        p.start_chars = self.start_chars.clone();
-        Ok(p)
+
+        Ok(HandwritingParams {
+            font_path,
+            background_path,
+            background_pages,
+            fill,
+            text,
+            roles,
+            paragraphs,
+            regions,
+            font_size: self.font_size,
+            word_spacing: self.word_spacing,
+            line_spacing: self.line_spacing,
+            left_margin: self.margin_left,
+            right_margin: self.margin_right,
+            top_margin: self.margin_top,
+            bottom_margin: self.margin_bottom,
+            word_spacing_sigma: self.word_spacing_sigma,
+            line_spacing_sigma: self.line_spacing_sigma,
+            font_size_sigma: self.font_size_sigma,
+            perturb_x_sigma: self.perturb_x_sigma,
+            perturb_y_sigma: self.perturb_y_sigma,
+            perturb_theta_sigma: self.perturb_theta_sigma,
+            miswrite_rate: self.miswrite_rate,
+            miswrite_rewrite_mode: miswrite_mode_of(self.miswrite_mode_index),
+            miswrite_strikeout_style: strikeout_style_of(self.miswrite_strikeout_style_index),
+            end_chars: self.end_chars.clone(),
+            start_chars: self.start_chars.clone(),
+        })
     }
 
     /// 预设载入：从引擎参数回填全部前端字段。

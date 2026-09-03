@@ -542,9 +542,9 @@ impl DefaultEngine {
             }
         }
         for (path, size) in to_load {
-            if !map.contains_key(&path) {
-                let font = FontFace::load(Path::new(&path), size).map_err(EngineError::Font)?;
-                map.insert(path, Arc::new(font));
+            if let std::collections::hash_map::Entry::Vacant(e) = map.entry(path) {
+                let font = FontFace::load(Path::new(e.key()), size).map_err(EngineError::Font)?;
+                e.insert(Arc::new(font));
             }
         }
         Ok(map)

@@ -368,7 +368,7 @@ impl Paragraph {
 }
 
 /// 手写角色（角色预设），用于多角色/多笔迹混排。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct HandwritingRole {
     #[serde(default)]
     pub id: u32,
@@ -413,30 +413,6 @@ impl HandwritingRole {
             id,
             name: name.into(),
             ..Default::default()
-        }
-    }
-}
-
-impl Default for HandwritingRole {
-    fn default() -> Self {
-        Self {
-            id: 0,
-            name: String::new(),
-            highlight: None,
-            font_path: String::new(),
-            printed: false,
-            font_size: None,
-            fill: None,
-            word_spacing: None,
-            line_spacing: None,
-            font_size_sigma: None,
-            word_spacing_sigma: None,
-            line_spacing_sigma: None,
-            perturb_x_sigma: None,
-            perturb_y_sigma: None,
-            perturb_theta_sigma: None,
-            miswrite_rate: None,
-            miswrite_strikeout_style: None,
         }
     }
 }
