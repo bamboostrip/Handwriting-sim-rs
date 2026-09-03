@@ -116,6 +116,17 @@ import { closeHelpModal, store } from "../store";
                   </ol>
                 </div>
               </div>
+
+              <div class="feature-section">
+                <div class="section-title">💡 贴心弹窗：不想要识别背景色 / 懒得改模板？</div>
+                <div class="guide-text">
+                  针对不同用户的使用习惯，软件会在导入时弹出确认选项：
+                  <ul class="guide-list">
+                    <li><strong>PDF 想要保留背景色（不擦除、不提取选框）</strong>：导入文档底图时选择<strong>「仅作为纯底图」</strong>，软件将完整保留文档原始色彩、图像与文字，原样作为背景信纸。</li>
+                    <li><strong>Word 模板有高亮但想通篇全手写</strong>：导入 docx 时选择<strong>「全文手写模式」</strong>，软件自动忽略所有高亮背景标记，无需手动改模板，整篇直接全手写排版。</li>
+                  </ul>
+                </div>
+              </div>
             </div>
           </NScrollbar>
         </NTabPane>

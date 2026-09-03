@@ -1064,27 +1064,38 @@ pub fn document_to_page_images_with_regions(
     out_dir: &Path,
     dpi: u32,
 ) -> Result<(Vec<PathBuf>, Vec<TextRegion>), DocRenderError> {
+    document_to_page_images_opt(path, out_dir, dpi, true)
+}
+
+/// 入口：PDF 直接渲染；DOCX 先转 PDF。
+/// 可选是否识别并擦除标记区域。若 `extract_regions` 为 false 则完整保留原文档所有颜色、文字与背景（纯底图）。
+pub fn document_to_page_images_opt(
+    path: &Path,
+    out_dir: &Path,
+    dpi: u32,
+    extract_regions: bool,
+) -> Result<(Vec<PathBuf>, Vec<TextRegion>), DocRenderError> {
     let suffix = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     match suffix.as_str() {
-        "pdf" => pdf_to_images_with_regions(path, out_dir, dpi),
+        "pdf" => pdf_to_images_opt(path, out_dir, dpi, extract_regions),
         "docx" => {
             let pdf_path = docx_to_pdf(path, out_dir)?;
-            pdf_to_images_with_regions(&pdf_path, out_dir, dpi)
+            pdf_to_images_opt(&pdf_path, out_dir, dpi, extract_regions)
         }
         other => Err(DocRenderError::UnsupportedExtension(format!(".{other}"))),
     }
 }
 
-/// 入口：PDF 直接渲染；DOCX 先转 PDF。返回逐页 PNG 路径（页序即列表序）。
+/// 入口：PDF 直接渲染；DOCX 先转 PDF。返回逐页 PNG 路径（页序即列表序，纯底图，不擦除高亮，不提取区域）。
 pub fn document_to_page_images(
     path: &Path,
     out_dir: &Path,
     dpi: u32,
 ) -> Result<Vec<PathBuf>, DocRenderError> {
-    document_to_page_images_with_regions(path, out_dir, dpi).map(|(paths, _)| paths)
+    document_to_page_images_opt(path, out_dir, dpi, false).map(|(paths, _)| paths)
 }
 
 /// 把 PDF 逐页栅格化为 PNG，并自动检测标记区域，返回 (文件路径列表, 识别出的 TextRegion 列表)。
@@ -1092,6 +1103,18 @@ pub fn pdf_to_images_with_regions(
     pdf_path: &Path,
     out_dir: &Path,
     dpi: u32,
+) -> Result<(Vec<PathBuf>, Vec<TextRegion>), DocRenderError> {
+    pdf_to_images_opt(pdf_path, out_dir, dpi, true)
+}
+
+/// 把 PDF 逐页栅格化为 PNG。
+/// 若 `extract_regions` 为 true 则自动检测高亮色块与标签并擦除、提取 TextRegion 区域；
+/// 若为 false 则完整保留原始图像与背景，不擦除也不提取。
+pub fn pdf_to_images_opt(
+    pdf_path: &Path,
+    out_dir: &Path,
+    dpi: u32,
+    extract_regions: bool,
 ) -> Result<(Vec<PathBuf>, Vec<TextRegion>), DocRenderError> {
     std::fs::create_dir_all(out_dir)
         .map_err(|e| DocRenderError::Other(format!("创建缓存目录失败：{e}")))?;
@@ -1118,34 +1141,36 @@ pub fn pdf_to_images_with_regions(
         let image = bitmap.as_image();
         let mut rgb_img = image.to_rgb8();
 
-        // 1. 提取页面所有字符对象及其包围盒与字号
-        let page_chars = extract_pdf_page_chars(&page, dpi);
+        if extract_regions {
+            // 1. 提取页面所有字符对象及其包围盒与字号
+            let page_chars = extract_pdf_page_chars(&page, dpi);
 
-        // 2. 从 PDF 文本层提取 {{...}} / 【...】标签区域，并在图像上抹除标签文字
-        let tag_regions = extract_pdf_page_tags(
-            &page_chars,
-            index,
-            dpi,
-            rgb_img.width(),
-            rgb_img.height(),
-            &mut rgb_img,
-        );
+            // 2. 从 PDF 文本层提取 {{...}} / 【...】标签区域，并在图像上抹除标签文字
+            let tag_regions = extract_pdf_page_tags(
+                &page_chars,
+                index,
+                dpi,
+                rgb_img.width(),
+                rgb_img.height(),
+                &mut rgb_img,
+            );
 
-        // 3. 从渲染图像中检测高亮色块，并将其擦除为白色
-        let highlight_boxes = detect_highlight_boxes(&rgb_img);
-        erase_highlight_boxes(&mut rgb_img, &highlight_boxes);
+            // 3. 从渲染图像中检测高亮色块，并将其擦除为白色
+            let highlight_boxes = detect_highlight_boxes(&rgb_img);
+            erase_highlight_boxes(&mut rgb_img, &highlight_boxes);
 
-        // 4. 合并高亮框与文本标签区域，提取高亮框内部文字和字号
-        let page_regions = combine_page_regions_with_role_map(
-            highlight_boxes,
-            tag_regions,
-            &page_chars,
-            (index + 1) as i32,
-            scale,
-            &mut color_map,
-            &mut next_role_id,
-        );
-        all_regions.extend(page_regions);
+            // 4. 合并高亮框与文本标签区域，提取高亮框内部文字和字号
+            let page_regions = combine_page_regions_with_role_map(
+                highlight_boxes,
+                tag_regions,
+                &page_chars,
+                (index + 1) as i32,
+                scale,
+                &mut color_map,
+                &mut next_role_id,
+            );
+            all_regions.extend(page_regions);
+        }
 
         let path = out_dir.join(format!("{prefix}_{index}.png"));
         rgb_img
@@ -1159,14 +1184,14 @@ pub fn pdf_to_images_with_regions(
     Ok((paths, all_regions))
 }
 
-/// 把 PDF 逐页栅格化为 PNG，返回按页序排列的文件路径列表。
+/// 把 PDF 逐页栅格化为 PNG，返回按页序排列的文件路径列表（纯底图模式）。
 /// 对齐 Python 版 `pdf_to_images`（默认 200 DPI）。
 pub fn pdf_to_images(
     pdf_path: &Path,
     out_dir: &Path,
     dpi: u32,
 ) -> Result<Vec<PathBuf>, DocRenderError> {
-    pdf_to_images_with_regions(pdf_path, out_dir, dpi).map(|(paths, _)| paths)
+    pdf_to_images_opt(pdf_path, out_dir, dpi, false).map(|(paths, _)| paths)
 }
 
 /// 页文件名前缀：文档名（不含扩展名），清理非法字符避免跨平台问题。
@@ -1981,6 +2006,13 @@ mod tests {
                 }
                 // 空白测试 PDF 没有高亮与标签
                 assert!(regions.is_empty());
+
+                // 测试纯底图模式 (extract_regions = false)
+                let out_dir_pure = dir.path().join("pages_pure");
+                if let Ok((paths_pure, regions_pure)) = pdf_to_images_opt(&pdf_path, &out_dir_pure, 100, false) {
+                    assert_eq!(paths_pure.len(), 2);
+                    assert!(regions_pure.is_empty(), "纯底图模式不应提取任何区域");
+                }
             }
             Err(DocRenderError::PdfiumUnavailable(_)) => {
                 eprintln!("跳过：未找到 pdfium.dll");

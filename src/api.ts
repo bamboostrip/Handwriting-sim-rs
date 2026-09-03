@@ -28,7 +28,8 @@ export const api = {
   /** 返回 DocxImportOutput（段落文本、对齐、首行缩进 em、富文本 Runs 与检测到的文档字体） */
   importDocx: (path: string, fontSize: number) =>
     invoke<DocxImportOutput>("import_docx", { path, fontSize }),
-  importDocument: (path: string) => invoke<DocumentImportResult>("import_document", { path }),
+  importDocument: (path: string, extractRegions?: boolean) =>
+    invoke<DocumentImportResult>("import_document", { path, extractRegions }),
   listPresets: () => invoke<PresetItem[]>("list_presets"),
   loadPreset: (path: string) => invoke<UiParams>("load_preset", { path }),
   savePreset: (params: UiParams, path: string) =>

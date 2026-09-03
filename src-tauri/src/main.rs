@@ -190,12 +190,22 @@ fn import_docx(path: String, font_size: f32) -> Result<params::DocxImportOutput,
     })
 }
 
-/// 导入 PDF/DOCX 文档底图：后台栅格化为 200 DPI 逐页 PNG 并自动识别提取 TextRegion 区域列表。
+/// 导入 PDF/DOCX 文档底图：后台栅格化为 200 DPI 逐页 PNG，可选是否自动识别提取 TextRegion 区域列表。
 #[tauri::command]
-fn import_document(app: AppHandle, path: String) -> Result<params::DocumentImportResult, String> {
+fn import_document(
+    app: AppHandle,
+    path: String,
+    extract_regions: Option<bool>,
+) -> Result<params::DocumentImportResult, String> {
     let out_dir = doc_cache_dir(&app)?;
-    let (pages, regions) = doc_render::document_to_page_images_with_regions(Path::new(path.trim()), &out_dir, 200)
-        .map_err(|e| format!("导入文档失败：{e}"))?;
+    let extract = extract_regions.unwrap_or(true);
+    let (pages, regions) = doc_render::document_to_page_images_opt(
+        Path::new(path.trim()),
+        &out_dir,
+        200,
+        extract,
+    )
+    .map_err(|e| format!("导入文档失败：{e}"))?;
     let page_strings = pages.iter().map(|p| p.to_string_lossy().into_owned()).collect();
     let ui_regions = regions.iter().map(params::UiRegion::from).collect();
     Ok(params::DocumentImportResult {

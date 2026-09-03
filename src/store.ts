@@ -775,6 +775,92 @@ export async function chooseBackground(): Promise<void> {
   if (typeof p === "string") store.backgroundPath = p;
 }
 
+/**
+ * 当导入的 Word 文档包含高亮或背景色标记时，询问用户想要的效果：
+ * - 'mixed': 混合填空模式（高亮文字设为手写体，未标记文字转为打印体模板）
+ * - 'all_handwriting': 全文手写模式（忽略高亮标记，所有文字统一作为手写体排版）
+ * - 'cancel': 取消导入
+ */
+export function askDocxHighlightMode(): Promise<"mixed" | "all_handwriting" | "cancel"> {
+  return new Promise((resolve) => {
+    let resolved = false;
+    appDialog.create({
+      title: "Word 文档高亮排版模式",
+      content:
+        "检测到该 Word 文档中包含背景高亮或颜色标记，请选择排版方式：\n\n" +
+        "• 混合填空模式：高亮文字识别为手写体，未标记文字保留为打印体（适合试卷/表格填空）。\n\n" +
+        "• 全文手写模式：忽略所有高亮背景标记，文档全部内容统一作为手写体排版（适合保留原模板、全篇手写）。",
+      positiveText: "混合填空模式",
+      negativeText: "全文手写模式",
+      closable: true,
+      maskClosable: true,
+      onPositiveClick: () => {
+        resolved = true;
+        resolve("mixed");
+      },
+      onNegativeClick: () => {
+        resolved = true;
+        resolve("all_handwriting");
+      },
+      onClose: () => {
+        if (!resolved) {
+          resolved = true;
+          resolve("cancel");
+        }
+      },
+      onMaskClick: () => {
+        if (!resolved) {
+          resolved = true;
+          resolve("cancel");
+        }
+      },
+    });
+  });
+}
+
+/**
+ * 询问用户导入文档底图的处理方式：
+ * - 'detect': 识别高亮填空（自动检测背景高亮色块并无痕擦除，提取标记文字为手写填空区域）
+ * - 'pure': 仅作为纯底图（保留原始所有背景颜色与文字，不擦除底色、不自动生成选框）
+ * - 'cancel': 取消导入
+ */
+export function askDocumentImportMode(): Promise<"detect" | "pure" | "cancel"> {
+  return new Promise((resolve) => {
+    let resolved = false;
+    appDialog.create({
+      title: "文档底图导入模式",
+      content:
+        "检测到您正在导入文档底图（PDF / Word），请选择导入效果：\n\n" +
+        "• 识别高亮填空：自动检测并擦除背景高亮色块，将标记文字提取为手写填空区域（未标记文字保留为打印底图）。\n\n" +
+        "• 仅作为纯底图：完整保留原文档所有背景色彩与版式，不擦除任何高亮，不自动生成选框（原样作为背景信纸）。",
+      positiveText: "识别高亮填空",
+      negativeText: "仅作为纯底图",
+      closable: true,
+      maskClosable: true,
+      onPositiveClick: () => {
+        resolved = true;
+        resolve("detect");
+      },
+      onNegativeClick: () => {
+        resolved = true;
+        resolve("pure");
+      },
+      onClose: () => {
+        if (!resolved) {
+          resolved = true;
+          resolve("cancel");
+        }
+      },
+      onMaskClick: () => {
+        if (!resolved) {
+          resolved = true;
+          resolve("cancel");
+        }
+      },
+    });
+  });
+}
+
 export async function importDocx(): Promise<void> {
   const p = await dialogs.pickDocx();
   if (!p) return;
@@ -786,13 +872,20 @@ export async function importDocx(): Promise<void> {
     const rows = res.paragraphs;
 
     // 检查文档是否包含高亮或独立角色标记（混合模式 vs 纯手写模式）
-    const hasHighlights = rows.some((row) =>
+    const hasHighlightsInDoc = rows.some((row) =>
       row.runs?.some(
         (r) =>
           r.style?.highlight != null ||
           ((r.style?.roleId ?? 0) >= 2 && !r.style?.printed),
       ),
     );
+
+    let useHighlights = false;
+    if (hasHighlightsInDoc) {
+      const mode = await askDocxHighlightMode();
+      if (mode === "cancel") return;
+      useHighlights = mode === "mixed";
+    }
 
     setParagraphs(
       rows.map((row) =>
@@ -802,7 +895,7 @@ export async function importDocx(): Promise<void> {
           row.indentEm ?? 0,
           row.runs?.map((r) => {
             const runStyle = r.style ? { ...r.style } : undefined;
-            if (hasHighlights) {
+            if (useHighlights) {
               // 混合模式：未高亮片段 (role_id == 1 或 printed == true)
               if (runStyle && (runStyle.roleId === 1 || runStyle.printed)) {
                 if (runStyle.fontFamily) {
@@ -813,11 +906,12 @@ export async function importDocx(): Promise<void> {
                 }
               }
             } else {
-              // 纯手写模式：所有 run 清理为 role_id = 0, printed = false, fontPath = undefined
+              // 纯手写模式：所有 run 清理为 role_id = 0, printed = false, fontPath = undefined, highlight = undefined
               if (runStyle) {
                 runStyle.roleId = 0;
                 runStyle.printed = false;
                 runStyle.fontPath = undefined;
+                runStyle.highlight = undefined;
               }
             }
             return {
@@ -845,17 +939,19 @@ export async function importDocx(): Promise<void> {
       fill: null,
     };
 
-    // 自动匹配文档主字体 -> Role 1 (打印体)
-    if (res.docFontFamily) {
-      const matched = matchSystemFont(res.docFontFamily);
-      if (matched) {
-        role1.fontPath = matched.path;
+    if (useHighlights) {
+      // 自动匹配文档主字体 -> Role 1 (打印体)
+      if (res.docFontFamily) {
+        const matched = matchSystemFont(res.docFontFamily);
+        if (matched) {
+          role1.fontPath = matched.path;
+        }
       }
     }
 
     const nextRoles: UiHandwritingRole[] = [role0, role1];
 
-    if (hasHighlights) {
+    if (useHighlights) {
       // 动态提取并自适应角色（收集 roleId >= 2 及对应的 highlight/fill）
       const detectedRoles = new Map<number, { highlight?: string | null; fill?: string | null }>();
       for (const row of rows) {
@@ -904,7 +1000,7 @@ export async function importDocx(): Promise<void> {
     store.roles = nextRoles;
 
     focusPara(store.paragraphs[0].id, 0);
-    store.status = `已导入 ${rows.length} 个段落，回车分段、按钮设格式`;
+    store.status = `已导入 ${rows.length} 个段落${useHighlights ? "（混合填空模式）" : "（全文手写模式）"}`;
     scheduleRender();
   } catch (e) {
     store.status = `导入 docx 失败：${e}`;
@@ -914,15 +1010,19 @@ export async function importDocx(): Promise<void> {
 export async function importDocument(): Promise<void> {
   const p = await dialogs.pickDocument();
   if (!p) return;
-  store.status = "正在渲染文档底图…";
+
+  const mode = await askDocumentImportMode();
+  if (mode === "cancel") return;
+
+  const extractRegions = mode === "detect";
+  store.status = extractRegions ? "正在智能识别文档高亮并渲染底图…" : "正在渲染原版文档底图…";
   try {
-    const res = await api.importDocument(p);
+    const res = await api.importDocument(p, extractRegions);
     if (!res.pages.length) throw new Error("未得到任何页面");
     store.docPages = res.pages; // 先写 docPages 再切背景，避免 syncDocState 误清
-    store.docStatus = `已导入 ${res.pages.length} 页，可逐页框选`;
     store.backgroundPath = res.pages[0];
     loadBgDimensions(res.pages[0]);
-    if (res.regions.length > 0) {
+    if (extractRegions && res.regions.length > 0) {
       const detectedRoleIds = Array.from(
         new Set(
           res.regions
@@ -956,9 +1056,13 @@ export async function importDocument(): Promise<void> {
 
       store.regions = res.regions;
       store.selectedRegionIndex = 0;
+      store.docStatus = `已导入 ${res.pages.length} 页，识别 ${res.regions.length} 处手写填空`;
       store.status = `已导入文档底图（共 ${res.pages.length} 页），并自动识别提取了 ${res.regions.length} 处手写填空区域！`;
     } else {
-      store.status = `已导入文档底图（共 ${res.pages.length} 页）`;
+      store.docStatus = `已导入 ${res.pages.length} 页${extractRegions ? "" : "（纯底图模式）"}`;
+      store.status = extractRegions
+        ? `已导入文档底图（共 ${res.pages.length} 页，未检测到高亮填空标记）`
+        : `已导入文档底图（共 ${res.pages.length} 页，已保留原文档全部背景与色彩）`;
     }
     triggerPreview();
   } catch (e) {
@@ -1455,7 +1559,7 @@ export async function importDocxToDraft(): Promise<void> {
     const rows = res.paragraphs;
     if (!rows.length) throw new Error("文档为空");
 
-    const hasHighlights = rows.some((row) =>
+    const hasHighlightsInDoc = rows.some((row) =>
       row.runs?.some(
         (r) =>
           r.style?.highlight != null ||
@@ -1463,13 +1567,20 @@ export async function importDocxToDraft(): Promise<void> {
       ),
     );
 
+    let useHighlights = false;
+    if (hasHighlightsInDoc) {
+      const mode = await askDocxHighlightMode();
+      if (mode === "cancel") return;
+      useHighlights = mode === "mixed";
+    }
+
     d.paragraphs = rows.map((row) => ({
       text: cleanText(row.text),
       align: (row.align ?? 0) as 0 | 1 | 2,
       indentEm: row.indentEm ?? 0,
       runs: row.runs?.map((r) => {
         const runStyle = r.style ? { ...r.style } : undefined;
-        if (hasHighlights) {
+        if (useHighlights) {
           if (runStyle && (runStyle.roleId === 1 || runStyle.printed)) {
             if (runStyle.fontFamily) {
               const matched = matchSystemFont(runStyle.fontFamily);
@@ -1483,6 +1594,7 @@ export async function importDocxToDraft(): Promise<void> {
             runStyle.roleId = 0;
             runStyle.printed = false;
             runStyle.fontPath = undefined;
+            runStyle.highlight = undefined;
           }
         }
         return {
