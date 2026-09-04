@@ -814,11 +814,18 @@ fn extract_update_zip(zip_path: &Path, extract_dir: &Path) -> Result<PathBuf, St
 /// 等待旧进程退出 → 带重试地覆盖 exe（旧进程退出与文件锁释放存在竞态，
 /// 固定 sleep 一次可能复制失败，重试最多 10 次、每次间隔约 1 秒）→
 /// 清理下载文件与解压目录 → 重启新版本 → 自删脚本。
+///
+/// 全程无窗口约束：延时必须用 `wscript //B //Nologo` + `.vbs`（windows 子系统，
+/// 永不分配控制台）。严禁用 `ping` / `timeout` / `choice` 等控制台程序做延时：
+/// 父进程的 CREATE_NO_WINDOW 不会继承给孙进程，Win11 默认终端会为每个此类子进程
+/// 弹一个新终端窗口，重试循环会把它放大成“循环弹窗”（见 test_updater_bat_uses_windowless_sleep）。
+/// 其余命令（chcp/copy/del/rmdir/start/goto/if/set）均为 cmd 内部命令，不产生子进程。
 fn build_updater_bat_content(
     new_exe: &Path,
     current_exe: &Path,
     downloaded_file: &Path,
     extract_dir: Option<&Path>,
+    sleep_vbs: &Path,
 ) -> String {
     let cleanup_downloaded = format!(
         "if exist \"{}\" del /f /q \"{}\" >nul\r\n",
@@ -834,24 +841,35 @@ fn build_updater_bat_content(
             )
         })
         .unwrap_or_default();
+    let sleep_cmd = format!(
+        "wscript //B //Nologo \"{}\" >nul 2>&1\r\n",
+        sleep_vbs.display()
+    );
+    let cleanup_sleep = format!(
+        "if exist \"{}\" del /f /q \"{}\" >nul\r\n",
+        sleep_vbs.display(),
+        sleep_vbs.display()
+    );
 
     format!(
         "@echo off\r\n\
         chcp 65001 >nul\r\n\
-        ping 127.0.0.1 -n 2 >nul\r\n\
+        {sleep_cmd}\
         set /a tries=0\r\n\
         :copyloop\r\n\
         copy /y \"{}\" \"{}\" >nul 2>&1 && goto copied\r\n\
         set /a tries+=1\r\n\
         if %tries% geq 10 goto copyfailed\r\n\
-        ping 127.0.0.1 -n 2 >nul\r\n\
+        {sleep_cmd}\
         goto copyloop\r\n\
         :copyfailed\r\n\
+        {cleanup_sleep}\
         (goto) 2>nul & del \"%~f0\"\r\n\
         exit /b 1\r\n\
         :copied\r\n\
         {}\
         {}\
+        {cleanup_sleep}\
         start \"\" /min \"{}\"\r\n\
         (goto) 2>nul & del \"%~f0\"\r\n",
         new_exe.display(),
@@ -888,12 +906,18 @@ pub fn apply_portable_update_and_restart(new_file_path: &str) -> Result<(), Stri
     let temp_dir = std::env::temp_dir();
     let pid = std::process::id();
     let bat_file = temp_dir.join(format!("handwritesim_updater_{pid}.bat"));
+    // 无窗口延时脚本（wscript 为 windows 子系统，不弹任何终端窗口；
+    // 详见 build_updater_bat_content 的无窗口约束说明）
+    let sleep_vbs = temp_dir.join(format!("handwritesim_sleep_{pid}.vbs"));
+    std::fs::write(&sleep_vbs, "WScript.Sleep 1000\r\n")
+        .map_err(|e| format!("生成更新延时脚本失败: {e}"))?;
 
     let bat_content = build_updater_bat_content(
         new_path,
         &current_exe,
         downloaded_path,
         extract_dir.as_deref(),
+        &sleep_vbs,
     );
 
     std::fs::write(&bat_file, bat_content).map_err(|e| format!("生成更新批处理脚本失败: {e}"))?;
@@ -1246,6 +1270,30 @@ mod tests {
         );
     }
 
+    /// 更新批处理必须全程无窗口（回归测试，全平台运行）：
+    /// Win11 默认终端下，任何控制台子进程（ping/timeout/choice 等）都会弹新终端窗口，
+    /// 且父进程的 CREATE_NO_WINDOW 不会继承给孙进程；延时只能用 windows 子系统的
+    /// wscript + .vbs（永远不分配控制台）。
+    #[test]
+    fn test_updater_bat_uses_windowless_sleep() {
+        let tmp = std::env::temp_dir();
+        let content = build_updater_bat_content(
+            &tmp.join("new-handwrite-sim.exe"),
+            &tmp.join("handwrite-sim.exe"),
+            &tmp.join("update-handwrite-sim.exe"),
+            None,
+            &tmp.join("handwritesim_sleep_1234.vbs"),
+        );
+        assert!(
+            !content.contains("ping "),
+            "批处理不得用 ping 延时（会弹终端窗口），实际内容：\n{content}"
+        );
+        assert!(
+            content.contains("wscript //B //Nologo"),
+            "批处理延时必须走 wscript 无窗口脚本，实际内容：\n{content}"
+        );
+    }
+
     /// 真实执行生成的更新批处理脚本（Windows）：
     /// 验证等待→覆盖→清理下载文件→自删脚本全链路。
     /// 用系统 where.exe 作为合法 PE 模拟新旧 exe，避免 start 启动非法 PE 触发系统报错框。
@@ -1279,8 +1327,11 @@ mod tests {
             f.write_all(b"NEW-VERSION-MARKER").unwrap();
         }
 
+        let sleep_vbs = tmp.join("sleep.vbs");
+        std::fs::write(&sleep_vbs, "WScript.Sleep 1000\r\n").unwrap();
         let bat_file = tmp.join("updater.bat");
-        let content = build_updater_bat_content(&new_exe, &current_exe, &new_exe, None);
+        let content =
+            build_updater_bat_content(&new_exe, &current_exe, &new_exe, None, &sleep_vbs);
         std::fs::write(&bat_file, content).unwrap();
 
         let status = std::process::Command::new("cmd.exe")
@@ -1297,6 +1348,7 @@ mod tests {
         );
         assert!(!new_exe.exists(), "下载的更新文件应被清理");
         assert!(!bat_file.exists(), "批处理脚本应自删");
+        assert!(!sleep_vbs.exists(), "延时脚本应被清理");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

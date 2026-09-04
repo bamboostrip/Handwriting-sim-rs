@@ -88,3 +88,4 @@ Release 说明由 CI 自动生成，**不要在 GitHub 网页上手动编辑 Rel
 | 重要说明写在第二个 `## ` 之后 | 软件内更新弹窗看不到 | 重要内容一律进 CHANGELOG 小节 |
 | 手动在网页改 Release 正文 | 与 CHANGELOG 脱节，下次被覆盖 | 只改 CHANGELOG + 模板，重打 tag 修正 |
 | master 推送与 tag 推送间隔太短 | concurrency 取消旧运行（预期内） | 先等 master 变绿再打 tag |
+| 更新 bat 用 `ping`/`timeout`/`choice` 做延时 | Win11 默认终端为每个控制台子进程弹新窗口，重试循环放大成循环弹窗（0.4.1 教训） | 延时只用 `wscript //B //Nologo` + `.vbs`，有回归测试锁定 |
