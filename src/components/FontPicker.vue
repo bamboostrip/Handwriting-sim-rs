@@ -70,11 +70,28 @@ const autoCompleteOptions = computed(() => {
   }));
 });
 
-function onInputUpdate(val: string) {
-  emit("update:value", val);
+// naive-ui 的 NAutoComplete 在点击清除按钮时会以 null 触发 update:value，
+// 且从下拉选中选项后会先用选项 value 触发 select、紧接着再用选项 label
+// （"名称 — 路径"的展示文本，不是合法字体路径）触发一次 update:value。
+// 这里统一拦截：null 归一为空字符串；select 之后的第一次 update:value 丢弃。
+let suppressNextInputUpdate = false;
+
+function onInputUpdate(val: string | null) {
+  if (suppressNextInputUpdate) {
+    suppressNextInputUpdate = false;
+    return;
+  }
+  emit("update:value", val ?? "");
 }
 
-function onSelectSystemFont(val: string) {
+function onAutoCompleteSelect(val: string | null) {
+  if (val !== undefined && val !== null) {
+    suppressNextInputUpdate = true;
+    emit("update:value", val);
+  }
+}
+
+function onSelectSystemFont(val: string | null) {
   if (val !== undefined && val !== null) {
     emit("update:value", val);
   }
@@ -99,7 +116,7 @@ async function onPickFile() {
       clearable
       style="flex: 1; min-width: 0"
       @update:value="onInputUpdate"
-      @select="onSelectSystemFont"
+      @select="onAutoCompleteSelect"
     />
     <NPopselect
       :value="props.value"

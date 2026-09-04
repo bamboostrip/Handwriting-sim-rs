@@ -61,7 +61,7 @@ import {
       <div class="about-help-bar">
         <div class="help-bar-info">
           <span class="help-bar-icon">📖</span>
-          <span>试卷填空、PDF导入与手写微调说明</span>
+          <span>快速上手、试卷高亮填空与全部功能使用教程</span>
         </div>
         <NButton size="small" type="primary" secondary @click="closeAboutModal(); openHelpModal()">
           使用指南

@@ -96,22 +96,16 @@ pub fn load_paragraphs(path: &Path, font_size: f32) -> Result<Vec<Paragraph>, St
     }
 
     // 双模式自动分类：
-    // 如果整个文档没有任何高亮背景色：纯手写模式（所有 runs 设为 role_id = 0, printed = false）。
+    // 如果整个文档没有任何高亮背景色：纯手写模式（未标记的普通文本为默认手写 role_id = 0）。
     // 如果整个文档存在高亮背景色：高亮文本为手写（role_id >= 2, printed = false），所有未高亮文本自动转为印刷体模板（role_id = 1, printed = true）。
+    // 显式标签（{{打印:}}、{{1:}} 等）是用户明确指定的样式，不随纯手写模式重置而丢弃。
     let has_highlights = result.iter().any(|p| {
         p.runs
             .iter()
             .any(|r| r.style.highlight.is_some() || (r.style.role_id >= 2 && !r.style.printed))
     });
 
-    if !has_highlights {
-        for p in &mut result {
-            for r in &mut p.runs {
-                r.style.role_id = 0;
-                r.style.printed = false;
-            }
-        }
-    } else {
+    if has_highlights {
         for p in &mut result {
             for r in &mut p.runs {
                 if r.style.role_id == 0 {
@@ -570,7 +564,11 @@ fn parse_document(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<ParsedP
     let mut paras = Vec::new();
     // 状态
     let mut in_body_para = false; // 当前 w:p 是 body 直接子级（对齐 python-docx doc.paragraphs）
-    let mut in_table = false;
+    // 表格嵌套深度：布尔标记在嵌套 w:tbl 提前闭合时会误放行外层表格中的段落
+    let mut table_depth: usize = 0;
+    // 文本框（w:txbxContent）嵌套深度：其中的 w:p/w:r 会破坏外层段落状态
+    // （清空已累积 runs、提前闭合外层段落导致后续文字丢失），整体跳过
+    let mut txbx_depth: usize = 0;
     let mut in_p_pr = false;
     let mut in_run = false;
     let mut in_r_pr = false;
@@ -583,105 +581,132 @@ fn parse_document(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<ParsedP
 
     loop {
         match reader.read_event() {
-            Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
-                b"tbl" => in_table = true,
-                b"p" if !in_table => {
-                    in_body_para = true;
-                    cur_runs.clear();
-                    cur_run_text.clear();
-                    cur_run_props = RawRunProps::default();
-                    cur_fmt = ParaFmt::default();
+            Ok(Event::Start(e)) => {
+                let qname = e.name();
+                let name = local_name(qname.as_ref());
+                if txbx_depth > 0 {
+                    if name == b"txbxContent" {
+                        txbx_depth += 1;
+                    }
+                    continue;
                 }
-                b"pPr" if in_body_para => {
-                    in_p_pr = true;
-                    handle_p_pr_tag(&e, &mut cur_fmt);
-                }
-                b"r" if in_body_para => {
-                    if !cur_run_text.is_empty() {
-                        let mut style = TextRunStyle::default();
-                        if cur_run_props.font_family.is_none() && cur_fmt.font_family.is_some() {
-                            cur_run_props.font_family = cur_fmt.font_family.clone();
+                match name {
+                    b"tbl" => table_depth += 1,
+                    b"txbxContent" => txbx_depth += 1,
+                    b"p" if table_depth == 0 => {
+                        in_body_para = true;
+                        cur_runs.clear();
+                        cur_run_text.clear();
+                        cur_run_props = RawRunProps::default();
+                        cur_fmt = ParaFmt::default();
+                    }
+                    b"pPr" if in_body_para => {
+                        in_p_pr = true;
+                        handle_p_pr_tag(&e, &mut cur_fmt);
+                    }
+                    b"r" if in_body_para => {
+                        if !cur_run_text.is_empty() {
+                            let mut style = TextRunStyle::default();
+                            if cur_run_props.font_family.is_none() && cur_fmt.font_family.is_some() {
+                                cur_run_props.font_family = cur_fmt.font_family.clone();
+                            }
+                            cur_run_props.apply_to(&mut style, registry);
+                            cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
                         }
-                        cur_run_props.apply_to(&mut style, registry);
-                        cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
+                        in_run = true;
+                        cur_run_text.clear();
+                        cur_run_props = RawRunProps::default();
                     }
-                    in_run = true;
-                    cur_run_text.clear();
-                    cur_run_props = RawRunProps::default();
-                }
-                b"rPr" if in_run => {
-                    in_r_pr = true;
-                    handle_r_pr_tag(&e, &mut cur_run_props, &mut cur_fmt);
-                }
-                b"t" if in_body_para => in_t = true,
-                _ => {
-                    if in_p_pr {
-                        handle_p_pr_tag(&e, &mut cur_fmt);
-                    } else if in_r_pr {
+                    b"rPr" if in_run => {
+                        in_r_pr = true;
                         handle_r_pr_tag(&e, &mut cur_run_props, &mut cur_fmt);
                     }
-                }
-            },
-            Ok(Event::Empty(e)) => match local_name(e.name().as_ref()) {
-                b"tab" if in_body_para => cur_run_text.push('\t'),
-                b"br" | b"cr" if in_body_para => cur_run_text.push('\n'),
-                _ => {
-                    if in_p_pr {
-                        handle_p_pr_tag(&e, &mut cur_fmt);
-                    } else if in_r_pr {
-                        handle_r_pr_tag(&e, &mut cur_run_props, &mut cur_fmt);
-                    }
-                }
-            },
-            Ok(Event::Text(t)) => {
-                if in_body_para && in_t {
-                    if let Ok(s) = std::str::from_utf8(t.as_ref()) {
-                        if let Ok(v) = unescape(s) {
-                            cur_run_text.push_str(&v);
+                    b"t" if in_body_para => in_t = true,
+                    _ => {
+                        if in_p_pr {
+                            handle_p_pr_tag(&e, &mut cur_fmt);
+                        } else if in_r_pr {
+                            handle_r_pr_tag(&e, &mut cur_run_props, &mut cur_fmt);
                         }
                     }
                 }
             }
-            Ok(Event::End(e)) => match local_name(e.name().as_ref()) {
-                b"tbl" => in_table = false,
-                b"t" => in_t = false,
-                b"rPr" => in_r_pr = false,
-                b"r" => {
-                    if !cur_run_text.is_empty() {
-                        let mut style = TextRunStyle::default();
-                        if cur_run_props.font_family.is_none() && cur_fmt.font_family.is_some() {
-                            cur_run_props.font_family = cur_fmt.font_family.clone();
-                        }
-                        cur_run_props.apply_to(&mut style, registry);
-                        cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
-                    }
-                    in_run = false;
-                    in_r_pr = false;
-                    cur_run_props = RawRunProps::default();
+            Ok(Event::Empty(e)) => {
+                if txbx_depth > 0 {
+                    continue;
                 }
-                b"pPr" => in_p_pr = false,
-                b"p" if in_body_para => {
-                    if !cur_run_text.is_empty() {
-                        let mut style = TextRunStyle::default();
-                        if cur_run_props.font_family.is_none() && cur_fmt.font_family.is_some() {
-                            cur_run_props.font_family = cur_fmt.font_family.clone();
+                match local_name(e.name().as_ref()) {
+                    b"tab" if in_body_para => cur_run_text.push('\t'),
+                    b"br" | b"cr" if in_body_para => cur_run_text.push('\n'),
+                    _ => {
+                        if in_p_pr {
+                            handle_p_pr_tag(&e, &mut cur_fmt);
+                        } else if in_r_pr {
+                            handle_r_pr_tag(&e, &mut cur_run_props, &mut cur_fmt);
                         }
-                        cur_run_props.apply_to(&mut style, registry);
-                        cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
                     }
-                    paras.push(ParsedParagraph {
-                        runs: std::mem::take(&mut cur_runs),
-                        fmt: std::mem::take(&mut cur_fmt),
-                    });
-                    in_body_para = false;
-                    in_p_pr = false;
-                    in_run = false;
-                    in_r_pr = false;
-                    in_t = false;
-                    cur_run_props = RawRunProps::default();
                 }
-                _ => {}
-            },
+            }
+            Ok(Event::Text(t)) => {
+                if txbx_depth > 0 || !(in_body_para && in_t) {
+                    continue;
+                }
+                if let Ok(s) = std::str::from_utf8(t.as_ref()) {
+                    if let Ok(v) = unescape(s) {
+                        cur_run_text.push_str(&v);
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                let qname = e.name();
+                let name = local_name(qname.as_ref());
+                if txbx_depth > 0 {
+                    if name == b"txbxContent" {
+                        txbx_depth -= 1;
+                    }
+                    continue;
+                }
+                match name {
+                    b"tbl" => table_depth = table_depth.saturating_sub(1),
+                    b"t" => in_t = false,
+                    b"rPr" => in_r_pr = false,
+                    b"r" => {
+                        if !cur_run_text.is_empty() {
+                            let mut style = TextRunStyle::default();
+                            if cur_run_props.font_family.is_none() && cur_fmt.font_family.is_some() {
+                                cur_run_props.font_family = cur_fmt.font_family.clone();
+                            }
+                            cur_run_props.apply_to(&mut style, registry);
+                            cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
+                        }
+                        in_run = false;
+                        in_r_pr = false;
+                        cur_run_props = RawRunProps::default();
+                    }
+                    b"pPr" => in_p_pr = false,
+                    b"p" if in_body_para => {
+                        if !cur_run_text.is_empty() {
+                            let mut style = TextRunStyle::default();
+                            if cur_run_props.font_family.is_none() && cur_fmt.font_family.is_some() {
+                                cur_run_props.font_family = cur_fmt.font_family.clone();
+                            }
+                            cur_run_props.apply_to(&mut style, registry);
+                            cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
+                        }
+                        paras.push(ParsedParagraph {
+                            runs: std::mem::take(&mut cur_runs),
+                            fmt: std::mem::take(&mut cur_fmt),
+                        });
+                        in_body_para = false;
+                        in_p_pr = false;
+                        in_run = false;
+                        in_r_pr = false;
+                        in_t = false;
+                        cur_run_props = RawRunProps::default();
+                    }
+                    _ => {}
+                }
+            }
             Ok(Event::Eof) => break,
             Err(e) => return Err(format!("解析 document.xml 失败：{e}")),
             _ => {}
@@ -1292,6 +1317,51 @@ mod tests {
                 assert!(!r.style.printed);
             }
         }
+    }
+
+    #[test]
+    fn test_docx_printed_tag_survives_full_handwriting_mode() {
+        // 文档无任何高亮：纯手写模式，但显式 {{打印:}} 标签应保留而不是被重置为手写
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{{打印:标题}}正文手写</w:t></w:r></w:p></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("printed_tag_only.docx");
+        std::fs::write(&path, zip_docx(document_xml.as_bytes(), None)).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].runs.len(), 2);
+        assert_eq!(paras[0].runs[0].text, "标题");
+        assert_eq!(paras[0].runs[0].style.role_id, 1);
+        assert!(paras[0].runs[0].style.printed);
+        assert_eq!(paras[0].runs[1].text, "正文手写");
+        assert_eq!(paras[0].runs[1].style.role_id, 0);
+        assert!(!paras[0].runs[1].style.printed);
+    }
+
+    #[test]
+    fn test_docx_nested_table_paragraphs_do_not_leak_into_body() {
+        // 嵌套表格：内层 </w:tbl> 不应结束外层表格上下文，
+        // 外层表格中的段落不应泄入正文段落列表（对齐 python-docx doc.paragraphs）
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>正文段落</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:tbl><w:tr><w:tc><w:p><w:r><w:t>内层表格</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>外层表格段落</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested_table.docx");
+        std::fs::write(&path, zip_docx(document_xml.as_bytes(), None)).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 1, "表格内段落（含嵌套）不应出现在正文段落中：{paras:?}");
+        assert_eq!(paras[0].runs[0].text, "正文段落");
+    }
+
+    #[test]
+    fn test_docx_textbox_content_is_skipped() {
+        // 段落中的文本框（w:txbxContent）内含独立 w:p/w:r：
+        // 应整体跳过，不得清空外层已累积 runs 或提前闭合外层段落
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>前文</w:t></w:r><w:r><w:drawing><wps:txbx><w:txbxContent><w:p><w:r><w:t>文本框内容</w:t></w:r></w:p></w:txbxContent></wps:txbx></w:drawing></w:r><w:r><w:t>后文</w:t></w:r></w:p></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("textbox.docx");
+        std::fs::write(&path, zip_docx(document_xml.as_bytes(), None)).unwrap();
+        let paras = load_paragraphs(&path, 36.0).unwrap();
+        assert_eq!(paras.len(), 1, "文本框内段落不应成为独立正文段落：{paras:?}");
+        let text: String = paras[0].runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(text, "前文后文", "文本框文字不应混入正文，外层段落文字不应丢失");
     }
 
     #[test]

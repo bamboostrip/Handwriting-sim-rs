@@ -1119,12 +1119,14 @@ pub fn pdf_to_images_opt(
     std::fs::create_dir_all(out_dir)
         .map_err(|e| DocRenderError::Other(format!("创建缓存目录失败：{e}")))?;
     let prefix = page_prefix(pdf_path);
-    clear_stale_pages(out_dir, &prefix);
 
     let pdfium = open_pdfium()?;
     let document = pdfium
         .load_pdf_from_file(pdf_path, None)
         .map_err(|e| DocRenderError::Other(format!("打开 PDF 失败：{e}")))?;
+    // 清理旧页放在 PDF 成功打开之后：若先清理而新文档打开失败，
+    // 旧页已被删除而前端仍引用它们，后续预览会报底图缺失
+    clear_stale_pages(out_dir, &prefix);
     let scale = dpi as f32 / 72.0;
     let mut paths = Vec::new();
     let mut all_regions = Vec::new();
@@ -1209,11 +1211,20 @@ fn page_prefix(path: &Path) -> String {
 }
 
 /// 清理同前缀的旧页文件，避免旧文档页数混入新导入结果。
+/// 精确匹配 `{prefix}_{页号}.png`：仅按前缀匹配会误删"报告2_0.png"这类
+/// 同名开头但属于其他文档的页文件。
 fn clear_stale_pages(out_dir: &Path, prefix: &str) {
     if let Ok(rd) = std::fs::read_dir(out_dir) {
         for entry in rd.filter_map(|e| e.ok()) {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with(prefix) && name.ends_with(".png") {
+            let is_stale = name
+                .strip_suffix(".png")
+                .and_then(|base| base.strip_prefix(prefix))
+                .and_then(|rest| rest.strip_prefix('_'))
+                .is_some_and(|page_no| {
+                    !page_no.is_empty() && page_no.bytes().all(|b| b.is_ascii_digit())
+                });
+            if is_stale {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -1561,7 +1572,7 @@ mod tests {
         // 真实 10.5pt），原文恰好占满行宽的文本在区域内会整行折行放不下。
         // 存在全角字符时用其紧包围盒高度（≈字号）做上限校准，取较小值。
         let scale = 200.0 / 72.0;
-        let chars = vec![
+        let chars = [
             ExtractedChar {
                 ch: '张',
                 min_x: 0.0,
@@ -1597,7 +1608,7 @@ mod tests {
         );
 
         // 纯西文（无全角字符）：保持 scaled 值（西文紧包围盒远小于字号，不可校准）
-        let latin = vec![ExtractedChar {
+        let latin = [ExtractedChar {
             ch: 'H',
             min_x: 0.0,
             min_y: 0.0,
@@ -1613,7 +1624,7 @@ mod tests {
         );
 
         // 无字形信息（glyph=0，如旧数据/异常 PDF）：保持 scaled 值
-        let no_glyph = vec![ExtractedChar {
+        let no_glyph = [ExtractedChar {
             ch: '字',
             min_x: 0.0,
             min_y: 0.0,

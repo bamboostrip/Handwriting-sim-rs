@@ -72,6 +72,13 @@ fn cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// 渲染串行锁：render_preview 会清空并重写 cache 下的 preview-* 文件，
+/// 命令改为线程池执行后可能与并发的上一轮渲染互相删除对方刚写入的文件
+static RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// 文档导入串行锁：pdfium 绑定与 Word/PowerShell 转换同一时间只应有一个实例在跑，
+/// 保持此前主线程串行执行时的行为
+static IMPORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 文档底图缓存目录（doc_render 的逐页 PNG 输出）。
 fn doc_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -98,12 +105,14 @@ fn assets_root() -> PathBuf {
 }
 
 /// 渲染全部预览页并落盘 PNG。返回页面路径数组供 <img> 显示。
-#[tauri::command]
+/// async（线程池执行）：整页渲染耗时百毫秒级，同步执行会卡住 WebView 主线程。
+#[tauri::command(async)]
 fn render_preview(
     app: AppHandle,
     state: State<'_, AppState>,
     params: UiParams,
 ) -> Result<Vec<PngPage>, String> {
+    let _render_guard = RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let hp = checked_params(&params)?;
     let seed = state.seed.fetch_add(1, Ordering::SeqCst) + 1;
     let t0 = std::time::Instant::now();
@@ -151,7 +160,8 @@ fn render_preview(
 }
 
 /// 全分辨率批量导出 PNG（0.png、1.png…）。目录由前端对话框选定后传入。
-#[tauri::command]
+/// async（线程池执行）：导出耗时较长，同步执行会卡住 WebView 主线程。
+#[tauri::command(async)]
 fn export_files(
     state: State<'_, AppState>,
     params: UiParams,
@@ -167,7 +177,8 @@ fn export_files(
 }
 
 /// 导出 300 DPI 位图层 PDF。保存路径由前端对话框选定后传入。
-#[tauri::command]
+/// async（线程池执行）：导出耗时较长，同步执行会卡住 WebView 主线程。
+#[tauri::command(async)]
 fn export_pdf(state: State<'_, AppState>, params: UiParams, path: String) -> Result<(), String> {
     let hp = checked_params(&params)?;
     let seed = state.seed.load(Ordering::SeqCst);
@@ -175,7 +186,8 @@ fn export_pdf(state: State<'_, AppState>, params: UiParams, path: String) -> Res
 }
 
 /// 导入 docx：解析段落文本 + 对齐 + 首行缩进 + 富文本 Runs 与主字体名。
-#[tauri::command]
+/// async（线程池执行）：zip/XML 解析大文档时耗时明显，避免卡 UI。
+#[tauri::command(async)]
 fn import_docx(path: String, font_size: f32) -> Result<params::DocxImportOutput, String> {
     let paras = docx_io::load_paragraphs(Path::new(path.trim()), font_size)
         .map_err(|e| format!("导入 docx 失败：{e}"))?;
@@ -191,12 +203,15 @@ fn import_docx(path: String, font_size: f32) -> Result<params::DocxImportOutput,
 }
 
 /// 导入 PDF/DOCX 文档底图：后台栅格化为 200 DPI 逐页 PNG，可选是否自动识别提取 TextRegion 区域列表。
-#[tauri::command]
+/// async（线程池执行）：docx 需经 Word/PowerShell 转 PDF（最长可达数分钟），
+/// 同步执行会一直冻结整个窗口；串行锁保持同一时间只有一个导入在跑。
+#[tauri::command(async)]
 fn import_document(
     app: AppHandle,
     path: String,
     extract_regions: Option<bool>,
 ) -> Result<params::DocumentImportResult, String> {
+    let _import_guard = IMPORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let out_dir = doc_cache_dir(&app)?;
     let extract = extract_regions.unwrap_or(true);
     let (pages, regions) = doc_render::document_to_page_images_opt(
@@ -372,7 +387,9 @@ fn get_system_theme(app: AppHandle) -> String {
 }
 
 /// 获取系统已安装字体列表
-#[tauri::command]
+/// async（线程池执行）：遍历系统字体目录在大字体库机器上可达数百毫秒，
+/// 同步执行每次打开字体选择器都会冻结 UI。
+#[tauri::command(async)]
 fn list_system_fonts() -> Vec<system_fonts::SystemFontItem> {
     system_fonts::list_system_fonts()
 }

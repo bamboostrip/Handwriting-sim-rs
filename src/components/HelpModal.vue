@@ -2,7 +2,8 @@
 //! 使用教程与功能指南弹窗。
 //!
 //! 详细介绍软件的核心功能、操作流程、PDF/DOCX 文档底图背景高亮识别填空、
-//! 选框调整交互、多角色笔迹混排以及逼真度调节技巧。
+//! 选框调整交互、多角色笔迹混排、逼真度调节技巧，
+//! 以及预设系统、纯背景预览、深色模式等更多实用功能。
 
 import {
   NAlert,
@@ -143,7 +144,7 @@ import { closeHelpModal, store } from "../store";
                     <li><strong>唤出选框</strong>：在右侧「文字区域」列表中单击某一条目，或者<strong>直接在左侧预览图纸上单击该文字</strong>，即可在该区域上方显示带有 8 个白色手柄的蓝色选框。</li>
                     <li><strong>平移位置</strong>：鼠标放在选框内部拖动，可整体平移框选位置。</li>
                     <li><strong>八向缩放</strong>：鼠标移到选框四角或四边手柄上（光标显示为双向箭头），按住拖动可任意扩大或缩小范围。</li>
-                    <li><strong>取消选框（展示纯净预览）</strong>：<strong>在选框外侧的任意图纸空白处，或外侧灰色背景留白处单机鼠标</strong>（或按键盘 <code>Esc</code> 键），选框与手柄会立刻隐藏，恢复纯净清爽的原版预览。</li>
+                    <li><strong>取消选框（展示纯净预览）</strong>：<strong>在选框外侧的任意图纸空白处，或外侧灰色背景留白处单击鼠标</strong>（或按键盘 <code>Esc</code> 键），选框与手柄会立刻隐藏，恢复纯净清爽的原版预览。</li>
                     <li><strong>双击编辑属性</strong>：双击预览图上的区域或列表项，可打开详细对话框，修改文字、微调字号、单独覆盖字体或边距。</li>
                   </ul>
                 </div>
@@ -227,6 +228,54 @@ import { closeHelpModal, store } from "../store";
                       导出的 PNG 图片以及 PDF 均为高分辨率（PDF 内置 300 DPI 无损压缩图像层），直接在 A4 打印机上打印观感极其细腻逼真，无任何像素锯齿。
                     </li>
                   </ul>
+                </div>
+              </div>
+            </div>
+          </NScrollbar>
+        </NTabPane>
+        <!-- Tab 5: 更多实用功能 -->
+        <NTabPane name="more" tab="🧰 更多实用功能">
+          <NScrollbar style="max-height: 520px" trigger="none">
+            <div class="help-pane">
+              <div class="feature-section">
+                <div class="section-title">1. 预设系统：满意的参数一键复用</div>
+                <div class="guide-text">
+                  参数面板的<strong>「预设」</strong>下拉可切换内置参数组合；调出满意的排版与扰动参数后，点击<strong>「保存」</strong>导出为预设文件，日后点击<strong>「载入」</strong>即可一键恢复整套配置。<NTag size="small" type="info" style="margin-top: 6px">💡 笔迹角色配置随预设一并保存，与 Python 版格式互通</NTag>
+                </div>
+              </div>
+
+              <div class="feature-section">
+                <div class="section-title">2. 纯背景预览：先摆版式，再填内容</div>
+                <div class="guide-text">
+                  无需输入任何文字：选好背景信纸（或导入文档底图）后，左侧预览区会直接显示底图。先浏览整体版式、规划每处手写区域的位置，再逐页框选与录入文字，思路更顺畅。
+                </div>
+              </div>
+
+              <div class="feature-section">
+                <div class="section-title">3. 边距与边界提示</div>
+                <div class="guide-text">
+                  <ul class="guide-list">
+                    <li><strong>边距</strong>：面板「边距」区可分别设置上 / 下 / 左 / 右留白，控制正文在纸张中的落笔范围。</li>
+                    <li><strong>边界提示（仅预览）</strong>：勾选后预览图上会用彩色框直观标出实际渲染边界，导出成品不受影响——对齐横线纸张、排查文字溢出时特别好用。</li>
+                  </ul>
+                </div>
+              </div>
+
+              <div class="feature-section">
+                <div class="section-title">4. 个性化外观与舒适度</div>
+                <div class="guide-text">
+                  <ul class="guide-list">
+                    <li><strong>文字颜色</strong>：支持 <code>#RRGGBB</code> 自定义墨水色，碳黑、蓝黑、红笔随意换。</li>
+                    <li><strong>深色模式</strong>：顶部标题栏一键轮转 🖥️ 跟随系统 / ☀️ 浅色 / 🌙 深色主题（也可在「关于」中精准选择）。</li>
+                    <li><strong>预览底色</strong>：预览区下方可切换浅灰绿 / 深灰两档视口底色，长时间盯屏更护眼。</li>
+                  </ul>
+                </div>
+              </div>
+
+              <div class="feature-section">
+                <div class="section-title">5. 应用内自动更新</div>
+                <div class="guide-text">
+                  软件启动时自动检查新版本（可在「关于」中关闭）；也可随时在<strong>「关于」→「检查更新」</strong>手动检查。更新包下载后自动完成覆盖升级并重启，无需手动解压替换。
                 </div>
               </div>
             </div>

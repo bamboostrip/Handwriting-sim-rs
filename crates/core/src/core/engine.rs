@@ -85,11 +85,41 @@ fn scaled_params_for(params: &HandwritingParams, src_w: u32) -> HandwritingParam
         *f *= scale;
     }
     scaled.font_size = scaled.font_size.max(1.0);
+    // 角色逐项覆盖的空间参数（字号/字距/行距与 σ）必须随预览降采样等比缩放，
+    // 否则超大背景预览中角色文字按导出尺寸渲染进降采样坐标空间
+    // （预览字挤/溢出框选、与导出换行不一致）；旋转 σ 为弧度、
+    // miswrite_rate 为比例，量纲无关不缩放
+    for role in scaled.roles.iter_mut() {
+        for f in [
+            &mut role.font_size, &mut role.word_spacing, &mut role.line_spacing,
+            &mut role.font_size_sigma, &mut role.word_spacing_sigma,
+            &mut role.line_spacing_sigma, &mut role.perturb_x_sigma,
+            &mut role.perturb_y_sigma,
+        ] {
+            if let Some(v) = f.as_mut() {
+                *v *= scale;
+            }
+        }
+        if let Some(fs) = role.font_size.as_mut() {
+            *fs = fs.max(1.0);
+        }
+    }
+    // 富文本 run 的字号覆盖同样是空间参数（含区域段落内的 runs）
+    let scale_paragraph_runs = |paragraphs: &mut [Paragraph]| {
+        for p in paragraphs.iter_mut() {
+            for run in p.runs.iter_mut() {
+                if let Some(fs) = run.style.font_size.as_mut() {
+                    *fs = (*fs * scale).max(1.0);
+                }
+            }
+        }
+    };
     // 段落首行缩进同为空间参数，必须随预览降采样等比缩放，
     // 否则大背景预览中缩进相对字号偏大（如 2 字宽缩进显示为 4 字宽）
     for p in scaled.paragraphs.iter_mut() {
         p.first_line_indent *= scale;
     }
+    scale_paragraph_runs(&mut scaled.paragraphs);
     // 框选区域同样按比例缩放到预览坐标（对齐 Python 版 `_scale_params_for_preview`：
     // 区域矩形 × scale、区域字号 × scale；深拷贝不污染原始参数）
         for r in scaled.regions.iter_mut() {
@@ -103,6 +133,7 @@ fn scaled_params_for(params: &HandwritingParams, src_w: u32) -> HandwritingParam
             for p in r.paragraphs.iter_mut() {
                 p.first_line_indent *= scale;
             }
+            scale_paragraph_runs(&mut r.paragraphs);
             // 检测行距同为空间参数（PDF 像素），必须随预览降采样等比缩放，
             // 否则预览中区域行距相对字号偏大、与导出行数不一致
             if let Some(m) = r.line_spacing.as_mut() {

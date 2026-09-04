@@ -997,6 +997,14 @@ export async function importDocx(): Promise<void> {
       }
     }
 
+    // 保留未被本次导入覆盖的自定义角色：段落 runs 与既有 regions 仍可能引用它们，
+    // 整表替换会让这些引用静默失效（对齐 importDocument 的合并行为）
+    for (const existing of store.roles) {
+      if (existing.id >= 2 && !nextRoles.some((r) => r.id === existing.id)) {
+        nextRoles.push({ ...existing });
+      }
+    }
+    nextRoles.sort((a, b) => a.id - b.id);
     store.roles = nextRoles;
 
     focusPara(store.paragraphs[0].id, 0);
@@ -1105,7 +1113,28 @@ export function applyPreset(p: UiParams, msg?: string): void {
   store.endChars = p.endChars ?? "，。";
   store.startChars = p.startChars ?? "";
   if (p.roles && p.roles.length > 0) {
-    store.roles = p.roles.map((r) => ({ ...r }));
+    const nextRoles = p.roles.map((r) => ({ ...r }));
+    // 当前段落 runs / regions 引用、但预设里没有的角色需要保留，
+    // 否则这些引用会静默回退到默认角色
+    const referenced = new Set<number>();
+    for (const para of store.paragraphs) {
+      for (const run of para.runs ?? []) {
+        const rid = run.style?.roleId ?? 0;
+        if (rid >= 2) referenced.add(rid);
+      }
+    }
+    for (const region of store.regions) {
+      const rid = region.roleId ?? 0;
+      if (rid >= 2) referenced.add(rid);
+    }
+    for (const rid of referenced) {
+      if (!nextRoles.some((r) => r.id === rid)) {
+        const existing = store.roles.find((r) => r.id === rid);
+        if (existing) nextRoles.push({ ...existing });
+      }
+    }
+    nextRoles.sort((a, b) => a.id - b.id);
+    store.roles = nextRoles;
   }
   store.docPages = null;
   store.docStatus = "";

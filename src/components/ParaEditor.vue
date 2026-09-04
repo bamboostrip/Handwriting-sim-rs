@@ -68,6 +68,9 @@ function extractRunsFromNode(
   parentPrinted = false,
   parentHighlight?: string | null,
   parentFill?: string | null,
+  parentFontPath?: string | null,
+  parentFontFamily?: string | null,
+  parentFontSize?: number | null,
 ): UiTextRun[] {
   const result: UiTextRun[] = [];
 
@@ -81,6 +84,9 @@ function extractRunsFromNode(
           printed: parentPrinted || parentRoleId === 1,
           highlight: parentHighlight ?? null,
           fill: parentFill ?? null,
+          fontPath: parentFontPath ?? null,
+          fontFamily: parentFontFamily ?? null,
+          fontSize: parentFontSize ?? null,
         },
       });
     }
@@ -97,6 +103,9 @@ function extractRunsFromNode(
     let printed = parentPrinted;
     let highlight = parentHighlight ?? null;
     let fill = parentFill ?? null;
+    let fontPath = parentFontPath ?? null;
+    let fontFamily = parentFontFamily ?? null;
+    let fontSize = parentFontSize ?? null;
 
     if (el.dataset.role !== undefined) {
       const parsed = parseInt(el.dataset.role, 10);
@@ -127,9 +136,22 @@ function extractRunsFromNode(
     if (el.dataset.fill) {
       fill = el.dataset.fill;
     }
+    // 字体信息经 data 属性往返，避免编辑输入触发重建时丢失
+    if (el.dataset.fontPath) {
+      fontPath = el.dataset.fontPath;
+    }
+    if (el.dataset.fontFamily) {
+      fontFamily = el.dataset.fontFamily;
+    }
+    if (el.dataset.fontSize !== undefined && el.dataset.fontSize !== "") {
+      const parsed = parseFloat(el.dataset.fontSize);
+      if (!isNaN(parsed)) fontSize = parsed;
+    }
 
     for (const child of Array.from(el.childNodes)) {
-      result.push(...extractRunsFromNode(child, roleId, printed, highlight, fill));
+      result.push(
+        ...extractRunsFromNode(child, roleId, printed, highlight, fill, fontPath, fontFamily, fontSize),
+      );
     }
   }
 
@@ -150,13 +172,22 @@ function mergeAdjacentRuns(runs: UiTextRun[]): UiTextRun[] {
     const curHl = run.style?.highlight ?? null;
     const prevFill = prev?.style?.fill ?? null;
     const curFill = run.style?.fill ?? null;
+    const prevFontPath = prev?.style?.fontPath ?? null;
+    const curFontPath = run.style?.fontPath ?? null;
+    const prevFontFamily = prev?.style?.fontFamily ?? null;
+    const curFontFamily = run.style?.fontFamily ?? null;
+    const prevFontSize = prev?.style?.fontSize ?? null;
+    const curFontSize = run.style?.fontSize ?? null;
 
     if (
       prev &&
       prevRoleId === curRoleId &&
       prevPrinted === curPrinted &&
       prevHl === curHl &&
-      prevFill === curFill
+      prevFill === curFill &&
+      prevFontPath === curFontPath &&
+      prevFontFamily === curFontFamily &&
+      prevFontSize === curFontSize
     ) {
       prev.text += run.text;
     } else {
@@ -167,6 +198,9 @@ function mergeAdjacentRuns(runs: UiTextRun[]): UiTextRun[] {
           printed: curPrinted || curRoleId === 1,
           highlight: curHl,
           fill: curFill,
+          fontPath: curFontPath,
+          fontFamily: curFontFamily,
+          fontSize: curFontSize,
         },
       });
     }
@@ -193,14 +227,21 @@ function renderRowContent(row: HTMLElement, p: Para): void {
         targetRole?.highlight ??
         (effectiveRole === 2 ? "yellow" : effectiveRole === 3 ? "green" : effectiveRole === 4 ? "cyan" : null);
       const fill = run.style?.fill ?? targetRole?.fill ?? null;
+      // run 级字体覆盖必须写入 data 属性，否则编辑输入重建 runs 时会丢失
+      const fontPath = run.style?.fontPath ?? null;
+      const fontFamily = run.style?.fontFamily ?? null;
+      const fontSize = run.style?.fontSize ?? null;
 
-      if (effectiveRole > 0 || highlight || fill) {
+      if (effectiveRole > 0 || highlight || fill || fontPath || fontFamily || fontSize != null) {
         const span = document.createElement("span");
         const tagClass = getRoleTagClass(effectiveRole, highlight);
         span.className = `run-tag ${tagClass}`;
         span.dataset.role = String(effectiveRole);
         if (highlight) span.dataset.highlight = highlight;
         if (fill) span.dataset.fill = fill;
+        if (fontPath) span.dataset.fontPath = fontPath;
+        if (fontFamily) span.dataset.fontFamily = fontFamily;
+        if (fontSize != null) span.dataset.fontSize = String(fontSize);
         span.title = getRoleTagTitle(effectiveRole, highlight, fill);
 
         // Apply dynamic color style if custom highlight or role badge
@@ -268,7 +309,23 @@ function syncStoreToDom(force = false): void {
         const sHl = storeRuns[j].style?.highlight ?? null;
         const mFill = merged[j].style?.fill ?? null;
         const sFill = storeRuns[j].style?.fill ?? null;
-        if (mRole !== sRole || mPr !== sPr || mHl !== sHl || mFill !== sFill) return false;
+        const mFp = merged[j].style?.fontPath ?? null;
+        const sFp = storeRuns[j].style?.fontPath ?? null;
+        const mFf = merged[j].style?.fontFamily ?? null;
+        const sFf = storeRuns[j].style?.fontFamily ?? null;
+        const mFs = merged[j].style?.fontSize ?? null;
+        const sFs = storeRuns[j].style?.fontSize ?? null;
+        if (
+          mRole !== sRole ||
+          mPr !== sPr ||
+          mHl !== sHl ||
+          mFill !== sFill ||
+          mFp !== sFp ||
+          mFf !== sFf ||
+          mFs !== sFs
+        ) {
+          return false;
+        }
       }
       return true;
     });

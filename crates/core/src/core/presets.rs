@@ -10,7 +10,29 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-use crate::core::models::HandwritingParams;
+use crate::core::models::{HandwritingParams, HandwritingRole};
+
+/// 单个角色序列化为 JSON 对象（font_path 转便携相对路径）。
+fn role_to_preset_value(role: &HandwritingRole) -> Value {
+    let mut v = serde_json::to_value(role).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = v.as_object_mut() {
+        if let Some(p) = obj.get("font_path").and_then(Value::as_str) {
+            obj.insert("font_path".into(), json!(to_portable_path(p)));
+        }
+    }
+    v
+}
+
+/// 从 JSON 对象还原角色（font_path 解析回绝对路径；结构不合法时返回 None 跳过）。
+fn role_from_preset_value(v: &Value) -> Option<HandwritingRole> {
+    let mut v = v.clone();
+    if let Some(obj) = v.as_object_mut() {
+        if let Some(p) = obj.get("font_path").and_then(Value::as_str) {
+            obj.insert("font_path".into(), json!(from_portable_path(p)));
+        }
+    }
+    serde_json::from_value::<HandwritingRole>(v).ok()
+}
 
 /// 预设 JSON 错误。
 #[derive(Debug, thiserror::Error)]
@@ -84,6 +106,11 @@ fn to_preset_map(params: &HandwritingParams) -> Map<String, Value> {
     m.insert("end_chars".into(), json!(params.end_chars));
     m.insert("start_chars".into(), json!(params.start_chars));
     m.insert("color".into(), json!(format!("#{:02x}{:02x}{:02x}", params.fill[0], params.fill[1], params.fill[2])));
+    // 多角色配置（本版新增）：老版本预设无该字段时载入侧保持默认空表
+    m.insert(
+        "roles".into(),
+        Value::Array(params.roles.iter().map(role_to_preset_value).collect()),
+    );
     m
 }
 
@@ -146,6 +173,10 @@ fn from_preset_map(data: &Map<String, Value>) -> Result<HandwritingParams, Prese
     } else {
         let rgb = |key: &str| data.get(key).and_then(|v| v.as_i64()).map(|i| i as u8).unwrap_or(0);
         p.fill = [rgb("red"), rgb("green"), rgb("blue")];
+    }
+    // 多角色配置：数组内结构不合法的条目跳过而非整体失败；缺失/非数组保持默认
+    if let Some(Value::Array(arr)) = data.get("roles") {
+        p.roles = arr.iter().filter_map(role_from_preset_value).collect();
     }
     Ok(p)
 }
@@ -329,8 +360,57 @@ mod tests {
         };
         let map = to_preset_map(&p);
         assert_eq!(map.get("miswrite_strikeout_style").unwrap().as_str().unwrap(), "cross");
-        
+
         let loaded = from_preset_map(&map).unwrap();
         assert_eq!(loaded.miswrite_strikeout_style, StrikeoutStyle::Cross);
+    }
+
+    #[test]
+    fn preset_roundtrips_roles_and_tolerates_legacy() {
+        use crate::core::models::{HandwritingRole, StrikeoutStyle};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preset.json");
+        let mut p = sample_params();
+        p.roles = vec![
+            HandwritingRole {
+                id: 2,
+                name: "红笔".into(),
+                highlight: Some("pink".into()),
+                font_path: dir.path().join("hong.ttf").to_string_lossy().into_owned(),
+                printed: false,
+                font_size: Some(36.0),
+                fill: Some([200, 30, 30]),
+                word_spacing: Some(4.0),
+                miswrite_strikeout_style: Some(StrikeoutStyle::Cross),
+                ..HandwritingRole::default()
+            },
+            HandwritingRole {
+                id: 3,
+                name: "打印体 B".into(),
+                printed: true,
+                font_path: String::new(),
+                ..HandwritingRole::default()
+            },
+        ];
+        save(&p, &path).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.roles, p.roles, "预设应完整往返角色配置");
+
+        // 旧版预设（无 roles 字段）→ 空角色表
+        let old = dir.path().join("old.json");
+        std::fs::write(&old, r#"{"version": 2, "params": {"font_size": 30}}"#).unwrap();
+        let legacy = load(&old).unwrap();
+        assert!(legacy.roles.is_empty());
+
+        // roles 数组内混入非法条目：跳过而不整体失败
+        let bad = dir.path().join("bad.json");
+        std::fs::write(
+            &bad,
+            r#"{"version": 2, "params": {"roles": [123, {"id": 7, "name": "ok", "font_path": ""}]}}"#,
+        )
+        .unwrap();
+        let mixed = load(&bad).unwrap();
+        assert_eq!(mixed.roles.len(), 1);
+        assert_eq!(mixed.roles[0].name, "ok");
     }
 }
