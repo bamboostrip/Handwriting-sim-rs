@@ -826,6 +826,7 @@ fn build_updater_bat_content(
     downloaded_file: &Path,
     extract_dir: Option<&Path>,
     sleep_vbs: &Path,
+    launcher_vbs: Option<&Path>,
 ) -> String {
     let cleanup_downloaded = format!(
         "if exist \"{}\" del /f /q \"{}\" >nul\r\n",
@@ -850,30 +851,44 @@ fn build_updater_bat_content(
         sleep_vbs.display(),
         sleep_vbs.display()
     );
+    let cleanup_launcher = launcher_vbs
+        .map(|l| {
+            format!(
+                "if exist \"{}\" del /f /q \"{}\" >nul\r\n",
+                l.display(),
+                l.display()
+            )
+        })
+        .unwrap_or_default();
 
     format!(
         "@echo off\r\n\
         chcp 65001 >nul\r\n\
-        {sleep_cmd}\
         set /a tries=0\r\n\
         :copyloop\r\n\
+        {sleep_cmd}\
         copy /y \"{}\" \"{}\" >nul 2>&1 && goto copied\r\n\
         set /a tries+=1\r\n\
-        if %tries% geq 10 goto copyfailed\r\n\
-        {sleep_cmd}\
+        if %tries% geq 20 goto copyfailed\r\n\
         goto copyloop\r\n\
         :copyfailed\r\n\
+        {}\
+        {}\
         {cleanup_sleep}\
+        {cleanup_launcher}\
         (goto) 2>nul & del \"%~f0\"\r\n\
         exit /b 1\r\n\
         :copied\r\n\
         {}\
         {}\
         {cleanup_sleep}\
-        start \"\" /min \"{}\"\r\n\
+        {cleanup_launcher}\
+        start \"\" \"{}\"\r\n\
         (goto) 2>nul & del \"%~f0\"\r\n",
         new_exe.display(),
         current_exe.display(),
+        cleanup_downloaded,
+        cleanup_extract,
         cleanup_downloaded,
         cleanup_extract,
         current_exe.display(),
@@ -906,31 +921,34 @@ pub fn apply_portable_update_and_restart(new_file_path: &str) -> Result<(), Stri
     let temp_dir = std::env::temp_dir();
     let pid = std::process::id();
     let bat_file = temp_dir.join(format!("handwritesim_updater_{pid}.bat"));
-    // 无窗口延时脚本（wscript 为 windows 子系统，不弹任何终端窗口；
-    // 详见 build_updater_bat_content 的无窗口约束说明）
+    // 无窗口延时脚本（wscript 为 windows 子系统，不弹任何终端窗口）
     let sleep_vbs = temp_dir.join(format!("handwritesim_sleep_{pid}.vbs"));
-    std::fs::write(&sleep_vbs, "WScript.Sleep 1000\r\n")
+    std::fs::write(&sleep_vbs, "WScript.Sleep 500\r\n")
         .map_err(|e| format!("生成更新延时脚本失败: {e}"))?;
 
+    let launcher_vbs = temp_dir.join(format!("handwritesim_launcher_{pid}.vbs"));
     let bat_content = build_updater_bat_content(
         new_path,
         &current_exe,
         downloaded_path,
         extract_dir.as_deref(),
         &sleep_vbs,
+        Some(&launcher_vbs),
     );
 
     std::fs::write(&bat_file, bat_content).map_err(|e| format!("生成更新批处理脚本失败: {e}"))?;
 
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        const DETACHED_PROCESS: u32 = 0x00000008;
+        let launcher_code = format!(
+            "Set WshShell = CreateObject(\"WScript.Shell\")\r\nWshShell.Run \"cmd.exe /c \"\"\"\"{}\"\"\"\"\", 0, False\r\n",
+            bat_file.display()
+        );
+        std::fs::write(&launcher_vbs, launcher_code)
+            .map_err(|e| format!("生成更新启动脚本失败: {e}"))?;
 
-        std::process::Command::new("cmd.exe")
-            .args(["/c", &bat_file.to_string_lossy()])
-            .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        std::process::Command::new("wscript.exe")
+            .args(["//B", "//Nologo", &launcher_vbs.to_string_lossy()])
             .spawn()
             .map_err(|e| format!("启动更新批处理失败: {e}"))?;
     }
@@ -1283,6 +1301,7 @@ mod tests {
             &tmp.join("update-handwrite-sim.exe"),
             None,
             &tmp.join("handwritesim_sleep_1234.vbs"),
+            None,
         );
         assert!(
             !content.contains("ping "),
@@ -1331,7 +1350,7 @@ mod tests {
         std::fs::write(&sleep_vbs, "WScript.Sleep 1000\r\n").unwrap();
         let bat_file = tmp.join("updater.bat");
         let content =
-            build_updater_bat_content(&new_exe, &current_exe, &new_exe, None, &sleep_vbs);
+            build_updater_bat_content(&new_exe, &current_exe, &new_exe, None, &sleep_vbs, None);
         std::fs::write(&bat_file, content).unwrap();
 
         let status = std::process::Command::new("cmd.exe")
