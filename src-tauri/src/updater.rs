@@ -883,7 +883,7 @@ fn build_updater_bat_content(
         {}\
         {cleanup_sleep}\
         {cleanup_launcher}\
-        start \"\" \"{}\"\r\n\
+        if not defined HANDWRITESIM_NO_RESTART start \"\" \"{}\"\r\n\
         (goto) 2>nul & del \"%~f0\"\r\n",
         new_exe.display(),
         current_exe.display(),
@@ -941,7 +941,7 @@ pub fn apply_portable_update_and_restart(new_file_path: &str) -> Result<(), Stri
     #[cfg(target_os = "windows")]
     {
         let launcher_code = format!(
-            "Set WshShell = CreateObject(\"WScript.Shell\")\r\nWshShell.Run \"cmd.exe /c \"\"\"\"{}\"\"\"\"\", 0, False\r\n",
+            "Set WshShell = CreateObject(\"WScript.Shell\")\r\nWshShell.Run \"cmd.exe /c \" & Chr(34) & \"{}\" & Chr(34), 0, False\r\n",
             bat_file.display()
         );
         std::fs::write(&launcher_vbs, launcher_code)
@@ -1355,6 +1355,7 @@ mod tests {
 
         let status = std::process::Command::new("cmd.exe")
             .args(["/c", &bat_file.to_string_lossy()])
+            .env("HANDWRITESIM_NO_RESTART", "1")
             .creation_flags(CREATE_NO_WINDOW)
             .status()
             .expect("应能执行更新批处理");
