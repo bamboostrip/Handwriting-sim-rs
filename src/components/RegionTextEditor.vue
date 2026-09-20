@@ -52,6 +52,8 @@ function initRows(list: UiParagraph[]): RegionParaRow[] {
 const rows = ref<RegionParaRow[]>(initRows(props.paragraphs));
 const editorRef = ref<HTMLDivElement | null>(null);
 let isInternalSync = false;
+/** 中文输入法组合中标记：组合期间不做 DOM↔store 同步， compositionend 后统一同步 */
+let isComposing = false;
 
 const isEmpty = computed(
   () => rows.value.length === 1 && rows.value[0]?.text.trim() === "",
@@ -191,10 +193,22 @@ function updateCurrentRowIndexFromSelection(): void {
 }
 
 function onInput(): void {
+  if (isComposing) return;
+  syncDomToStore();
+}
+
+function onCompositionStart(): void {
+  isComposing = true;
+}
+
+function onCompositionEnd(): void {
+  isComposing = false;
   syncDomToStore();
 }
 
 function onKeydown(e: KeyboardEvent): void {
+  // 输入法组合中（拼音选词等）的回车是确认候选，必须放行，否则会打断组字甚至卡死 WebView 输入
+  if (e.isComposing || isComposing) return;
   if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
     e.preventDefault();
     const sel = window.getSelection();
@@ -359,22 +373,28 @@ watch(
 </script>
 
 <template>
-  <div
-    ref="editorRef"
-    class="rte"
-    :class="{ 'is-empty': isEmpty }"
-    contenteditable="true"
-    spellcheck="false"
-    @input="onInput()"
-    @keydown="onKeydown($event)"
-    @paste="onPaste($event)"
-  >
+  <div class="rte-wrap">
+    <div
+      ref="editorRef"
+      class="rte"
+      contenteditable="true"
+      spellcheck="false"
+      @input="onInput()"
+      @keydown="onKeydown($event)"
+      @paste="onPaste($event)"
+      @compositionstart="onCompositionStart()"
+      @compositionend="onCompositionEnd()"
+    ></div>
     <div v-if="isEmpty && placeholder" class="rte-placeholder">{{ placeholder }}</div>
   </div>
 </template>
 
 <style scoped>
 /* 观感对齐主界面 .para-editor / .para-row */
+.rte-wrap {
+  position: relative;
+}
+
 .rte {
   position: relative;
   min-height: 72px;
