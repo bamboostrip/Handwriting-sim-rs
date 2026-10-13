@@ -173,15 +173,29 @@ impl PageStreamMatcher {
     }
 
     /// 匹配单元格文本：命中比例 >= CELL_MATCH_RATIO 判定定位成功。
+    /// 定位成功（含部分命中）时推进 cursor 到最后命中字符之后——
+    /// 命中的页面字符已被本格占用，相邻格不得重叠匹配。
     fn match_cell(&mut self, target: &[char]) -> Option<CellMatch> {
         if target.is_empty() {
             return None;
         }
         let hit = self.try_match(target, CELL_WINDOW, false);
         if hit.len() as f32 / target.len() as f32 >= CELL_MATCH_RATIO {
+            if let Some(&last) = hit.last() {
+                self.advance_to_after(last);
+            }
             Some(CellMatch { char_idxs: hit })
         } else {
             None
+        }
+    }
+
+    /// 将 cursor 推进到原始下标 char_idx 的命中字符之后。
+    /// 部分命中时 try_match 已回滚 cursor 到匹配起点，命中位置必在其前方；
+    /// 整段命中时 cursor 已越过该字符（原始下标唯一），此处为空操作。
+    fn advance_to_after(&mut self, char_idx: usize) {
+        if let Some(pos) = self.seq[self.cursor..].iter().position(|&(i, _)| i == char_idx) {
+            self.cursor += pos + 1;
         }
     }
 }
@@ -330,6 +344,27 @@ mod tests {
         assert_eq!(m.row_matches[0][1].as_ref().unwrap().char_idxs, vec![2, 3]);
         assert!(m.row_matches[1][0].is_none()); // 续行格跳过（否则会误中 4、5）
         assert_eq!(m.row_matches[1][1].as_ref().unwrap().char_idxs, vec![6, 7]);
+    }
+
+    #[test]
+    fn partially_matched_cell_advances_cursor_preventing_overlap() {
+        // A 格 75% 命中（“总”不在页面任何位置）：若 cursor 不随部分命中前进，
+        // B 格“汇率”的贪心扫描会误中 A 已占用的“汇”（下标 2），命中下标重叠
+        let stream = table_stream_xml(
+            r#"<w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>金额汇总</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>汇率</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        );
+        let views = build_table_views(&stream);
+        let chars = vec![
+            ch('金', 10.0, 10.0), ch('额', 22.0, 10.0), ch('汇', 34.0, 10.0), // A：3/4 = 75%
+            ch('汇', 110.0, 50.0), ch('率', 122.0, 50.0),                     // B
+        ];
+        let matches = locate_tables_on_page(&stream, &views, &chars);
+        let m = &matches[0];
+        let a = m.row_matches[0][0].as_ref().unwrap();
+        assert_eq!(a.char_idxs, vec![0, 1, 2]); // 部分命中也算定位
+        let b = m.row_matches[0][1].as_ref().unwrap();
+        assert_eq!(b.char_idxs, vec![3, 4]); // 不复用 A 的下标 2
+        assert!(a.char_idxs.iter().all(|i| !b.char_idxs.contains(i)), "相邻格命中下标不得重叠");
     }
 
     #[test]
