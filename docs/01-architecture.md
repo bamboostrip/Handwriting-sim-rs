@@ -48,6 +48,16 @@
 - 扰动：flood fill 连通域 + 单遍像素变换（后续可加 `rayon` 按页并行导出）
 - PNG 编码：`image` crate（zlib）；多页导出为 I/O 瓶颈，后续并行化
 
+## 文档底图导入（doc_render）
+
+PDF / DOCX 导入共用一条栅格化管线：DOCX 先经 Word COM（LibreOffice 兜底）转
+PDF，再由 pdfium 逐页渲染为高清底图。识别阶段在纯底图模式外，还会从 PDF 字符流
+提取文字位置与字号、检测高亮色块与 `{{...}}` 标签，擦除后生成可编辑的
+TextRegion（字号按原文字符紧包围盒校准）。docx 额外解析表格结构：表格线保留在
+底图，每个单元格生成带 `table_index` 的 TextRegion（与高亮/标签排重，支持合并
+单元格与空格行列带推断；单元格高亮映射角色、`{{打印:...}}` 格生成印刷体区域、
+灰高亮格保持印刷底图）。PDF 直接导入不做表格识别。
+
 ## 与 Python 版模块对照
 
 | Rust | Python（handwritesim/core） |
