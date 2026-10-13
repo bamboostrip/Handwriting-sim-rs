@@ -961,14 +961,13 @@ fn extract_pdf_page_tags(
         };
         let font_size = resolve_font_size_px(&tag_chars, avg_fs, scale);
 
-        // 表格单元格内的标签由单元格区域接管：跳过（不擦除、不生成区域）
-        let cx = x + w / 2;
-        let cy = y + h / 2;
-        if exclude_rects.iter().any(|r| {
-            cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h
-        }) {
-            continue;
-        }
+        // 表格单元格内的标签由单元格区域接管：仍擦除标签框（单元格路径只擦除
+        // 命中的正文汉字，`{{`/`}}`/前缀等模板字符会残留在底图上），但不生成
+        // 独立区域，避免与单元格区域重复。判定用重叠而非中心包含：标签框比
+        // 单元格正文包围盒更宽（含前缀字符），中心可能落在单元格矩形之外。
+        let overlaps_cell = exclude_rects.iter().any(|r| {
+            x < r.x + r.w && x + w > r.x && y < r.y + r.h && y + h > r.y
+        });
 
         // 清理原图上的 {{...}} 标签区域为纯白色（向外扩展 2 像素以消除文字抗锯齿）
         let pad = 2i32;
@@ -981,6 +980,10 @@ fn extract_pdf_page_tags(
             for ex in erase_x0..erase_x1 {
                 img.put_pixel(ex, ey, image::Rgb([255, 255, 255]));
             }
+        }
+
+        if overlaps_cell {
+            continue;
         }
 
         let clean_text = strip_tag_syntax(&m.inner_text);
@@ -1679,6 +1682,10 @@ fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<bool, String
 
 /// 生成调用 Word COM 另存为 PDF 的 PowerShell 脚本（17 = wdFormatPDF）。
 /// 对齐 Python 版 `_word_com_script`。
+/// 退出码显式化：COM 拉起的 Word 在最后一个文档关闭后可能自行退出，
+/// 此时 Quit() 抛 RPC 0x800706BE；且 powershell -Command 下即使异常被
+/// try/catch 捕获，退出码仍会被置 1，覆盖成功的转换。故收尾以 PDF 文件
+/// 是否存在显式决定退出码（调用方同样校验退出码 + 文件存在）。
 #[cfg(target_os = "windows")]
 fn word_com_script(docx_path: &Path, pdf_path: &Path) -> String {
     let src = docx_path.display().to_string().replace('\'', "''");
@@ -1692,8 +1699,9 @@ fn word_com_script(docx_path: &Path, pdf_path: &Path) -> String {
          \x20 $doc.SaveAs([ref]'{dst}', [ref]17)\n\
          \x20 $doc.Close($false)\n\
          }} finally {{\n\
-         \x20 $word.Quit()\n\
-         }}\n"
+         \x20 try {{ $word.Quit() }} catch {{ }}\n\
+         }}\n\
+         if (Test-Path '{dst}') {{ exit 0 }} else {{ exit 1 }}\n"
     )
 }
 
@@ -1710,6 +1718,22 @@ mod tests {
     #[test]
     fn page_prefix_sanitized() {
         assert_eq!(page_prefix(Path::new("我的 文档:v2.pdf")), "我的_文档_v2");
+    }
+
+    /// Quit 必须容错且退出码显式化：COM 拉起的 Word 在最后一个文档关闭后可能
+    /// 自行退出，Quit() 抛 RPC 0x800706BE；而 powershell -Command 下即使异常被
+    /// try/catch 捕获，退出码仍会变 1，覆盖成功的转换，故脚本须以 PDF 存在性
+    /// 显式决定退出码。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn word_com_script_quit_is_tolerant_and_exit_is_explicit() {
+        let script = word_com_script(Path::new("a'b.docx"), Path::new("c'd.pdf"));
+        assert!(script.contains("try { $word.Quit() } catch { }"), "脚本：{script}");
+        assert!(
+            script.contains("if (Test-Path 'c''d.pdf') { exit 0 } else { exit 1 }"),
+            "脚本：{script}"
+        );
+        assert!(script.contains("a''b.docx") && script.contains("c''d.pdf"), "脚本：{script}");
     }
 
     #[test]
@@ -2239,7 +2263,7 @@ mod tests {
 
     #[test]
     fn extract_pdf_page_tags_excludes_table_cells() {
-        // 字符流中有一个 {{姓名}} 标签；排除矩形覆盖它 → 不生成区域、不擦除
+        // 字符流中有一个 {{姓名}} 标签；排除矩形覆盖它 → 不生成区域，但仍擦除标签框
         let chars = vec![
             ExtractedChar { ch: '{', min_x: 100.0, min_y: 50.0, max_x: 106.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
             ExtractedChar { ch: '{', min_x: 106.0, min_y: 50.0, max_x: 112.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
@@ -2249,14 +2273,30 @@ mod tests {
             ExtractedChar { ch: '}', min_x: 138.0, min_y: 50.0, max_x: 144.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
         ];
         let mut img = image::RgbImage::from_pixel(400, 300, image::Rgb([255, 255, 255]));
+        // 预涂黑标签区域，验证被单元格矩形覆盖时仍会擦除（模板字符不能残留底图）
+        for y in 48..72 {
+            for x in 98..146 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
         let exclude = [crate::core::docx_tables::RectPx { x: 90, y: 40, w: 70, h: 40 }];
         let regions = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img, &exclude);
         assert!(regions.is_empty());
-        // 不排除时能识别到（对照组）
+        assert_eq!(img.get_pixel(120, 60), &image::Rgb([255, 255, 255]), "标签框应被擦除");
+
+        // 重叠但中心不在矩形内（标签框比单元格正文包围盒宽，如 {{打印:xxx}} 格）：
+        // 同样接管——擦除且不生成区域
         let mut img2 = image::RgbImage::from_pixel(400, 300, image::Rgb([255, 255, 255]));
-        let regions2 = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img2, &[]);
-        assert_eq!(regions2.len(), 1);
-        assert_eq!(regions2[0].text, "姓名");
+        let overlap_only = [crate::core::docx_tables::RectPx { x: 135, y: 40, w: 70, h: 40 }];
+        let regions_overlap =
+            extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img2, &overlap_only);
+        assert!(regions_overlap.is_empty(), "重叠即接管，不应生成重复区域");
+
+        // 不排除时能识别到（对照组）
+        let mut img3 = image::RgbImage::from_pixel(400, 300, image::Rgb([255, 255, 255]));
+        let regions3 = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img3, &[]);
+        assert_eq!(regions3.len(), 1);
+        assert_eq!(regions3[0].text, "姓名");
     }
 
     #[test]
