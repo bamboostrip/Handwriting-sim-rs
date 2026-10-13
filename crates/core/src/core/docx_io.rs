@@ -683,15 +683,15 @@ fn parse_body_stream(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<Body
                         cur_cell = Some(ParsedCell { col_start: row_col_cursor, ..ParsedCell::default() });
                         cell_inner_tbl = 0;
                     }
-                    b"tcPr" if cur_cell.is_some() => in_tc_pr = true,
-                    b"gridSpan" if in_tc_pr => {
+                    b"tcPr" if tbl_depth == 1 && cur_cell.is_some() => in_tc_pr = true,
+                    b"gridSpan" if tbl_depth == 1 && in_tc_pr => {
                         if let Some(v) = attr_val(&e, "val").and_then(|v| v.parse::<usize>().ok()) {
                             if let Some(c) = cur_cell.as_mut() {
                                 c.grid_span = v.max(1);
                             }
                         }
                     }
-                    b"vMerge" if in_tc_pr => {
+                    b"vMerge" if tbl_depth == 1 && in_tc_pr => {
                         let restart = attr_val(&e, "val").is_some_and(|v| v == "restart");
                         if let Some(c) = cur_cell.as_mut() {
                             c.v_merge = if restart { CellVMerge::Restart } else { CellVMerge::Continue };
@@ -740,14 +740,20 @@ fn parse_body_stream(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<Body
                 match local_name(e.name().as_ref()) {
                     b"tab" if in_body_para || in_cell_para => cur_run_text.push('\t'),
                     b"br" | b"cr" if in_body_para || in_cell_para => cur_run_text.push('\n'),
-                    b"gridSpan" if in_tc_pr => {
+                    // 实际文档中 w:gridCol 为自闭合（无子元素），需在 Empty 事件计数
+                    b"gridCol" if in_tbl_grid => {
+                        if let Some(t) = cur_table.as_mut() {
+                            t.grid_cols += 1;
+                        }
+                    }
+                    b"gridSpan" if tbl_depth == 1 && in_tc_pr => {
                         if let Some(v) = attr_val(&e, "val").and_then(|v| v.parse::<usize>().ok()) {
                             if let Some(c) = cur_cell.as_mut() {
                                 c.grid_span = v.max(1);
                             }
                         }
                     }
-                    b"vMerge" if in_tc_pr => {
+                    b"vMerge" if tbl_depth == 1 && in_tc_pr => {
                         let restart = attr_val(&e, "val").is_some_and(|v| v == "restart");
                         if let Some(c) = cur_cell.as_mut() {
                             c.v_merge = if restart { CellVMerge::Restart } else { CellVMerge::Continue };
@@ -1685,5 +1691,33 @@ mod tests {
         let table = match &stream[0] { BodyElement::Table(t) => t, _ => panic!() };
         let text: String = table.rows[0].cells[0].runs.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(text, "外层");
+    }
+
+    #[test]
+    fn nested_table_cell_props_do_not_leak_into_outer_cell() {
+        // 外层格内嵌套表格：嵌套格 tcPr 的 gridSpan/vMerge 不应覆盖外层格属性，
+        // 否则 row_col_cursor 与后续格 col_start 会被污染
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val="3"/><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>内层</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:tc><w:tc><w:p><w:r><w:t>次格</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut registry = StyleRegistry::new();
+        let stream = parse_body_stream(document_xml, &mut registry).unwrap();
+        let table = match &stream[0] { BodyElement::Table(t) => t, _ => panic!() };
+        let c00 = &table.rows[0].cells[0];
+        assert_eq!(c00.grid_span, 1, "嵌套表格的 gridSpan 不应泄入外层格");
+        assert_eq!(c00.v_merge, CellVMerge::None, "嵌套表格的 vMerge 不应泄入外层格");
+        let c01 = &table.rows[0].cells[1];
+        assert_eq!(c01.col_start, 1, "外层格跨列未被污染时，同行后续格列号应正确");
+    }
+
+    #[test]
+    fn self_closing_grid_cols_counted_from_tbl_grid() {
+        // 实际文档（Word/WPS/LibreOffice）中 w:gridCol 为自闭合（Empty 事件）：
+        // tblGrid 列数应直接计数，而非走首行 gridSpan 总和回退
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblGrid><w:gridCol w:w="850"/><w:gridCol w:w="850"/><w:gridCol w:w="850"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>仅一格</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut registry = StyleRegistry::new();
+        let stream = parse_body_stream(document_xml, &mut registry).unwrap();
+        let table = match &stream[0] { BodyElement::Table(t) => t, _ => panic!() };
+        assert_eq!(table.grid_cols, 3, "自闭合 gridCol 应计入 tblGrid 列数（首行回退只会得 1）");
+        assert_eq!(table.rows[0].cells.len(), 1);
+        assert_eq!(table.rows[0].cells[0].grid_span, 1);
     }
 }
