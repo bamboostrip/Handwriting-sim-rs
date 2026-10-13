@@ -1418,7 +1418,8 @@ export function regionHasOverrides(r: Region): boolean {
   );
 }
 
-/** 区域列表摘要（对齐 models.rs TextRegion::label；自定义过追加 ⚙ 标记）。 */
+/** 区域列表摘要（对齐 models.rs TextRegion::label；自定义过追加 ⚙ 标记，
+ *  表格单元格区域前缀 表N· 标注归属）。 */
 export function regionLabel(r: Region, index: number): string {
   let style = r.printed ? "🖨️ 打印" : "✍️ 手写";
   if (r.roleId && r.roleId >= 2) {
@@ -1434,7 +1435,8 @@ export function regionLabel(r: Region, index: number): string {
   }
   const page = r.page > 1 ? ` 第${r.page}页` : "";
   const custom = regionHasOverrides(r) ? " ⚙" : "";
-  return `${index}. ${style}${page} ${[...r.text].length}字 (${r.x},${r.y} ${r.w}×${r.h})${custom}`;
+  const tablePrefix = r.tableIndex ? `表${r.tableIndex}·` : "";
+  return `${tablePrefix}${index}. ${style}${page} ${[...r.text].length}字 (${r.x},${r.y} ${r.w}×${r.h})${custom}`;
 }
 
 /** 把矩形钳制到背景范围并保证最小尺寸（对齐原 clamp_rect）。
@@ -1572,6 +1574,20 @@ export async function chooseRegionFont(): Promise<void> {
   if (!d) return;
   const p = await dialogs.pickFont();
   if (typeof p === "string") d.fontPath = p;
+}
+
+/** 将字体与字号批量应用到某张表格的全部单元格区域。 */
+export function applyFontToTable(tableIndex: number, fontPath: string, fontSize: number): void {
+  let n = 0;
+  for (const r of store.regions) {
+    if (r.tableIndex === tableIndex) {
+      r.fontPath = fontPath;
+      r.fontSize = fontSize;
+      n++;
+    }
+  }
+  store.status = `已将字体应用到表格 ${tableIndex} 的 ${n} 个单元格`;
+  scheduleRender();
 }
 
 /** 导入 docx 到对话框草稿：保留各段独立对齐与缩进。 */

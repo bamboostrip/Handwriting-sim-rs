@@ -26,6 +26,7 @@ import { api } from "../api";
 import FontPicker from "./FontPicker.vue";
 import RegionTextEditor from "./RegionTextEditor.vue";
 import {
+  applyFontToTable,
   cancelRegionDialog,
   cleanText,
   confirmRegionDialog,
@@ -208,6 +209,15 @@ const strikeoutOptions = [
   { label: "叉号", value: 3 },
 ];
 
+/** 将当前草稿的字体与字号批量应用到同一张表格的全部单元格区域（不关闭对话框）。
+ *  仅表格单元格区域（tableIndex 非空）可见入口；字号取整对齐确定时的写回行为。 */
+function onApplyFontToTable(): void {
+  const d = draft.value;
+  if (!d || d.tableIndex == null) return;
+  applyFontToTable(d.tableIndex, d.fontPath.trim(), Math.round(d.fontSize ?? 0));
+  message.success(`已将字体应用到表格 ${d.tableIndex} 的全部单元格`);
+}
+
 /** 确定前校验打印字体文件存在（对齐 Python 版字体检查，失败保持对话框打开） */
 async function onConfirm(): Promise<void> {
   if (draft.value) {
@@ -319,6 +329,12 @@ async function onConfirm(): Promise<void> {
             placeholder="留空使用主字体"
             style="flex: 1"
           />
+          <NTooltip v-if="draft.tableIndex" trigger="hover" placement="top">
+            <template #trigger>
+              <NButton size="small" @click="onApplyFontToTable()">此字体应用到整张表格</NButton>
+            </template>
+            将该字体与字号批量应用到表格 {{ draft.tableIndex }} 的全部单元格区域（不影响文字内容与其他参数）
+          </NTooltip>
         </div>
       </div>
 
