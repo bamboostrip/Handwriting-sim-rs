@@ -248,6 +248,131 @@ pub fn locate_tables_on_page(
     result
 }
 
+/// 像素矩形（背景图原始像素坐标）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RectPx {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// 命中字符包围盒（每边外扩 pad 像素）。
+fn union_char_bbox(chars: &[ExtractedChar], idxs: &[usize], pad: i32) -> RectPx {
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for &i in idxs {
+        let c = &chars[i];
+        min_x = min_x.min(c.min_x);
+        min_y = min_y.min(c.min_y);
+        max_x = max_x.max(c.max_x);
+        max_y = max_y.max(c.max_y);
+    }
+    RectPx {
+        x: (min_x.floor() as i32 - pad).max(0),
+        y: (min_y.floor() as i32 - pad).max(0),
+        w: (max_x.ceil() - min_x.floor()) as i32 + pad * 2,
+        h: (max_y.ceil() - min_y.floor()) as i32 + pad * 2,
+    }
+}
+
+fn mean_of(vals: &[f32]) -> Option<f32> {
+    if vals.is_empty() { None } else { Some(vals.iter().sum::<f32>() / vals.len() as f32) }
+}
+
+/// 表格最大列数（各行列终点的最大值）。
+fn view_max_cols(view: &TableView) -> usize {
+    view.rows
+        .iter()
+        .map(|r| r.cells.iter().map(|c| c.col_start + c.col_span).max().unwrap_or(0))
+        .max()
+        .unwrap_or(0)
+}
+
+/// 推算整表所有单元格矩形（行主序扁平输出，与 view.rows 迭代顺序对齐）。
+/// 已定位格 = 命中字符 bbox（pad=2）；未命中格 = 行/列带交集内缩 3px；
+/// vMerge 续行格与无法推算的格为 None。
+pub fn infer_cell_rects(
+    view: &TableView,
+    m: &TablePageMatch,
+    chars: &[ExtractedChar],
+) -> Vec<Option<RectPx>> {
+    // 每格 bbox（未定位为 None）
+    let bboxes: Vec<Vec<Option<RectPx>>> = view
+        .rows
+        .iter()
+        .zip(m.row_matches.iter())
+        .map(|(row, row_m)| {
+            row.cells
+                .iter()
+                .zip(row_m.iter())
+                .map(|(_, cell_m)| {
+                    cell_m.as_ref().map(|cm| union_char_bbox(chars, &cm.char_idxs, 2))
+                })
+                .collect()
+        })
+        .collect();
+
+    // 列带：由已定位的单列格（col_span==1 且非续行）收集左右边缘
+    let mut col_left: Vec<Vec<f32>> = vec![Vec::new(); view_max_cols(view)];
+    let mut col_right: Vec<Vec<f32>> = vec![Vec::new(); view_max_cols(view)];
+    for (r_idx, row) in view.rows.iter().enumerate() {
+        for (c_idx, cell) in row.cells.iter().enumerate() {
+            if let Some(rect) = bboxes[r_idx][c_idx] {
+                if cell.col_span == 1 && cell.v_merge != CellVMerge::Continue {
+                    col_left[cell.col_start].push(rect.x as f32);
+                    col_right[cell.col_start].push((rect.x + rect.w) as f32);
+                }
+            }
+        }
+    }
+    // 行带：由该行任意已定位格收集上下边缘
+    let mut row_top: Vec<Vec<f32>> = vec![Vec::new(); view.rows.len()];
+    let mut row_bottom: Vec<Vec<f32>> = vec![Vec::new(); view.rows.len()];
+    for (r_idx, row) in view.rows.iter().enumerate() {
+        for (c_idx, _) in row.cells.iter().enumerate() {
+            if let Some(rect) = bboxes[r_idx][c_idx] {
+                row_top[r_idx].push(rect.y as f32);
+                row_bottom[r_idx].push((rect.y + rect.h) as f32);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for (r_idx, row) in view.rows.iter().enumerate() {
+        for (c_idx, cell) in row.cells.iter().enumerate() {
+            if cell.v_merge == CellVMerge::Continue {
+                out.push(None);
+                continue;
+            }
+            if let Some(rect) = bboxes[r_idx][c_idx] {
+                out.push(Some(rect));
+                continue;
+            }
+            // 未定位格：行带 × 列带交集（跨列取首末列带），内缩 3px
+            let x0 = mean_of(&col_left[cell.col_start]);
+            let last_col = (cell.col_start + cell.col_span - 1).min(col_right.len().saturating_sub(1));
+            let x1 = mean_of(&col_right[last_col]);
+            let y0 = mean_of(&row_top[r_idx]);
+            let y1 = mean_of(&row_bottom[r_idx]);
+            match (x0, x1, y0, y1) {
+                (Some(x0), Some(x1), Some(y0), Some(y1)) if x1 > x0 && y1 > y0 => {
+                    out.push(Some(RectPx {
+                        x: (x0 + 3.0) as i32,
+                        y: (y0 + 3.0) as i32,
+                        w: (x1 - x0 - 6.0) as i32,
+                        h: (y1 - y0 - 6.0) as i32,
+                    }));
+                }
+                _ => out.push(None),
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,6 +490,51 @@ mod tests {
         let b = m.row_matches[0][1].as_ref().unwrap();
         assert_eq!(b.char_idxs, vec![3, 4]); // 不复用 A 的下标 2
         assert!(a.char_idxs.iter().all(|i| !b.char_idxs.contains(i)), "相邻格命中下标不得重叠");
+    }
+
+    #[test]
+    fn infers_missing_cell_rect_from_bands() {
+        // 2×2 表：三个格有文字可定位，右下格为空 → 由行列带推算
+        let stream = table_stream_xml(
+            r#"<w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid>
+               <w:tr><w:tc><w:p><w:r><w:t>甲</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>乙</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t>丙</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t> </w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        );
+        let views = build_table_views(&stream);
+        let chars = vec![
+            ch('甲', 100.0, 100.0), ch('乙', 300.0, 100.0),
+            ch('丙', 100.0, 200.0),
+        ];
+        let matches = locate_tables_on_page(&stream, &views, &chars);
+        let rects = infer_cell_rects(&views[0], &matches[0], &chars);
+        assert_eq!(rects.len(), 4);
+        // 甲：命中字符 bbox（+2px pad）→ x≈98, y≈98, w/h≈14
+        let r0 = rects[0].unwrap();
+        assert_eq!((r0.x, r0.y, r0.w, r0.h), (98, 98, 14, 14));
+        // 乙、丙同理
+        assert_eq!(rects[1].unwrap().x, 298);
+        assert_eq!(rects[2].unwrap().y, 198);
+        // 右下空格：行带 y∈[198,212+] 列带 x∈[298,312+] 交集（内缩 3px）
+        let r3 = rects[3].unwrap();
+        assert!(r3.x >= 296 && r3.x <= 302, "r3.x={}", r3.x);
+        assert!(r3.y >= 196 && r3.y <= 202, "r3.y={}", r3.y);
+        assert!(r3.w > 0 && r3.h > 0);
+    }
+
+    #[test]
+    fn no_bands_no_rect() {
+        // 整行无命中 → 该行空格无法推算
+        let stream = table_stream_xml(
+            r#"<w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid>
+               <w:tr><w:tc><w:p><w:r><w:t>甲</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>乙</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t> </w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t> </w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        );
+        let views = build_table_views(&stream);
+        let chars = vec![ch('甲', 100.0, 100.0), ch('乙', 300.0, 100.0)];
+        let matches = locate_tables_on_page(&stream, &views, &chars);
+        let rects = infer_cell_rects(&views[0], &matches[0], &chars);
+        assert!(rects[2].is_none());
+        assert!(rects[3].is_none());
     }
 
     #[test]
