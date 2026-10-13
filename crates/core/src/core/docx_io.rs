@@ -22,25 +22,78 @@ use zip::ZipArchive;
 use crate::core::models::{Align, Paragraph, TextRun, TextRunStyle};
 
 /// 段落直接格式（来自 document.xml 的 `w:pPr`）。
-#[derive(Default)]
-struct ParaFmt {
-    style_id: Option<String>,
+#[derive(Default, Clone, Debug)]
+pub(crate) struct ParaFmt {
+    pub(crate) style_id: Option<String>,
     /// `w:jc` 对齐值（center/right/left/both/...）。
-    jc: Option<String>,
+    pub(crate) jc: Option<String>,
     /// `w:ind` 的 `w:firstLineChars`（1/100 字符）。
-    first_line_chars: Option<i32>,
+    pub(crate) first_line_chars: Option<i32>,
     /// `w:ind` 的 `w:firstLine`（twips，1/20 pt）。
-    first_line_twips: Option<i32>,
+    pub(crate) first_line_twips: Option<i32>,
     /// 段落首个 run 的 `w:rPr/w:sz`（半磅）。
-    run_sz_half_pt: Option<u32>,
+    pub(crate) run_sz_half_pt: Option<u32>,
     /// 段落默认字体（来自 w:pPr）。
-    font_family: Option<String>,
+    pub(crate) font_family: Option<String>,
 }
 
 /// 解析后的单个段落（直接格式 + 原始 Run 列表）。
-struct ParsedParagraph {
-    runs: Vec<TextRun>,
-    fmt: ParaFmt,
+#[derive(Debug)]
+pub(crate) struct ParsedParagraph {
+    pub(crate) runs: Vec<TextRun>,
+    pub(crate) fmt: ParaFmt,
+}
+
+/// body 元素流：段落与表格按文档顺序交错（供表格识别使用）。
+#[derive(Debug)]
+pub(crate) enum BodyElement {
+    Paragraph(ParsedParagraph),
+    // 表格载荷目前仅测试读取；表格识别（doc_render）任务接入后移除此豁免。
+    #[allow(dead_code)]
+    Table(ParsedTable),
+}
+
+/// 顶层表格解析结果（原始结构，未做标签拆分）。
+#[derive(Debug, Default)]
+pub(crate) struct ParsedTable {
+    /// tblGrid 列数（缺 tblGrid 时按首行 gridSpan 总和回填）。
+    pub(crate) grid_cols: usize,
+    pub(crate) rows: Vec<ParsedRow>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ParsedRow {
+    pub(crate) cells: Vec<ParsedCell>,
+}
+
+/// 单元格垂直合并状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum CellVMerge {
+    #[default]
+    None,
+    /// 合并起始格（内容在此格）。
+    Restart,
+    /// 合并续行格（无内容，但占用列）。
+    Continue,
+}
+
+/// 表格单元格（所有段落 runs 拼接，段落间以 "\n" run 分隔）。
+#[derive(Debug)]
+pub(crate) struct ParsedCell {
+    pub(crate) runs: Vec<TextRun>,
+    /// 首段直接格式（jc 用于对齐、run_sz_half_pt 用于字号回退）。
+    pub(crate) fmt: ParaFmt,
+    /// w:gridSpan 跨列数（默认 1）。
+    pub(crate) grid_span: usize,
+    pub(crate) v_merge: CellVMerge,
+    /// 起始列号（0 基，按行内前序单元格宽度累计推算）。
+    pub(crate) col_start: usize,
+}
+
+impl Default for ParsedCell {
+    fn default() -> Self {
+        Self { runs: Vec::new(), fmt: ParaFmt::default(), grid_span: 1, v_merge: CellVMerge::None, col_start: 0 }
+    }
 }
 
 /// 样式定义（来自 styles.xml 的 `w:style`）。
@@ -64,7 +117,14 @@ pub fn load_paragraphs(path: &Path, font_size: f32) -> Result<Vec<Paragraph>, St
     let styles_xml = read_entry_optional(&mut archive, "word/styles.xml");
 
     let mut registry = StyleRegistry::new();
-    let parsed_paras = parse_document(&document_xml, &mut registry)?;
+    let parsed_stream = parse_body_stream(&document_xml, &mut registry)?;
+    let parsed_paras: Vec<ParsedParagraph> = parsed_stream
+        .into_iter()
+        .filter_map(|el| match el {
+            BodyElement::Paragraph(p) => Some(p),
+            BodyElement::Table(_) => None,
+        })
+        .collect();
     let (styles, doc_defaults_sz) = parse_styles(&styles_xml);
 
     let mut result = Vec::new();
@@ -556,18 +616,16 @@ fn handle_p_pr_tag(e: &quick_xml::events::BytesStart, fmt: &mut ParaFmt) {
     }
 }
 
-/// 解析 document.xml，返回段落列表（每个段落包含 Runs 与格式）。
-fn parse_document(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<ParsedParagraph>, String> {
+/// 解析 document.xml，返回 body 元素流（段落与表格按文档顺序交错）。
+fn parse_body_stream(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<BodyElement>, String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
 
-    let mut paras = Vec::new();
-    // 状态
-    let mut in_body_para = false; // 当前 w:p 是 body 直接子级（对齐 python-docx doc.paragraphs）
-    // 表格嵌套深度：布尔标记在嵌套 w:tbl 提前闭合时会误放行外层表格中的段落
-    let mut table_depth: usize = 0;
-    // 文本框（w:txbxContent）嵌套深度：其中的 w:p/w:r 会破坏外层段落状态
-    // （清空已累积 runs、提前闭合外层段落导致后续文字丢失），整体跳过
+    let mut elements = Vec::new();
+    // ---- 段落状态（body 段落与单元格段落共用 run 累积机制）----
+    let mut in_body_para = false; // 当前 w:p 是 body 直接子级
+    let mut in_cell_para = false; // 当前 w:p 位于顶层表格单元格内
+    let mut tbl_depth: usize = 0; // 表格嵌套深度（>=2 的内层表格内容忽略）
     let mut txbx_depth: usize = 0;
     let mut in_p_pr = false;
     let mut in_run = false;
@@ -578,6 +636,15 @@ fn parse_document(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<ParsedP
     let mut cur_run_text = String::new();
     let mut cur_run_props = RawRunProps::default();
     let mut cur_fmt = ParaFmt::default();
+
+    // ---- 表格状态 ----
+    let mut cur_table: Option<ParsedTable> = None;
+    let mut cur_row: Option<ParsedRow> = None;
+    let mut cur_cell: Option<ParsedCell> = None;
+    let mut row_col_cursor: usize = 0; // 当前行已占用列数
+    let mut in_tbl_grid = false; // 顶层 tblGrid 内
+    let mut in_tc_pr = false; // 当前单元格 tcPr 内
+    let mut cell_inner_tbl: usize = 0; // 单元格内嵌套表格深度（>0 忽略其文本）
 
     loop {
         match reader.read_event() {
@@ -591,37 +658,72 @@ fn parse_document(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<ParsedP
                     continue;
                 }
                 match name {
-                    b"tbl" => table_depth += 1,
+                    b"tbl" => {
+                        tbl_depth += 1;
+                        if tbl_depth == 1 {
+                            cur_table = Some(ParsedTable::default());
+                            row_col_cursor = 0;
+                        } else if tbl_depth == 2 {
+                            cell_inner_tbl += 1;
+                        }
+                    }
+                    // 文本框（w:txbxContent）内的 w:p/w:r 会破坏外层段落状态，整体跳过
                     b"txbxContent" => txbx_depth += 1,
-                    b"p" if table_depth == 0 => {
+                    b"tblGrid" if tbl_depth == 1 && cur_row.is_none() => in_tbl_grid = true,
+                    b"gridCol" if in_tbl_grid => {
+                        if let Some(t) = cur_table.as_mut() {
+                            t.grid_cols += 1;
+                        }
+                    }
+                    b"tr" if tbl_depth == 1 => {
+                        cur_row = Some(ParsedRow::default());
+                        row_col_cursor = 0;
+                    }
+                    b"tc" if tbl_depth == 1 && cur_row.is_some() => {
+                        cur_cell = Some(ParsedCell { col_start: row_col_cursor, ..ParsedCell::default() });
+                        cell_inner_tbl = 0;
+                    }
+                    b"tcPr" if cur_cell.is_some() => in_tc_pr = true,
+                    b"gridSpan" if in_tc_pr => {
+                        if let Some(v) = attr_val(&e, "val").and_then(|v| v.parse::<usize>().ok()) {
+                            if let Some(c) = cur_cell.as_mut() {
+                                c.grid_span = v.max(1);
+                            }
+                        }
+                    }
+                    b"vMerge" if in_tc_pr => {
+                        let restart = attr_val(&e, "val").is_some_and(|v| v == "restart");
+                        if let Some(c) = cur_cell.as_mut() {
+                            c.v_merge = if restart { CellVMerge::Restart } else { CellVMerge::Continue };
+                        }
+                    }
+                    b"p" if tbl_depth == 0 => {
                         in_body_para = true;
                         cur_runs.clear();
                         cur_run_text.clear();
                         cur_run_props = RawRunProps::default();
                         cur_fmt = ParaFmt::default();
                     }
-                    b"pPr" if in_body_para => {
+                    b"p" if tbl_depth == 1 && cur_cell.is_some() && cell_inner_tbl == 0 => {
+                        in_cell_para = true;
+                        cur_runs.clear();
+                        cur_run_text.clear();
+                        cur_run_props = RawRunProps::default();
+                        cur_fmt = ParaFmt::default();
+                    }
+                    b"pPr" if in_body_para || in_cell_para => {
                         in_p_pr = true;
                         handle_p_pr_tag(&e, &mut cur_fmt);
                     }
-                    b"r" if in_body_para => {
-                        if !cur_run_text.is_empty() {
-                            let mut style = TextRunStyle::default();
-                            if cur_run_props.font_family.is_none() && cur_fmt.font_family.is_some() {
-                                cur_run_props.font_family = cur_fmt.font_family.clone();
-                            }
-                            cur_run_props.apply_to(&mut style, registry);
-                            cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
-                        }
+                    b"r" if in_body_para || in_cell_para => {
+                        flush_pending_run(&mut cur_run_text, &mut cur_run_props, &cur_fmt, &mut cur_runs, registry);
                         in_run = true;
-                        cur_run_text.clear();
-                        cur_run_props = RawRunProps::default();
                     }
                     b"rPr" if in_run => {
                         in_r_pr = true;
                         handle_r_pr_tag(&e, &mut cur_run_props, &mut cur_fmt);
                     }
-                    b"t" if in_body_para => in_t = true,
+                    b"t" if in_body_para || in_cell_para => in_t = true,
                     _ => {
                         if in_p_pr {
                             handle_p_pr_tag(&e, &mut cur_fmt);
@@ -636,8 +738,21 @@ fn parse_document(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<ParsedP
                     continue;
                 }
                 match local_name(e.name().as_ref()) {
-                    b"tab" if in_body_para => cur_run_text.push('\t'),
-                    b"br" | b"cr" if in_body_para => cur_run_text.push('\n'),
+                    b"tab" if in_body_para || in_cell_para => cur_run_text.push('\t'),
+                    b"br" | b"cr" if in_body_para || in_cell_para => cur_run_text.push('\n'),
+                    b"gridSpan" if in_tc_pr => {
+                        if let Some(v) = attr_val(&e, "val").and_then(|v| v.parse::<usize>().ok()) {
+                            if let Some(c) = cur_cell.as_mut() {
+                                c.grid_span = v.max(1);
+                            }
+                        }
+                    }
+                    b"vMerge" if in_tc_pr => {
+                        let restart = attr_val(&e, "val").is_some_and(|v| v == "restart");
+                        if let Some(c) = cur_cell.as_mut() {
+                            c.v_merge = if restart { CellVMerge::Restart } else { CellVMerge::Continue };
+                        }
+                    }
                     _ => {
                         if in_p_pr {
                             handle_p_pr_tag(&e, &mut cur_fmt);
@@ -648,7 +763,7 @@ fn parse_document(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<ParsedP
                 }
             }
             Ok(Event::Text(t)) => {
-                if txbx_depth > 0 || !(in_body_para && in_t) {
+                if txbx_depth > 0 || cell_inner_tbl > 0 || !((in_body_para || in_cell_para) && in_t) {
                     continue;
                 }
                 if let Ok(s) = std::str::from_utf8(t.as_ref()) {
@@ -667,37 +782,94 @@ fn parse_document(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<ParsedP
                     continue;
                 }
                 match name {
-                    b"tbl" => table_depth = table_depth.saturating_sub(1),
+                    b"tbl" => {
+                        if tbl_depth >= 2 && cell_inner_tbl > 0 {
+                            cell_inner_tbl -= 1;
+                        }
+                        tbl_depth = tbl_depth.saturating_sub(1);
+                        if tbl_depth == 0 {
+                            if let Some(mut t) = cur_table.take() {
+                                if t.grid_cols == 0 {
+                                    t.grid_cols = t
+                                        .rows
+                                        .first()
+                                        .map(|r| r.cells.iter().map(|c| c.grid_span).sum())
+                                        .unwrap_or(0);
+                                }
+                                elements.push(BodyElement::Table(t));
+                            }
+                            cur_row = None;
+                            cur_cell = None;
+                            in_tbl_grid = false;
+                        }
+                    }
+                    b"tblGrid" => in_tbl_grid = false,
+                    b"tr" if tbl_depth == 1 => {
+                        if let Some(row) = cur_row.take() {
+                            if let Some(t) = cur_table.as_mut() {
+                                t.rows.push(row);
+                            }
+                        }
+                    }
+                    b"tc" if tbl_depth == 1 && cur_cell.is_some() => {
+                        if let Some(mut cell) = cur_cell.take() {
+                            // vMerge 续行格通常不重复 gridSpan：未显式声明时从上方覆盖同列的合并格继承跨列数
+                            if cell.v_merge == CellVMerge::Continue && cell.grid_span == 1 {
+                                let span_above = cur_table.as_ref().and_then(|t| {
+                                    t.rows.iter().rev().find_map(|r| {
+                                        r.cells
+                                            .iter()
+                                            .find(|c| cell.col_start >= c.col_start && cell.col_start < c.col_start + c.grid_span)
+                                            .map(|c| c.grid_span)
+                                    })
+                                });
+                                if let Some(span) = span_above {
+                                    cell.grid_span = span;
+                                }
+                            }
+                            if let Some(row) = cur_row.as_mut() {
+                                row_col_cursor += cell.grid_span;
+                                row.cells.push(cell);
+                            }
+                        }
+                        in_tc_pr = false;
+                    }
+                    b"tcPr" => in_tc_pr = false,
                     b"t" => in_t = false,
                     b"rPr" => in_r_pr = false,
                     b"r" => {
-                        if !cur_run_text.is_empty() {
-                            let mut style = TextRunStyle::default();
-                            if cur_run_props.font_family.is_none() && cur_fmt.font_family.is_some() {
-                                cur_run_props.font_family = cur_fmt.font_family.clone();
-                            }
-                            cur_run_props.apply_to(&mut style, registry);
-                            cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
-                        }
+                        flush_pending_run(&mut cur_run_text, &mut cur_run_props, &cur_fmt, &mut cur_runs, registry);
                         in_run = false;
                         in_r_pr = false;
                         cur_run_props = RawRunProps::default();
                     }
                     b"pPr" => in_p_pr = false,
                     b"p" if in_body_para => {
-                        if !cur_run_text.is_empty() {
-                            let mut style = TextRunStyle::default();
-                            if cur_run_props.font_family.is_none() && cur_fmt.font_family.is_some() {
-                                cur_run_props.font_family = cur_fmt.font_family.clone();
-                            }
-                            cur_run_props.apply_to(&mut style, registry);
-                            cur_runs.push(TextRun::new(std::mem::take(&mut cur_run_text), style));
-                        }
-                        paras.push(ParsedParagraph {
+                        flush_pending_run(&mut cur_run_text, &mut cur_run_props, &cur_fmt, &mut cur_runs, registry);
+                        elements.push(BodyElement::Paragraph(ParsedParagraph {
                             runs: std::mem::take(&mut cur_runs),
                             fmt: std::mem::take(&mut cur_fmt),
-                        });
+                        }));
                         in_body_para = false;
+                        in_p_pr = false;
+                        in_run = false;
+                        in_r_pr = false;
+                        in_t = false;
+                    }
+                    b"p" if in_cell_para => {
+                        flush_pending_run(&mut cur_run_text, &mut cur_run_props, &cur_fmt, &mut cur_runs, registry);
+                        if let Some(cell) = cur_cell.as_mut() {
+                            if cell.runs.is_empty() {
+                                cell.fmt = cur_fmt.clone();
+                            }
+                            if !cur_runs.is_empty() {
+                                if !cell.runs.is_empty() {
+                                    cell.runs.push(TextRun::from_text("\n"));
+                                }
+                                cell.runs.extend(cur_runs.drain(..));
+                            }
+                        }
+                        in_cell_para = false;
                         in_p_pr = false;
                         in_run = false;
                         in_r_pr = false;
@@ -712,7 +884,26 @@ fn parse_document(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<ParsedP
             _ => {}
         }
     }
-    Ok(paras)
+    Ok(elements)
+}
+
+/// 把累积中的 run 文本落为 TextRun（run 开始/结束、段落结束时调用）。
+fn flush_pending_run(
+    cur_run_text: &mut String,
+    cur_run_props: &mut RawRunProps,
+    cur_fmt: &ParaFmt,
+    cur_runs: &mut Vec<TextRun>,
+    registry: &mut StyleRegistry,
+) {
+    if cur_run_text.is_empty() {
+        return;
+    }
+    let mut style = TextRunStyle::default();
+    if cur_run_props.font_family.is_none() && cur_fmt.font_family.is_some() {
+        cur_run_props.font_family = cur_fmt.font_family.clone();
+    }
+    cur_run_props.apply_to(&mut style, registry);
+    cur_runs.push(TextRun::new(std::mem::take(cur_run_text), style));
 }
 
 /// 读取 `w:ind` 的首行缩进属性（firstLineChars / firstLine）。
@@ -930,6 +1121,18 @@ fn resolve_indent(fmt: &ParaFmt, font_size: f32, styles: &[StyleDef], doc_defaul
         }
     }
     0.0
+}
+
+/// 读取 docx 文件并解析 body 元素流（表格识别用；样式链不参与，段落仅用于匹配消耗）。
+// 表格识别（doc_render）任务接入前仅测试调用；接入后移除此豁免。
+#[allow(dead_code)]
+pub(crate) fn load_body_stream(path: &Path) -> Result<Vec<BodyElement>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("读取 docx {path:?} 失败：{e}"))?;
+    let mut archive =
+        ZipArchive::new(Cursor::new(bytes.as_slice())).map_err(|e| format!("解压 docx {path:?} 失败：{e}"))?;
+    let document_xml = read_entry(&mut archive, "word/document.xml")?;
+    let mut registry = StyleRegistry::new();
+    parse_body_stream(&document_xml, &mut registry)
 }
 
 #[cfg(test)]
@@ -1431,5 +1634,56 @@ mod tests {
         assert_eq!(paras[1].runs.len(), 1);
         assert_eq!(paras[1].runs[0].text, "仿宋正文");
         assert_eq!(paras[1].runs[0].style.font_family.as_deref(), Some("仿宋_GB2312"));
+    }
+
+    #[test]
+    fn body_stream_parses_table_structure() {
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>表前段落</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol/><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>合并格</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>丙</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p><w:r><w:t></w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>丁</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>表后段落</w:t></w:r></w:p></w:body></w:document>"#;
+        let mut registry = StyleRegistry::new();
+        let stream = parse_body_stream(document_xml, &mut registry).unwrap();
+        assert_eq!(stream.len(), 3);
+        assert!(matches!(&stream[0], BodyElement::Paragraph(p) if p.runs[0].text == "表前段落"));
+        assert!(matches!(&stream[2], BodyElement::Paragraph(p) if p.runs[0].text == "表后段落"));
+        let table = match &stream[1] { BodyElement::Table(t) => t, _ => panic!("应为表格") };
+        assert_eq!(table.grid_cols, 3);
+        assert_eq!(table.rows.len(), 2);
+        // 第一行：跨 2 列的 vMerge 起始格 + 单格
+        let c00 = &table.rows[0].cells[0];
+        assert_eq!(c00.col_start, 0);
+        assert_eq!(c00.grid_span, 2);
+        assert_eq!(c00.v_merge, CellVMerge::Restart);
+        assert_eq!(c00.runs[0].text, "合并格");
+        let c01 = &table.rows[0].cells[1];
+        assert_eq!(c01.col_start, 2);
+        assert_eq!(c01.grid_span, 1);
+        // 第二行：vMerge 续行格占列但无内容 + 单格
+        let c10 = &table.rows[1].cells[0];
+        assert_eq!(c10.col_start, 0);
+        assert_eq!(c10.grid_span, 2);
+        assert_eq!(c10.v_merge, CellVMerge::Continue);
+        let c11 = &table.rows[1].cells[1];
+        assert_eq!(c11.col_start, 2);
+        assert_eq!(c11.runs[0].text, "丁");
+    }
+
+    #[test]
+    fn load_body_stream_reads_docx_file() {
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>格</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.docx");
+        std::fs::write(&path, zip_docx(document_xml.as_bytes(), None)).unwrap();
+        let stream = load_body_stream(&path).unwrap();
+        assert_eq!(stream.len(), 1);
+        assert!(matches!(&stream[0], BodyElement::Table(_)));
+    }
+
+    #[test]
+    fn nested_table_content_not_leaked_into_outer_cell() {
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>外层</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>内层</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut registry = StyleRegistry::new();
+        let stream = parse_body_stream(document_xml, &mut registry).unwrap();
+        let table = match &stream[0] { BodyElement::Table(t) => t, _ => panic!() };
+        let text: String = table.rows[0].cells[0].runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(text, "外层");
     }
 }
