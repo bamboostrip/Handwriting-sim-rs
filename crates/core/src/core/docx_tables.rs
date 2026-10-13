@@ -175,8 +175,13 @@ impl PageStreamMatcher {
     /// 匹配单元格文本：命中比例 >= CELL_MATCH_RATIO 判定定位成功。
     /// 定位成功（含部分命中）时推进 cursor 到最后命中字符之后——
     /// 命中的页面字符已被本格占用，相邻格不得重叠匹配。
+    ///
+    /// 归一化长度 < 2 的格不参与匹配：多页表格每页都用整个文档流重匹配，
+    /// 1 字格会在 CELL_WINDOW 内撞上任意同名无关字符（单字命中即 100%，
+    /// 轻松越过阈值）造成幻影定位——真持有格随后失配回退带推断，
+    /// 同一文字被重复渲染。短格放弃匹配没有损失：它们本就由带推断兜底。
     fn match_cell(&mut self, target: &[char]) -> Option<CellMatch> {
-        if target.is_empty() {
+        if target.len() < 2 {
             return None;
         }
         let hit = self.try_match(target, CELL_WINDOW, false);
@@ -438,6 +443,31 @@ mod tests {
     }
 
     #[test]
+    fn single_char_cell_does_not_false_match_across_pages() {
+        // 跨页短格回归：多页表格从第 2 页起，每页都拿“整个文档流”对当页字符重匹配。
+        // 第 1 页表格的 1 字格“乙”，会在第 2 页字符流的 CELL_WINDOW 内撞上任何
+        // 一个无关的“乙”（1/1 = 100% 轻松越过 60% 阈值）→ 误定位 + cursor 前进，
+        // 真正的持有格回退到带推断 → 同一文字在页面上被定位+推断各渲染一次。
+        // 规则：归一化长度 < 2 的格不参与匹配，直接回退带推断（无损失）。
+        let stream = table_stream_xml(
+            r#"<w:p><w:r><w:t>无关正文内容</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>甲格甲格</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>乙</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        );
+        let views = build_table_views(&stream);
+        // 第 2 页字符流：无关正文 + 跨页延续的多字格文字 + 一个孤立的“乙”
+        let chars = vec![
+            ch('无', 10.0, 10.0), ch('关', 22.0, 10.0), ch('正', 34.0, 10.0), ch('文', 46.0, 10.0), ch('内', 58.0, 10.0), ch('容', 70.0, 10.0),
+            ch('甲', 10.0, 100.0), ch('格', 22.0, 100.0), ch('甲', 34.0, 100.0), ch('格', 46.0, 100.0),
+            ch('乙', 200.0, 200.0),
+        ];
+        let matches = locate_tables_on_page(&stream, &views, &chars);
+        let m = &matches[0];
+        // 多字格：在第 2 页真实存在，正常定位
+        assert_eq!(m.row_matches[0][0].as_ref().unwrap().char_idxs, vec![6, 7, 8, 9]);
+        // 1 字格：不得匹配窗口内的孤立“乙”（修复前这里误返回 Some）
+        assert!(m.row_matches[0][1].is_none(), "1 字格不得误匹配：{:?}", m.row_matches[0][1]);
+    }
+
+    #[test]
     fn unmatched_cell_below_threshold_yields_none() {
         let stream = table_stream_xml(
             r#"<w:tbl><w:tblGrid><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>五行文字</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
@@ -495,22 +525,23 @@ mod tests {
     #[test]
     fn infers_missing_cell_rect_from_bands() {
         // 2×2 表：三个格有文字可定位，右下格为空 → 由行列带推算
+        // （格文字用 2 字：1 字格按规则不参与匹配）
         let stream = table_stream_xml(
             r#"<w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid>
-               <w:tr><w:tc><w:p><w:r><w:t>甲</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>乙</w:t></w:r></w:p></w:tc></w:tr>
-               <w:tr><w:tc><w:p><w:r><w:t>丙</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t> </w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+               <w:tr><w:tc><w:p><w:r><w:t>甲格</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>乙格</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t>丙格</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t> </w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
         );
         let views = build_table_views(&stream);
         let chars = vec![
-            ch('甲', 100.0, 100.0), ch('乙', 300.0, 100.0),
-            ch('丙', 100.0, 200.0),
+            ch('甲', 100.0, 100.0), ch('格', 112.0, 100.0), ch('乙', 300.0, 100.0), ch('格', 312.0, 100.0),
+            ch('丙', 100.0, 200.0), ch('格', 112.0, 200.0),
         ];
         let matches = locate_tables_on_page(&stream, &views, &chars);
         let rects = infer_cell_rects(&views[0], &matches[0], &chars);
         assert_eq!(rects.len(), 4);
-        // 甲：命中字符 bbox（+2px pad）→ x≈98, y≈98, w/h≈14
+        // 甲格：命中字符 bbox（+2px pad；两字横排宽 22px → w=26）→ x≈98, y≈98
         let r0 = rects[0].unwrap();
-        assert_eq!((r0.x, r0.y, r0.w, r0.h), (98, 98, 14, 14));
+        assert_eq!((r0.x, r0.y, r0.w, r0.h), (98, 98, 26, 14));
         // 乙、丙同理
         assert_eq!(rects[1].unwrap().x, 298);
         assert_eq!(rects[2].unwrap().y, 198);
@@ -523,14 +554,17 @@ mod tests {
 
     #[test]
     fn no_bands_no_rect() {
-        // 整行无命中 → 该行空格无法推算
+        // 第二行无命中 → 该行空格无法推算（第一行用 2 字格保证可定位出列带）
         let stream = table_stream_xml(
             r#"<w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid>
-               <w:tr><w:tc><w:p><w:r><w:t>甲</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>乙</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t>甲格</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>乙格</w:t></w:r></w:p></w:tc></w:tr>
                <w:tr><w:tc><w:p><w:r><w:t> </w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t> </w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
         );
         let views = build_table_views(&stream);
-        let chars = vec![ch('甲', 100.0, 100.0), ch('乙', 300.0, 100.0)];
+        let chars = vec![
+            ch('甲', 100.0, 100.0), ch('格', 112.0, 100.0),
+            ch('乙', 300.0, 100.0), ch('格', 312.0, 100.0),
+        ];
         let matches = locate_tables_on_page(&stream, &views, &chars);
         let rects = infer_cell_rects(&views[0], &matches[0], &chars);
         assert!(rects[2].is_none());
