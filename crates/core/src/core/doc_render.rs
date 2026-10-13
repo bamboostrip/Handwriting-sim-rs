@@ -357,6 +357,68 @@ pub fn erase_highlight_boxes(img: &mut image::RgbImage, boxes: &[BoundingBox]) {
     }
 }
 
+/// 按字符包围盒擦白（glyph 级擦除：只清字形矩形，保留穿过区域的表格线）。
+// 表格区域生成（Task 6）接入前仅测试调用；接入后移除此豁免（同 docx_tables）。
+#[allow(dead_code)]
+pub(crate) fn erase_char_boxes(
+    img: &mut image::RgbImage,
+    chars: &[ExtractedChar],
+    idxs: &[usize],
+    pad: i32,
+) {
+    let w = img.width() as i32;
+    let h = img.height() as i32;
+    for &i in idxs {
+        let c = match chars.get(i) {
+            Some(c) => c,
+            None => continue,
+        };
+        let x0 = (c.min_x.floor() as i32 - pad).max(0);
+        let x1 = ((c.max_x.ceil() as i32) + pad).min(w - 1);
+        let y0 = (c.min_y.floor() as i32 - pad).max(0);
+        let y1 = ((c.max_y.ceil() as i32) + pad).min(h - 1);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                img.put_pixel(x as u32, y as u32, image::Rgb([255, 255, 255]));
+            }
+        }
+    }
+}
+
+/// 将包围盒内的高亮像素逐像素替换为白色（不整框涂白，保留黑色表格线）。
+// 表格区域生成（Task 6）接入前仅测试调用；接入后移除此豁免（同 docx_tables）。
+#[allow(dead_code)]
+pub(crate) fn erase_highlight_pixels_in_boxes(img: &mut image::RgbImage, boxes: &[BoundingBox]) {
+    let w = img.width();
+    let h = img.height();
+    for b in boxes {
+        let x0 = b.min_x.min(w.saturating_sub(1));
+        let x1 = b.max_x.min(w.saturating_sub(1));
+        let y0 = b.min_y.min(h.saturating_sub(1));
+        let y1 = b.max_y.min(h.saturating_sub(1));
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let p = img.get_pixel(x, y);
+                if is_highlight_pixel(p[0], p[1], p[2]) {
+                    img.put_pixel(x, y, image::Rgb([255, 255, 255]));
+                }
+            }
+        }
+    }
+}
+
+/// BoundingBox 是否完整落在 RectPx 内（2px 容差，容纳包围盒贴合误差）。
+// 表格区域生成（Task 6）接入前仅测试调用；接入后移除此豁免（同 docx_tables）。
+#[allow(dead_code)]
+fn rect_contains_box(r: &crate::core::docx_tables::RectPx, b: &BoundingBox) -> bool {
+    let rx1 = r.x + r.w;
+    let ry1 = r.y + r.h;
+    b.min_x as i32 >= r.x - 2
+        && b.max_x as i32 <= rx1 + 2
+        && b.min_y as i32 >= r.y - 2
+        && b.max_y as i32 <= ry1 + 2
+}
+
 /// 匹配到的文本标签结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagMatch {
@@ -2041,5 +2103,57 @@ mod tests {
             Ok(path) => assert!(path.is_file(), "成功时 PDF 应存在：{}", path.display()),
             Err(e) => assert!(!e.to_string().is_empty()),
         }
+    }
+
+    #[test]
+    fn erase_char_boxes_keeps_table_lines() {
+        // 300x200 白图；x=150 处竖直黑色表格线；(60..100) 区域有文字字形
+        let mut img = image::RgbImage::from_pixel(300, 200, image::Rgb([255, 255, 255]));
+        for y in 20..180 {
+            img.put_pixel(150, y, image::Rgb([0, 0, 0]));
+        }
+        for y in 60..80 {
+            for x in 60..100 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        let chars = [ExtractedChar {
+            ch: '字',
+            min_x: 60.0,
+            min_y: 60.0,
+            max_x: 100.0,
+            max_y: 80.0,
+            font_size_pt: 12.0,
+            glyph_h_pt: 0.0,
+        }];
+        erase_char_boxes(&mut img, &chars, &[0], 2);
+        // 字形区域被擦白
+        assert_eq!(img.get_pixel(80, 70), &image::Rgb([255, 255, 255]));
+        // 表格线保留
+        assert_eq!(img.get_pixel(150, 70), &image::Rgb([0, 0, 0]));
+    }
+
+    #[test]
+    fn erase_highlight_pixels_in_boxes_keeps_black_lines() {
+        let mut img = image::RgbImage::from_pixel(100, 100, image::Rgb([255, 255, 255]));
+        for y in 10..90 {
+            for x in 20..80 {
+                img.put_pixel(x, y, image::Rgb([255, 255, 0])); // 黄色高亮底
+            }
+            img.put_pixel(50, y, image::Rgb([0, 0, 0])); // 穿过的黑色竖线
+        }
+        let boxes = [BoundingBox::with_highlight(20, 10, 79, 89, "yellow")];
+        erase_highlight_pixels_in_boxes(&mut img, &boxes);
+        assert_eq!(img.get_pixel(30, 30), &image::Rgb([255, 255, 255])); // 高亮已清
+        assert_eq!(img.get_pixel(50, 30), &image::Rgb([0, 0, 0])); // 黑线保留
+    }
+
+    #[test]
+    fn rect_contains_box_checks_containment() {
+        use crate::core::docx_tables;
+        let r = docx_tables::RectPx { x: 10, y: 10, w: 100, h: 100 };
+        assert!(rect_contains_box(&r, &BoundingBox::new(20, 20, 60, 60)));
+        assert!(!rect_contains_box(&r, &BoundingBox::new(5, 20, 60, 60))); // 越出左界
+        assert!(!rect_contains_box(&r, &BoundingBox::new(20, 20, 120, 60))); // 越出右界
     }
 }
