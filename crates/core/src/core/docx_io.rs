@@ -48,8 +48,6 @@ pub(crate) struct ParsedParagraph {
 #[derive(Debug)]
 pub(crate) enum BodyElement {
     Paragraph(ParsedParagraph),
-    // 表格载荷目前仅测试读取；表格识别（doc_render）任务接入后移除此豁免。
-    #[allow(dead_code)]
     Table(ParsedTable),
 }
 
@@ -891,6 +889,12 @@ fn parse_body_stream(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<Body
         }
     }
     Ok(elements)
+}
+
+/// 供 docx_tables 单元测试触发解析（crate 内可见）。
+#[cfg(test)]
+pub(crate) fn parse_body_stream_for_test(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<BodyElement>, String> {
+    parse_body_stream(xml, registry)
 }
 
 /// 把累积中的 run 文本落为 TextRun（run 开始/结束、段落结束时调用）。
