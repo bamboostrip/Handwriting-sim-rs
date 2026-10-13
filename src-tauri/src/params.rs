@@ -199,6 +199,9 @@ pub struct UiRegion {
     pub font_size: i32,
     /// 所在页（1 基）
     pub page: i32,
+    /// 所属表格序号（1 基；None = 非表格区域）
+    #[serde(default)]
+    pub table_index: Option<u32>,
     /// 对齐方式：0 左 / 1 中 / 2 右
     pub align: i32,
     /// 首行缩进（字符数 em）
@@ -249,6 +252,7 @@ impl From<&TextRegion> for UiRegion {
             printed: r.printed,
             font_size: r.font_size,
             page: r.page,
+            table_index: r.table_index,
             align: r.align,
             indent_em: r.indent_em,
             paragraphs: r
@@ -572,6 +576,7 @@ impl UiParams {
                     printed: r.printed,
                     font_size: r.font_size,
                     page: r.page.max(1),
+                    table_index: r.table_index,
                     align: r.align,
                     indent_em: r.indent_em,
                     paragraphs: region_paras,
@@ -875,6 +880,7 @@ mod tests {
             page: 2,
             align: 1,
             indent_em: 1.5,
+            table_index: Some(2),
             fill: Some([0x12, 0x34, 0x56]),
             paragraphs: vec![Paragraph {
                 text: "测试填空".into(),
@@ -898,6 +904,7 @@ mod tests {
         assert!(ui_region.printed);
         assert_eq!(ui_region.font_size, 24);
         assert_eq!(ui_region.page, 2);
+        assert_eq!(ui_region.table_index, Some(2));
         assert_eq!(ui_region.align, 1);
         assert_eq!(ui_region.indent_em, 1.5);
         assert_eq!(ui_region.fill, Some("#123456".into()));
@@ -910,6 +917,15 @@ mod tests {
         };
         assert_eq!(res.pages.len(), 2);
         assert_eq!(res.regions.len(), 1);
+
+        // 反向转换：UiRegion.table_index → TextRegion.table_index
+        let hp = UiParams {
+            regions: res.regions.clone(),
+            ..UiParams::default()
+        }
+        .to_handwriting_params()
+        .unwrap();
+        assert_eq!(hp.regions[0].table_index, Some(2));
     }
 }
 

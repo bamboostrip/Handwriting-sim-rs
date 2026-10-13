@@ -69,6 +69,8 @@ export interface UiRegion {
   printed: boolean;
   fontSize: number;
   page: number;
+  /** 所属表格序号（1 基；null = 非表格区域） */
+  tableIndex?: number | null;
   /** 对齐方式：0 左 / 1 居中 / 2 右（应用于区域整体文本） */
   align: number;
   /** 首行缩进（字符数 em；0 = 无） */

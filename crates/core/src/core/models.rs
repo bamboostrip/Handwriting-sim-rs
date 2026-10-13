@@ -122,6 +122,9 @@ pub struct TextRegion {
     /// 所在页（1 基）；1 = 第一页。
     #[serde(default)]
     pub page: i32,
+    /// 所属表格序号（1 基；非表格区域为 None）。
+    #[serde(default)]
+    pub table_index: Option<u32>,
     /// 对齐方式：0 左 / 1 居中 / 2 右（应用于区域整体文本）。
     #[serde(default)]
     pub align: i32,
@@ -193,6 +196,7 @@ impl Default for TextRegion {
             printed: false,
             font_size: 0,
             page: 1,
+            table_index: None,
             align: 0,
             indent_em: 0.0,
             paragraphs: Vec::new(),
@@ -897,6 +901,22 @@ mod tests {
         assert_eq!(partial_role.name, "学生A");
         assert_eq!(partial_role.font_path, "");
         assert_eq!(partial_role.font_size, None);
+    }
+
+    #[test]
+    fn text_region_table_index_defaults_none_for_legacy_json() {
+        // 旧版本保存的 JSON 无 table_index 字段：反序列化为 None（serde 向后兼容）
+        let legacy = r#"{"x":1,"y":2,"w":10,"h":5,"text":"答案","page":1}"#;
+        let r: TextRegion = serde_json::from_str(legacy).unwrap();
+        assert_eq!(r.table_index, None);
+        assert_eq!(TextRegion::default().table_index, None);
+
+        // 新字段写入后序列化往返保持
+        let r2 = TextRegion { table_index: Some(3), ..r.clone() };
+        let json = serde_json::to_string(&r2).unwrap();
+        let back: TextRegion = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.table_index, Some(3));
+        assert_eq!(back, r2);
     }
 
     #[test]

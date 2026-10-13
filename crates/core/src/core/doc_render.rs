@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use crate::core::docx_io::BodyElement;
+use crate::core::docx_tables::{self, RectPx, TableView};
 use crate::core::models::TextRegion;
 
 /// 文档渲染错误。
@@ -358,8 +360,6 @@ pub fn erase_highlight_boxes(img: &mut image::RgbImage, boxes: &[BoundingBox]) {
 }
 
 /// 按字符包围盒擦白（glyph 级擦除：只清字形矩形，保留穿过区域的表格线）。
-// 表格区域生成（Task 6）接入前仅测试调用；接入后移除此豁免（同 docx_tables）。
-#[allow(dead_code)]
 pub(crate) fn erase_char_boxes(
     img: &mut image::RgbImage,
     chars: &[ExtractedChar],
@@ -386,7 +386,7 @@ pub(crate) fn erase_char_boxes(
 }
 
 /// 将包围盒内的高亮像素逐像素替换为白色（不整框涂白，保留黑色表格线）。
-// 表格区域生成（Task 6）接入前仅测试调用；接入后移除此豁免（同 docx_tables）。
+// 导入链路接线（Task 7）接入前仅测试调用；接入后移除此豁免。
 #[allow(dead_code)]
 pub(crate) fn erase_highlight_pixels_in_boxes(img: &mut image::RgbImage, boxes: &[BoundingBox]) {
     let w = img.width();
@@ -408,7 +408,7 @@ pub(crate) fn erase_highlight_pixels_in_boxes(img: &mut image::RgbImage, boxes: 
 }
 
 /// BoundingBox 是否完整落在 RectPx 内（2px 容差，容纳包围盒贴合误差）。
-// 表格区域生成（Task 6）接入前仅测试调用；接入后移除此豁免（同 docx_tables）。
+// 导入链路接线（Task 7）接入前仅测试调用；接入后移除此豁免。
 #[allow(dead_code)]
 fn rect_contains_box(r: &crate::core::docx_tables::RectPx, b: &BoundingBox) -> bool {
     let rx1 = r.x + r.w;
@@ -1118,6 +1118,165 @@ pub fn combine_page_regions_with_role_map(
     });
 
     final_regions
+}
+
+/// 一页的表格处理结果。
+// 导入链路接线（Task 7）接入前仅测试调用；接入后移除此豁免。
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+pub(crate) struct TablePageResult {
+    pub regions: Vec<TextRegion>,
+    /// 已生成区域的单元格矩形（供标签区域排重）。
+    pub cell_rects: Vec<RectPx>,
+    /// 每张（有区域的）表的外包围矩形（供高亮框分流）。
+    pub outer_rects: Vec<RectPx>,
+}
+
+/// 处理一页上的所有表格：定位 → 擦字 → 生成单元格 TextRegion。
+/// 无表格或整表未命中时返回空结果（表格保留印刷底图）。
+// 导入链路接线（Task 7）接入前仅测试调用；接入后移除此豁免。
+#[allow(dead_code)]
+pub(crate) fn process_tables_on_page(
+    stream: &[BodyElement],
+    views: &[TableView],
+    chars: &[ExtractedChar],
+    page_num: i32,
+    dpi: u32,
+    color_map: &mut std::collections::HashMap<String, u32>,
+    next_role_id: &mut u32,
+    img: &mut image::RgbImage,
+) -> TablePageResult {
+    let scale = dpi as f32 / 72.0;
+    let matches = docx_tables::locate_tables_on_page(stream, views, chars);
+    let mut result = TablePageResult::default();
+
+    for view in views {
+        let Some(m) = matches.iter().find(|m| m.table_index == view.index) else { continue };
+        // 行主序扁平展开：flat_cells / flat_matches / rects 三者下标一一对应
+        //（均按 view.rows 迭代顺序展开，含续行格占位）。
+        let flat_cells: Vec<&docx_tables::TableCellView> =
+            view.rows.iter().flat_map(|r| r.cells.iter()).collect();
+        let flat_matches: Vec<Option<&docx_tables::CellMatch>> = m
+            .row_matches
+            .iter()
+            .flat_map(|rm| rm.iter())
+            .map(|cm| cm.as_ref())
+            .collect();
+        let rects = docx_tables::infer_cell_rects(view, m, chars);
+        if rects.iter().all(|r| r.is_none()) {
+            continue; // 整表未命中：保留印刷底图
+        }
+
+        // 参与生成区域的单元格：非续行、非灰高亮、非空文本且矩形可得（区域与排重矩形同源）
+        let cells_on_page: Vec<(usize, RectPx)> = flat_cells
+            .iter()
+            .zip(rects.iter())
+            .enumerate()
+            .filter(|(_, (c, r))| {
+                c.v_merge != crate::core::docx_io::CellVMerge::Continue
+                    && !c.skip_printed
+                    && !c.text.trim().is_empty()
+                    && r.is_some()
+            })
+            .filter_map(|(i, (_, r))| r.map(|r| (i, r)))
+            .collect();
+
+        let mut table_regions = Vec::new();
+        for &(i, rect) in &cells_on_page {
+            let cell = flat_cells[i];
+            let located = flat_matches.get(i).copied().flatten();
+            // 命中字符：擦除原印刷字（保留表格线）；字号取命中字符校准值
+            let mut font_size = 0i32;
+            if let Some(cm) = located {
+                erase_char_boxes(img, chars, &cm.char_idxs, 2);
+                let refs: Vec<&ExtractedChar> =
+                    cm.char_idxs.iter().filter_map(|&k| chars.get(k)).collect();
+                let avg_pt = {
+                    let vals: Vec<f32> = refs
+                        .iter()
+                        .map(|c| c.font_size_pt)
+                        .filter(|s| *s > 0.0 && !s.is_nan())
+                        .collect();
+                    if vals.is_empty() { 0.0 } else { vals.iter().sum::<f32>() / vals.len() as f32 }
+                };
+                font_size = resolve_font_size_px(&refs, avg_pt, scale);
+            }
+            if font_size <= 0 {
+                if let Some(h) = cell.sz_half_pt {
+                    font_size = ((h as f32 / 2.0) * scale).round() as i32;
+                }
+            }
+            // 区域矩形：命中 bbox 外扩（水平 6 / 竖直 4）；推断矩形已内缩
+            let region_rect = if located.is_some() {
+                RectPx {
+                    x: rect.x - 6,
+                    y: rect.y - 4,
+                    w: rect.w + 12,
+                    h: rect.h + 8,
+                }
+            } else {
+                rect
+            };
+            let (rx, ry) = (region_rect.x.max(0), region_rect.y.max(0));
+            let rw = region_rect.w.min(img.width() as i32 - rx).max(1);
+            let rh = region_rect.h.min(img.height() as i32 - ry).max(1);
+            // 角色映射：高亮色走共享 color_map（与高亮框路径同池）
+            let (role_id, highlight) = match &cell.highlight {
+                Some(c) => {
+                    let rid = *color_map.entry(c.clone()).or_insert_with(|| {
+                        let id = *next_role_id;
+                        *next_role_id += 1;
+                        id
+                    });
+                    (rid, Some(c.clone()))
+                }
+                None => (0, None),
+            };
+            table_regions.push(TextRegion {
+                x: rx,
+                y: ry,
+                w: rw,
+                h: rh,
+                text: cell.text.clone(),
+                role_id,
+                highlight,
+                printed: cell.printed,
+                page: page_num,
+                font_size,
+                align: cell.align,
+                margin_left: Some(4.0),
+                margin_right: Some(4.0),
+                margin_top: Some(2.0),
+                margin_bottom: Some(2.0),
+                table_index: Some(view.index as u32),
+                ..TextRegion::default()
+            });
+        }
+
+        if table_regions.is_empty() {
+            continue;
+        }
+        // 外包围 = 单元格矩形并集（外扩 4px）
+        if let Some((_, first)) = cells_on_page.first() {
+            let mut outer = *first;
+            for (_, r) in &cells_on_page[1..] {
+                let x0 = outer.x.min(r.x);
+                let y0 = outer.y.min(r.y);
+                let x1 = (outer.x + outer.w).max(r.x + r.w);
+                let y1 = (outer.y + outer.h).max(r.y + r.h);
+                outer = RectPx { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+            }
+            result.outer_rects.push(RectPx {
+                x: outer.x - 4,
+                y: outer.y - 4,
+                w: outer.w + 8,
+                h: outer.h + 8,
+            });
+        }
+        result.cell_rects.extend(cells_on_page.into_iter().map(|(_, r)| r));
+        result.regions.extend(table_regions);
+    }
+    result
 }
 
 /// 入口：PDF 直接渲染；DOCX 先转 PDF。返回逐页 PNG 路径与自动识别的 TextRegion 列表。
@@ -2155,5 +2314,67 @@ mod tests {
         assert!(rect_contains_box(&r, &BoundingBox::new(20, 20, 60, 60)));
         assert!(!rect_contains_box(&r, &BoundingBox::new(5, 20, 60, 60))); // 越出左界
         assert!(!rect_contains_box(&r, &BoundingBox::new(20, 20, 120, 60))); // 越出右界
+    }
+
+    #[test]
+    fn process_tables_builds_regions_and_erases() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>姓名</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>张三</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut registry = crate::core::docx_io::StyleRegistry::new();
+        let stream = crate::core::docx_io::parse_body_stream_for_test(xml, &mut registry).unwrap();
+        let views = crate::core::docx_tables::build_table_views(&stream);
+        let chars = vec![
+            ExtractedChar { ch: '姓', min_x: 100.0, min_y: 100.0, max_x: 120.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0 },
+            ExtractedChar { ch: '名', min_x: 120.0, min_y: 100.0, max_x: 140.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0 },
+            ExtractedChar { ch: '张', min_x: 300.0, min_y: 100.0, max_x: 320.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0 },
+            ExtractedChar { ch: '三', min_x: 320.0, min_y: 100.0, max_x: 340.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0 },
+        ];
+        let mut img = image::RgbImage::from_pixel(600, 400, image::Rgb([255, 255, 255]));
+        // 印上"张三"字形（模拟底图上的印刷字）
+        for y in 100..120usize {
+            for x in 300..340usize {
+                img.put_pixel(x as u32, y as u32, image::Rgb([0, 0, 0]));
+            }
+        }
+        let mut color_map = std::collections::HashMap::new();
+        let mut next_role_id = 2u32;
+        let result = process_tables_on_page(
+            &stream, &views, &chars, 1, 200, &mut color_map, &mut next_role_id, &mut img,
+        );
+        assert_eq!(result.regions.len(), 2);
+        let r0 = &result.regions[0];
+        assert_eq!(r0.text, "姓名");
+        assert_eq!(r0.table_index, Some(1));
+        assert_eq!(r0.page, 1);
+        assert!(r0.font_size > 0);
+        let r1 = &result.regions[1];
+        assert_eq!(r1.text, "张三");
+        assert_eq!(r1.highlight.as_deref(), Some("yellow"));
+        assert_eq!(r1.role_id, 2);
+        // 擦除后底图上的"张三"字形消失
+        assert_eq!(img.get_pixel(310, 110), &image::Rgb([255, 255, 255]));
+        // 排除矩形与外包围
+        assert_eq!(result.cell_rects.len(), 2);
+        assert_eq!(result.outer_rects.len(), 1);
+    }
+
+    #[test]
+    fn process_tables_skips_gray_and_continue_cells() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblGrid><w:gridCol/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>合并</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p><w:r><w:t> </w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut registry = crate::core::docx_io::StyleRegistry::new();
+        let stream = crate::core::docx_io::parse_body_stream_for_test(xml, &mut registry).unwrap();
+        let views = crate::core::docx_tables::build_table_views(&stream);
+        let chars = vec![
+            ExtractedChar { ch: '合', min_x: 100.0, min_y: 100.0, max_x: 120.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0 },
+            ExtractedChar { ch: '并', min_x: 120.0, min_y: 100.0, max_x: 140.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0 },
+        ];
+        let mut img = image::RgbImage::from_pixel(600, 400, image::Rgb([255, 255, 255]));
+        let mut color_map = std::collections::HashMap::new();
+        let mut next_role_id = 2u32;
+        let result = process_tables_on_page(
+            &stream, &views, &chars, 1, 200, &mut color_map, &mut next_role_id, &mut img,
+        );
+        // 仅起始格生成区域；续行格跳过
+        assert_eq!(result.regions.len(), 1);
+        assert_eq!(result.regions[0].text, "合并");
     }
 }
