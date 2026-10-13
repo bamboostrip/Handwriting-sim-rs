@@ -5,7 +5,7 @@
 //! 嵌套表格的内容已在 docx_io 解析时丢弃（外层格文本不含内层表格）。
 
 use crate::core::docx_io::{BodyElement, CellVMerge, ParsedCell};
-use crate::core::doc_render::strip_tag_syntax;
+use crate::core::doc_render::{strip_tag_syntax, ExtractedChar};
 use crate::core::docx_io::is_gray_highlight;
 
 /// 一张表的视图（index 为文档内 1 基序号）。
@@ -91,9 +91,246 @@ fn build_cell_view(c: &ParsedCell) -> TableCellView {
     }
 }
 
+/// 正文段落匹配的向前搜索窗口（字符数）。
+const PARAGRAPH_WINDOW: usize = 500;
+/// 单元格匹配的向前搜索窗口（字符数）。
+const CELL_WINDOW: usize = 3000;
+/// 单元格判定定位成功的最低命中比例。
+const CELL_MATCH_RATIO: f32 = 0.6;
+
+/// 单个单元格在页面字符流中的命中结果。
+#[derive(Debug, Clone)]
+pub struct CellMatch {
+    /// 命中的 chars 下标（阅读顺序）。
+    pub char_idxs: Vec<usize>,
+}
+
+/// 一张表在一页上的匹配结果（与 TableView.rows 行列对齐）。
+#[derive(Debug, Clone)]
+pub struct TablePageMatch {
+    pub table_index: usize,
+    pub row_matches: Vec<Vec<Option<CellMatch>>>,
+}
+
+/// 归一化文本：丢弃空白与控制字符（docx 文本与 PDF 字符层口径一致）。
+fn norm_chars(text: &str) -> Vec<char> {
+    text.chars().filter(|c| !c.is_whitespace() && !c.is_control()).collect()
+}
+
+/// 页面字符流匹配器（两指针子序列匹配）。
+struct PageStreamMatcher {
+    /// (chars 下标, 归一化字符)
+    seq: Vec<(usize, char)>,
+    cursor: usize,
+}
+
+impl PageStreamMatcher {
+    fn new(chars: &[ExtractedChar]) -> Self {
+        Self {
+            seq: chars
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| !c.ch.is_whitespace() && !c.ch.is_control())
+                .map(|(i, c)| (i, c.ch))
+                .collect(),
+            cursor: 0,
+        }
+    }
+
+    /// 从 cursor 起在 window 内逐字符匹配 target。
+    /// 返回命中下标；consume_on_fail=true 时失败也保留已消费进度（正文段落尽力消耗）。
+    fn try_match(&mut self, target: &[char], window: usize, consume_on_fail: bool) -> Vec<usize> {
+        let start = self.cursor;
+        let limit = (start + window).min(self.seq.len());
+        let mut hit = Vec::new();
+        let mut probe = self.cursor;
+        for &tc in target {
+            let mut found = None;
+            while probe < limit {
+                if self.seq[probe].1 == tc {
+                    found = Some(probe);
+                    break;
+                }
+                probe += 1;
+            }
+            match found {
+                Some(p) => {
+                    hit.push(self.seq[p].0);
+                    probe += 1;
+                }
+                None => {
+                    if consume_on_fail {
+                        self.cursor = probe;
+                    } else {
+                        self.cursor = start;
+                    }
+                    return hit;
+                }
+            }
+        }
+        self.cursor = probe;
+        hit
+    }
+
+    /// 匹配单元格文本：命中比例 >= CELL_MATCH_RATIO 判定定位成功。
+    fn match_cell(&mut self, target: &[char]) -> Option<CellMatch> {
+        if target.is_empty() {
+            return None;
+        }
+        let hit = self.try_match(target, CELL_WINDOW, false);
+        if hit.len() as f32 / target.len() as f32 >= CELL_MATCH_RATIO {
+            Some(CellMatch { char_idxs: hit })
+        } else {
+            None
+        }
+    }
+}
+
+/// 在单页字符流上按文档顺序定位所有表格的单元格。
+/// 未命中任何文字的表也返回（row_matches 全 None，由后续步骤过滤）。
+pub fn locate_tables_on_page(
+    stream: &[BodyElement],
+    views: &[TableView],
+    chars: &[ExtractedChar],
+) -> Vec<TablePageMatch> {
+    let mut matcher = PageStreamMatcher::new(chars);
+    let mut result = Vec::new();
+    let mut view_cursor = 0usize;
+    for el in stream {
+        match el {
+            BodyElement::Paragraph(p) => {
+                let text: String = p.runs.iter().map(|r| r.text.as_str()).collect();
+                let norm = norm_chars(&text);
+                if !norm.is_empty() {
+                    matcher.try_match(&norm, PARAGRAPH_WINDOW, true);
+                }
+            }
+            BodyElement::Table(_) => {
+                let view = match views.get(view_cursor) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                view_cursor += 1;
+                let row_matches = view
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        row.cells
+                            .iter()
+                            .map(|cell| {
+                                if cell.v_merge == CellVMerge::Continue {
+                                    return None; // 续行格无内容
+                                }
+                                let norm = norm_chars(&cell.text);
+                                matcher.match_cell(&norm)
+                            })
+                            .collect()
+                    })
+                    .collect();
+                result.push(TablePageMatch { table_index: view.index, row_matches });
+            }
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::doc_render::ExtractedChar;
+
+    fn ch(c: char, x: f32, y: f32) -> ExtractedChar {
+        ExtractedChar {
+            ch: c,
+            min_x: x,
+            min_y: y,
+            max_x: x + 10.0,
+            max_y: y + 10.0,
+            font_size_pt: 10.5,
+            glyph_h_pt: 10.0,
+        }
+    }
+
+    fn table_stream_xml(body: &str) -> Vec<crate::core::docx_io::BodyElement> {
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#
+        );
+        let mut registry = crate::core::docx_io::StyleRegistry::new();
+        crate::core::docx_io::parse_body_stream_for_test(&xml, &mut registry).unwrap()
+    }
+
+    #[test]
+    fn locates_cells_in_reading_order() {
+        let stream = table_stream_xml(
+            r#"<w:p><w:r><w:t>前面的正文</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>甲格</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>乙格</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        );
+        let views = build_table_views(&stream);
+        // 页面字符流：正文 + 表格两格（阅读顺序）
+        let chars = vec![
+            ch('前', 10.0, 10.0), ch('面', 22.0, 10.0), ch('的', 34.0, 10.0), ch('正', 46.0, 10.0), ch('文', 58.0, 10.0),
+            ch('甲', 10.0, 50.0), ch('格', 22.0, 50.0),
+            ch('乙', 110.0, 50.0), ch('格', 122.0, 50.0),
+        ];
+        let matches = locate_tables_on_page(&stream, &views, &chars);
+        assert_eq!(matches.len(), 1);
+        let m = &matches[0];
+        assert_eq!(m.table_index, 1);
+        let c0 = m.row_matches[0][0].as_ref().unwrap();
+        assert_eq!(c0.char_idxs, vec![5, 6]);
+        let c1 = m.row_matches[0][1].as_ref().unwrap();
+        assert_eq!(c1.char_idxs, vec![7, 8]);
+    }
+
+    #[test]
+    fn body_text_with_same_content_does_not_steal_cell_match() {
+        // 正文里出现与单元格相同的文字且在字符流中先出现：
+        // 段落元素先行消耗自己的字符，单元格匹配不会误中正文位置
+        let stream = table_stream_xml(
+            r#"<w:p><w:r><w:t>甲格</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>甲格</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        );
+        let views = build_table_views(&stream);
+        let chars = vec![
+            ch('甲', 10.0, 10.0), ch('格', 22.0, 10.0),   // 正文（页面上部）
+            ch('甲', 10.0, 100.0), ch('格', 22.0, 100.0), // 单元格（页面下部）
+        ];
+        let matches = locate_tables_on_page(&stream, &views, &chars);
+        let c0 = matches[0].row_matches[0][0].as_ref().unwrap();
+        assert_eq!(c0.char_idxs, vec![2, 3]); // 命中下部（正文已消耗 0、1）
+    }
+
+    #[test]
+    fn unmatched_cell_below_threshold_yields_none() {
+        let stream = table_stream_xml(
+            r#"<w:tbl><w:tblGrid><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>五行文字</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        );
+        let views = build_table_views(&stream);
+        // 页面上只有 1 个字符能对上（1/4 = 25% < 60%）
+        let chars = vec![ch('五', 10.0, 10.0), ch('x', 30.0, 10.0), ch('无', 50.0, 10.0), ch('关', 70.0, 10.0)];
+        let matches = locate_tables_on_page(&stream, &views, &chars);
+        assert!(matches[0].row_matches[0][0].is_none());
+    }
+
+    #[test]
+    fn vmerge_continue_cell_skips_without_matching() {
+        // 续行格即使残留文字也直接返回 None，不参与匹配、不消耗字符流；
+        // 同行后续单元格仍在正确位置命中
+        let stream = table_stream_xml(
+            r#"<w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>甲格</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>乙格</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p><w:r><w:t>丙格</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>丁格</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        );
+        let views = build_table_views(&stream);
+        let chars = vec![
+            ch('甲', 10.0, 10.0), ch('格', 22.0, 10.0),
+            ch('乙', 110.0, 10.0), ch('格', 122.0, 10.0),
+            ch('丙', 10.0, 50.0), ch('格', 22.0, 50.0),
+            ch('丁', 110.0, 50.0), ch('格', 122.0, 50.0),
+        ];
+        let matches = locate_tables_on_page(&stream, &views, &chars);
+        let m = &matches[0];
+        assert_eq!(m.row_matches[0][0].as_ref().unwrap().char_idxs, vec![0, 1]);
+        assert_eq!(m.row_matches[0][1].as_ref().unwrap().char_idxs, vec![2, 3]);
+        assert!(m.row_matches[1][0].is_none()); // 续行格跳过（否则会误中 4、5）
+        assert_eq!(m.row_matches[1][1].as_ref().unwrap().char_idxs, vec![6, 7]);
+    }
 
     #[test]
     fn builds_views_from_stream() {
