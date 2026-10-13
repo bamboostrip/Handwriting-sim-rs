@@ -386,8 +386,6 @@ pub(crate) fn erase_char_boxes(
 }
 
 /// 将包围盒内的高亮像素逐像素替换为白色（不整框涂白，保留黑色表格线）。
-// 导入链路接线（Task 7）接入前仅测试调用；接入后移除此豁免。
-#[allow(dead_code)]
 pub(crate) fn erase_highlight_pixels_in_boxes(img: &mut image::RgbImage, boxes: &[BoundingBox]) {
     let w = img.width();
     let h = img.height();
@@ -408,8 +406,6 @@ pub(crate) fn erase_highlight_pixels_in_boxes(img: &mut image::RgbImage, boxes: 
 }
 
 /// BoundingBox 是否完整落在 RectPx 内（2px 容差，容纳包围盒贴合误差）。
-// 导入链路接线（Task 7）接入前仅测试调用；接入后移除此豁免。
-#[allow(dead_code)]
 fn rect_contains_box(r: &crate::core::docx_tables::RectPx, b: &BoundingBox) -> bool {
     let rx1 = r.x + r.w;
     let ry1 = r.y + r.h;
@@ -909,6 +905,7 @@ fn extract_pdf_page_tags(
     img_width: u32,
     img_height: u32,
     img: &mut image::RgbImage,
+    exclude_rects: &[RectPx],
 ) -> Vec<TextRegion> {
     let chars_vec: Vec<char> = page_chars.iter().map(|c| c.ch).collect();
     let matches = scan_text_tags(&chars_vec);
@@ -963,6 +960,15 @@ fn extract_pdf_page_tags(
             0.0
         };
         let font_size = resolve_font_size_px(&tag_chars, avg_fs, scale);
+
+        // 表格单元格内的标签由单元格区域接管：跳过（不擦除、不生成区域）
+        let cx = x + w / 2;
+        let cy = y + h / 2;
+        if exclude_rects.iter().any(|r| {
+            cx >= r.x && cx < r.x + r.w && cy >= r.y && cy < r.y + r.h
+        }) {
+            continue;
+        }
 
         // 清理原图上的 {{...}} 标签区域为纯白色（向外扩展 2 像素以消除文字抗锯齿）
         let pad = 2i32;
@@ -1121,8 +1127,6 @@ pub fn combine_page_regions_with_role_map(
 }
 
 /// 一页的表格处理结果。
-// 导入链路接线（Task 7）接入前仅测试调用；接入后移除此豁免。
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub(crate) struct TablePageResult {
     pub regions: Vec<TextRegion>,
@@ -1134,8 +1138,6 @@ pub(crate) struct TablePageResult {
 
 /// 处理一页上的所有表格：定位 → 擦字 → 生成单元格 TextRegion。
 /// 无表格或整表未命中时返回空结果（表格保留印刷底图）。
-// 导入链路接线（Task 7）接入前仅测试调用；接入后移除此豁免。
-#[allow(dead_code)]
 pub(crate) fn process_tables_on_page(
     stream: &[BodyElement],
     views: &[TableView],
@@ -1303,8 +1305,10 @@ pub fn document_to_page_images_opt(
     match suffix.as_str() {
         "pdf" => pdf_to_images_opt(path, out_dir, dpi, extract_regions),
         "docx" => {
+            // 表格解析失败不阻塞导入：退化为纯底图（表格保持印刷）
+            let body_stream = crate::core::docx_io::load_body_stream(path).unwrap_or_default();
             let pdf_path = docx_to_pdf(path, out_dir)?;
-            pdf_to_images_opt(&pdf_path, out_dir, dpi, extract_regions)
+            pdf_to_images_opt_with_tables(&pdf_path, out_dir, dpi, extract_regions, &body_stream)
         }
         other => Err(DocRenderError::UnsupportedExtension(format!(".{other}"))),
     }
@@ -1337,6 +1341,18 @@ pub fn pdf_to_images_opt(
     dpi: u32,
     extract_regions: bool,
 ) -> Result<(Vec<PathBuf>, Vec<TextRegion>), DocRenderError> {
+    pdf_to_images_opt_with_tables(pdf_path, out_dir, dpi, extract_regions, &[])
+}
+
+/// 同 pdf_to_images_opt，但可传入 docx body 元素流以启用表格识别。
+/// 仅 core 内部使用（body 流类型 BodyElement 为 crate 私有）。
+pub(crate) fn pdf_to_images_opt_with_tables(
+    pdf_path: &Path,
+    out_dir: &Path,
+    dpi: u32,
+    extract_regions: bool,
+    body_stream: &[BodyElement],
+) -> Result<(Vec<PathBuf>, Vec<TextRegion>), DocRenderError> {
     std::fs::create_dir_all(out_dir)
         .map_err(|e| DocRenderError::Other(format!("创建缓存目录失败：{e}")))?;
     let prefix = page_prefix(pdf_path);
@@ -1353,6 +1369,8 @@ pub fn pdf_to_images_opt(
     let mut all_regions = Vec::new();
     let mut color_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut next_role_id = 2u32;
+    // body 流的表格视图只依赖文档结构，构建一次供所有页复用
+    let views = docx_tables::build_table_views(body_stream);
 
     for (index, page) in document.pages().iter().enumerate() {
         // 目标像素尺寸：页面点数（1/72 英寸）× dpi/72
@@ -1368,7 +1386,17 @@ pub fn pdf_to_images_opt(
             // 1. 提取页面所有字符对象及其包围盒与字号
             let page_chars = extract_pdf_page_chars(&page, dpi);
 
-            // 2. 从 PDF 文本层提取 {{...}} / 【...】标签区域，并在图像上抹除标签文字
+            // 0. 表格：定位 + 擦字 + 生成单元格区域（先于标签/高亮，标签排除与高亮分流依赖其矩形）
+            let table_result = if views.is_empty() {
+                TablePageResult::default()
+            } else {
+                process_tables_on_page(
+                    body_stream, &views, &page_chars, (index + 1) as i32, dpi,
+                    &mut color_map, &mut next_role_id, &mut rgb_img,
+                )
+            };
+
+            // 2. {{...}}/【...】标签（表格内标签已被单元格区域接管）
             let tag_regions = extract_pdf_page_tags(
                 &page_chars,
                 index,
@@ -1376,15 +1404,20 @@ pub fn pdf_to_images_opt(
                 rgb_img.width(),
                 rgb_img.height(),
                 &mut rgb_img,
+                &table_result.cell_rects,
             );
 
-            // 3. 从渲染图像中检测高亮色块，并将其擦除为白色
+            // 3. 高亮色块：落在表内的只做像素过滤擦除（保表格线），不生成区域
             let highlight_boxes = detect_highlight_boxes(&rgb_img);
-            erase_highlight_boxes(&mut rgb_img, &highlight_boxes);
+            let (in_table, normal): (Vec<_>, Vec<_>) = highlight_boxes
+                .into_iter()
+                .partition(|b| table_result.outer_rects.iter().any(|r| rect_contains_box(r, b)));
+            erase_highlight_pixels_in_boxes(&mut rgb_img, &in_table);
+            erase_highlight_boxes(&mut rgb_img, &normal);
 
-            // 4. 合并高亮框与文本标签区域，提取高亮框内部文字和字号
+            // 4. 表外高亮框 → 区域（原逻辑不变）
             let page_regions = combine_page_regions_with_role_map(
-                highlight_boxes,
+                normal,
                 tag_regions,
                 &page_chars,
                 (index + 1) as i32,
@@ -1392,6 +1425,7 @@ pub fn pdf_to_images_opt(
                 &mut color_map,
                 &mut next_role_id,
             );
+            all_regions.extend(table_result.regions);
             all_regions.extend(page_regions);
         }
 
@@ -2201,6 +2235,28 @@ mod tests {
         assert_eq!(r3.text, "");
         assert_eq!(r3.role_id, 3);
         assert_eq!(r3.highlight, Some("cyan".into()));
+    }
+
+    #[test]
+    fn extract_pdf_page_tags_excludes_table_cells() {
+        // 字符流中有一个 {{姓名}} 标签；排除矩形覆盖它 → 不生成区域、不擦除
+        let chars = vec![
+            ExtractedChar { ch: '{', min_x: 100.0, min_y: 50.0, max_x: 106.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
+            ExtractedChar { ch: '{', min_x: 106.0, min_y: 50.0, max_x: 112.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
+            ExtractedChar { ch: '姓', min_x: 112.0, min_y: 50.0, max_x: 122.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
+            ExtractedChar { ch: '名', min_x: 122.0, min_y: 50.0, max_x: 132.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
+            ExtractedChar { ch: '}', min_x: 132.0, min_y: 50.0, max_x: 138.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
+            ExtractedChar { ch: '}', min_x: 138.0, min_y: 50.0, max_x: 144.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
+        ];
+        let mut img = image::RgbImage::from_pixel(400, 300, image::Rgb([255, 255, 255]));
+        let exclude = [crate::core::docx_tables::RectPx { x: 90, y: 40, w: 70, h: 40 }];
+        let regions = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img, &exclude);
+        assert!(regions.is_empty());
+        // 不排除时能识别到（对照组）
+        let mut img2 = image::RgbImage::from_pixel(400, 300, image::Rgb([255, 255, 255]));
+        let regions2 = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img2, &[]);
+        assert_eq!(regions2.len(), 1);
+        assert_eq!(regions2[0].text, "姓名");
     }
 
     #[test]

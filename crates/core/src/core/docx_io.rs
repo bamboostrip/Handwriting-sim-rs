@@ -1134,8 +1134,6 @@ fn resolve_indent(fmt: &ParaFmt, font_size: f32, styles: &[StyleDef], doc_defaul
 }
 
 /// 读取 docx 文件并解析 body 元素流（表格识别用；样式链不参与，段落仅用于匹配消耗）。
-// 表格识别（doc_render）任务接入前仅测试调用；接入后移除此豁免。
-#[allow(dead_code)]
 pub(crate) fn load_body_stream(path: &Path) -> Result<Vec<BodyElement>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("读取 docx {path:?} 失败：{e}"))?;
     let mut archive =
