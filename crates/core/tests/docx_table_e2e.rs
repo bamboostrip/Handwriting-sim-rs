@@ -51,6 +51,8 @@ fn docx_table_import_end_to_end() {
     assert_eq!(paths.len(), 1, "应为单页文档");
 
     // ---- 验证点 1：表格单元格区域数 ----
+    // 第三行同时锁定两条短格规则："乙项"（2 字）正常定位出行带，
+    // "丙"（1 字）不参与匹配、由行带 × 列带推算矩形（带推断兜底）。
     let table_regions: Vec<&TextRegion> =
         regions.iter().filter(|r| r.table_index == Some(1)).collect();
     let texts: Vec<&str> = table_regions.iter().map(|r| r.text.as_str()).collect();
@@ -60,7 +62,7 @@ fn docx_table_import_end_to_end() {
         7,
         "3×3 表（1 个纵向合并 + 1 个空格）：9 − 续行 1 − 空格 1 = 7"
     );
-    for expect in ["项目", "数值", "备注", "合并说明", "手写答案", "乙", "丙"] {
+    for expect in ["项目", "数值", "备注", "合并说明", "手写答案", "乙项", "丙"] {
         assert!(
             texts.contains(&expect),
             "缺少单元格区域 {expect:?}，实际 {texts:?}"
@@ -230,10 +232,11 @@ fn write_test_docx(path: &Path) {
         r#"<w:tc><w:tcPr><w:tcW w:w="2768" w:type="dxa"/></w:tcPr><w:p><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>手写答案</w:t></w:r></w:p></w:tc>"#,
         r#"<w:tc><w:tcPr><w:tcW w:w="2768" w:type="dxa"/></w:tcPr><w:p/></w:tc>"#,
         r#"</w:tr>"#,
-        // 第三行：合并续行格（无内容）、两个普通格
+        // 第三行：合并续行格（无内容）、多字格 + 单字格
+        // （"乙项" 2 字定位出行带，"丙" 1 字不匹配、走带推断——各覆盖一条规则）
         r#"<w:tr>"#,
         r#"<w:tc><w:tcPr><w:tcW w:w="2768" w:type="dxa"/><w:vMerge/></w:tcPr><w:p/></w:tc>"#,
-        r#"<w:tc><w:tcPr><w:tcW w:w="2768" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>乙</w:t></w:r></w:p></w:tc>"#,
+        r#"<w:tc><w:tcPr><w:tcW w:w="2768" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>乙项</w:t></w:r></w:p></w:tc>"#,
         r#"<w:tc><w:tcPr><w:tcW w:w="2768" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>丙</w:t></w:r></w:p></w:tc>"#,
         r#"</w:tr>"#,
         r#"</w:tbl>"#,
