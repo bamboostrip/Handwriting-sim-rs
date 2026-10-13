@@ -385,26 +385,6 @@ pub(crate) fn erase_char_boxes(
     }
 }
 
-/// 将包围盒内的高亮像素逐像素替换为白色（不整框涂白，保留黑色表格线）。
-pub(crate) fn erase_highlight_pixels_in_boxes(img: &mut image::RgbImage, boxes: &[BoundingBox]) {
-    let w = img.width();
-    let h = img.height();
-    for b in boxes {
-        let x0 = b.min_x.min(w.saturating_sub(1));
-        let x1 = b.max_x.min(w.saturating_sub(1));
-        let y0 = b.min_y.min(h.saturating_sub(1));
-        let y1 = b.max_y.min(h.saturating_sub(1));
-        for y in y0..=y1 {
-            for x in x0..=x1 {
-                let p = img.get_pixel(x, y);
-                if is_highlight_pixel(p[0], p[1], p[2]) {
-                    img.put_pixel(x, y, image::Rgb([255, 255, 255]));
-                }
-            }
-        }
-    }
-}
-
 /// BoundingBox 是否完整落在 RectPx 内（2px 容差，容纳包围盒贴合误差）。
 fn rect_contains_box(r: &crate::core::docx_tables::RectPx, b: &BoundingBox) -> bool {
     let rx1 = r.x + r.w;
@@ -1410,12 +1390,12 @@ pub(crate) fn pdf_to_images_opt_with_tables(
                 &table_result.cell_rects,
             );
 
-            // 3. 高亮色块：落在表内的只做像素过滤擦除（保表格线），不生成区域
+            // 3. 高亮色块分区：表内框（_in_table）不整框擦白（保表格线）、不生成区域，
+            //    其残留高亮像素由 erase_highlight_boxes 内的整页像素过滤步骤一并清除
             let highlight_boxes = detect_highlight_boxes(&rgb_img);
-            let (in_table, normal): (Vec<_>, Vec<_>) = highlight_boxes
+            let (_in_table, normal): (Vec<_>, Vec<_>) = highlight_boxes
                 .into_iter()
                 .partition(|b| table_result.outer_rects.iter().any(|r| rect_contains_box(r, b)));
-            erase_highlight_pixels_in_boxes(&mut rgb_img, &in_table);
             erase_highlight_boxes(&mut rgb_img, &normal);
 
             // 4. 表外高亮框 → 区域（原逻辑不变）
@@ -2386,21 +2366,6 @@ mod tests {
         assert_eq!(img.get_pixel(80, 70), &image::Rgb([255, 255, 255]));
         // 表格线保留
         assert_eq!(img.get_pixel(150, 70), &image::Rgb([0, 0, 0]));
-    }
-
-    #[test]
-    fn erase_highlight_pixels_in_boxes_keeps_black_lines() {
-        let mut img = image::RgbImage::from_pixel(100, 100, image::Rgb([255, 255, 255]));
-        for y in 10..90 {
-            for x in 20..80 {
-                img.put_pixel(x, y, image::Rgb([255, 255, 0])); // 黄色高亮底
-            }
-            img.put_pixel(50, y, image::Rgb([0, 0, 0])); // 穿过的黑色竖线
-        }
-        let boxes = [BoundingBox::with_highlight(20, 10, 79, 89, "yellow")];
-        erase_highlight_pixels_in_boxes(&mut img, &boxes);
-        assert_eq!(img.get_pixel(30, 30), &image::Rgb([255, 255, 255])); // 高亮已清
-        assert_eq!(img.get_pixel(50, 30), &image::Rgb([0, 0, 0])); // 黑线保留
     }
 
     #[test]

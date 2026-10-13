@@ -240,12 +240,15 @@ impl TextRegion {
             || self.margin_left.is_some_and(|v| v > 0.0)
             || self.margin_right.is_some_and(|v| v > 0.0)
     }
-    /// 区域列表里的一行摘要（对齐 Python 版 `TextRegion.label`）。
+    /// 区域列表里的一行摘要（对齐 Python 版 `TextRegion.label`；
+    /// 表格单元格区域前缀 表N· 标注归属，对齐前端 store.ts regionLabel）。
     pub fn label(&self, index: usize) -> String {
         let style = if self.printed { "打印" } else { "手写" };
         let page = if self.page > 1 { format!(" 第{}页", self.page) } else { String::new() };
+        let table = self.table_index.map_or_else(String::new, |n| format!("表{n}·"));
         format!(
-            "{}. {}{} {}字 ({},{} {}×{})",
+            "{}{}. {}{} {}字 ({},{} {}×{})",
+            table,
             index,
             style,
             page,
@@ -917,6 +920,15 @@ mod tests {
         let back: TextRegion = serde_json::from_str(&json).unwrap();
         assert_eq!(back.table_index, Some(3));
         assert_eq!(back, r2);
+    }
+
+    #[test]
+    fn text_region_label_table_prefix() {
+        // 表格单元格区域带 表N· 前缀（对齐 store.ts regionLabel），普通区域无前缀
+        let plain = TextRegion { text: "你好".into(), page: 2, ..TextRegion::default() };
+        assert_eq!(plain.label(1), "1. 手写 第2页 2字 (0,0 0×0)");
+        let cell = TextRegion { text: "答案".into(), table_index: Some(2), ..TextRegion::default() };
+        assert_eq!(cell.label(3), "表2·3. 手写 2字 (0,0 0×0)");
     }
 
     #[test]
