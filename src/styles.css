@@ -302,6 +302,14 @@ body,
   text-overflow: ellipsis;
 }
 
+/* 状态栏三态主题按钮：贴合 26px 状态栏高度的紧凑外观 */
+.status-bar .status-theme-btn {
+  height: 20px;
+  padding: 0 6px;
+  font-size: 11.5px;
+  color: var(--text-sub);
+}
+
 .status-bar .status-actions {
   display: flex;
   align-items: center;

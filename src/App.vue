@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, watch } from "vue";
-import { darkTheme, NConfigProvider, NDialogProvider, NMessageProvider } from "naive-ui";
+import { darkTheme, NButton, NConfigProvider, NDialogProvider, NMessageProvider, NPopselect } from "naive-ui";
 import type { GlobalThemeOverrides } from "naive-ui";
 import PreviewPane from "./components/PreviewPane.vue";
 import ParamsPanel from "./components/ParamsPanel.vue";
@@ -11,6 +11,7 @@ import {
   APP_VERSION,
   buildParams,
   cancelRegionEdit,
+  cycleThemePreference,
   doRender,
   initSystemFonts,
   initThemeSystem,
@@ -20,10 +21,17 @@ import {
   openHelpModal,
   refreshPresets,
   scheduleRender,
+  setThemePreference,
   startupCheckUpdate,
   store,
 } from "./store";
 
+// 状态栏主题按钮的 Popselect 选项（自动 / 浅色 / 深色）
+const themeOptions = [
+  { label: "🖥️ 自动跟随系统", value: "auto" },
+  { label: "☀️ 浅色模式", value: "light" },
+  { label: "🌙 深色模式", value: "dark" },
+];
 
 // 浅色主题：国风青绿主色调
 const lightThemeOverrides: GlobalThemeOverrides = {
@@ -129,6 +137,21 @@ void doRender();
           <footer class="status-bar">
             <span class="status-text">{{ store.status }}</span>
             <div class="status-actions">
+              <NPopselect
+                :value="store.themePreference"
+                :options="themeOptions"
+                @update:value="(val: any) => setThemePreference(val)"
+                trigger="hover"
+              >
+                <NButton size="tiny" quaternary class="status-theme-btn" @click="cycleThemePreference()">
+                  <template v-if="store.themePreference === 'auto'">
+                    🖥️ 自动 ({{ isDarkActive() ? '深色' : '浅色' }})
+                  </template>
+                  <template v-else-if="store.themePreference === 'dark'">🌙 深色</template>
+                  <template v-else>☀️ 浅色</template>
+                </NButton>
+              </NPopselect>
+              <span class="status-sep">·</span>
               <span class="status-link" @click="openHelpModal()" title="查看软件使用教程与技巧">
                 📖 使用教程
               </span>
