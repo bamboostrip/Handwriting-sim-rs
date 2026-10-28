@@ -344,7 +344,8 @@ pub fn merge_wrap_line_boxes(
     boxes: Vec<BoundingBox>,
     chars: &[ExtractedChar],
 ) -> Vec<BoundingBox> {
-    if boxes.len() <= 1 {
+    // 无字符流时行尾/行首判定空真，会退化成"同色+垂直邻近即合并"，直接不合并
+    if boxes.len() <= 1 || chars.is_empty() {
         return boxes;
     }
 
@@ -1493,16 +1494,17 @@ pub(crate) fn pdf_to_images_opt_with_tables(
             );
 
             // 3. 高亮色块分区：表内框（_in_table）不整框擦白（保表格线）、不生成区域，
-            //    其残留高亮像素由 erase_highlight_boxes 内的整页像素过滤步骤一并清除
-            let mut highlight_boxes = detect_highlight_boxes(&rgb_img);
-            // 换行签名合并：规则 3 要求水平重叠 ≥40%，"句子从行中开始、下一行
-            // 行首结束"的两行条纹零重叠会被切成上下两块，这里按行尾/行首签名补合
-            if !page_chars.is_empty() {
-                highlight_boxes = merge_wrap_line_boxes(highlight_boxes, &page_chars);
-            }
-            let (_in_table, normal): (Vec<_>, Vec<_>) = highlight_boxes
+            //    其残留高亮像素由 erase_highlight_boxes 内的整页像素过滤步骤一并清除。
+            //    先按表格分流再换行合并：表内对角相邻的单元格高亮天然满足行尾/行首
+            //    签名，若先合并会逃逸表格分流、整框擦白时抹掉表格线；而两个都不被
+            //    表格包含的框其并集必不被包含，故对纯表外合并而言两种顺序等价
+            let highlight_boxes = detect_highlight_boxes(&rgb_img);
+            let (_in_table, mut normal): (Vec<_>, Vec<_>) = highlight_boxes
                 .into_iter()
                 .partition(|b| table_result.outer_rects.iter().any(|r| rect_contains_box(r, b)));
+            // 换行签名合并：规则 3 要求水平重叠 ≥40%，"句子从行中开始、下一行
+            // 行首结束"的两行条纹零重叠会被切成上下两块，这里按行尾/行首签名补合
+            normal = merge_wrap_line_boxes(normal, &page_chars);
             erase_highlight_boxes(&mut rgb_img, &normal);
 
             // 4. 表外高亮框 → 区域（原逻辑不变）
@@ -2254,6 +2256,48 @@ mod tests {
         ];
         let merged = merge_wrap_line_boxes(boxes, &chars);
         assert_eq!(merged.len(), 2, "条纹不在行尾时不得合并");
+    }
+
+    #[test]
+    fn wrap_merge_with_empty_chars_keeps_boxes() {
+        // 无字符流时行尾/行首判定空真，必须整体退化为不合并（防调用方漏守卫）
+        let boxes = vec![
+            BoundingBox::with_highlight(1315, 1592, 1403, 1629, "green"),
+            BoundingBox::with_highlight(250, 1629, 979, 1666, "green"),
+        ];
+        let merged = merge_wrap_line_boxes(boxes, &[]);
+        assert_eq!(merged.len(), 2, "空字符流不得合并");
+    }
+
+    #[test]
+    fn wrap_merge_allows_touching_stripes() {
+        // 相邻行条纹常在边界 1px 相触（gap_y 为负），应正常合并
+        let mut chars = wrap_scene_chars();
+        for c in chars.iter_mut() {
+            if c.min_y == 1629.0 {
+                c.min_y = 1628.0;
+                c.max_y = 1665.0;
+            }
+        }
+        let boxes = vec![
+            BoundingBox::with_highlight(1315, 1592, 1403, 1629, "green"),
+            BoundingBox::with_highlight(250, 1628, 979, 1665, "green"),
+        ];
+        let merged = merge_wrap_line_boxes(boxes, &chars);
+        assert_eq!(merged.len(), 1, "1px 相触的换行对应合并");
+    }
+
+    #[test]
+    fn wrap_merge_tolerates_char_within_tol_right_of_tail() {
+        // 行尾紧邻的窄字符（如一个空格，落在半个框高容差内）不应阻断合并
+        let mut chars = wrap_scene_chars();
+        chars.push(ch_at(1405.0, 1592.0, 14.0, 37.0)); // 距条纹右缘 2px 的窄字符
+        let boxes = vec![
+            BoundingBox::with_highlight(1315, 1592, 1403, 1629, "green"),
+            BoundingBox::with_highlight(250, 1629, 979, 1666, "green"),
+        ];
+        let merged = merge_wrap_line_boxes(boxes, &chars);
+        assert_eq!(merged.len(), 1, "容差内的紧邻字符不阻断换行合并");
     }
 
     #[test]
