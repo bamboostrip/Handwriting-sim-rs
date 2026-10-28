@@ -962,10 +962,18 @@ function onSelectionChange(): void {
     (window.getSelection()?.rangeCount &&
       editorRef.value?.contains(window.getSelection()!.getRangeAt(0).commonAncestorContainer))
   ) {
+    const sel = window.getSelection();
+    const selInEditor =
+      !!sel &&
+      sel.rangeCount > 0 &&
+      !!editorRef.value?.contains(sel.getRangeAt(0).commonAncestorContainer);
+    // 非折叠选区（真实选中了一段文字）才让右栏「选区角色」标记条出现
+    store.hasTextSelection = !!selInEditor && !sel!.isCollapsed;
     updateCurrentParaFromSelection();
     updateFloatingBubble();
   } else {
     floatingVisible.value = false;
+    store.hasTextSelection = false;
   }
 }
 
