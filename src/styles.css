@@ -272,6 +272,46 @@ body,
   font-size: 15px;
 }
 
+/* ---------------- 折叠分组面板 ---------------- */
+.panel-collapse .n-collapse-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg);
+  margin-bottom: 8px;
+}
+
+.panel-collapse .n-collapse-item__header {
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.panel-collapse .n-collapse-item__content-inner {
+  padding: 4px 12px 10px;
+}
+
+.collapse-count {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-sub);
+}
+
+.import-entry {
+  margin-bottom: 10px;
+}
+
+.import-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.import-entry-desc {
+  font-size: 11px;
+  color: var(--text-sub);
+  line-height: 1.5;
+  margin-top: 3px;
+}
+
 .action-bar {
   display: flex;
   gap: 10px;
