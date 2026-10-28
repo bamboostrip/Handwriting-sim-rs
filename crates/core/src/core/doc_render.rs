@@ -1117,14 +1117,21 @@ pub(crate) struct TablePageResult {
     pub cell_rects: Vec<RectPx>,
     /// 每张（有区域的）表的外包围矩形（供高亮框分流）。
     pub outer_rects: Vec<RectPx>,
+    /// 下一页的流起点（本页已消费元素之后的下标；未定位/未完成的表格
+    /// 保持指向自身，下一页重走）。
+    pub next_start_element: usize,
 }
 
 /// 处理一页上的所有表格：定位 → 擦字 → 生成单元格 TextRegion。
+/// `start_element` 为本页在 body 流中的起点（上一页的 next_start_element）。
+/// located_on_page == false 的表整表跳过（不定位出区域、不擦除、不推断矩形），
+/// 但流位置（next_start_element）由 locate 结果决定，与是否输出区域无关。
 /// 无表格或整表未命中时返回空结果（表格保留印刷底图）。
 pub(crate) fn process_tables_on_page(
     stream: &[BodyElement],
     views: &[TableView],
     chars: &[ExtractedChar],
+    start_element: usize,
     page_num: i32,
     dpi: u32,
     color_map: &mut std::collections::HashMap<String, u32>,
@@ -1132,11 +1139,16 @@ pub(crate) fn process_tables_on_page(
     img: &mut image::RgbImage,
 ) -> TablePageResult {
     let scale = dpi as f32 / 72.0;
-    let matches = docx_tables::locate_tables_on_page(stream, views, chars);
-    let mut result = TablePageResult::default();
+    let (matches, next_start_element) =
+        docx_tables::locate_tables_on_page(stream, views, chars, start_element);
+    let mut result = TablePageResult { next_start_element, ..TablePageResult::default() };
 
     for view in views {
         let Some(m) = matches.iter().find(|m| m.table_index == view.index) else { continue };
+        // 本页未定位的表（整表在更早/更晚页）：不生成区域、不擦除、不推断矩形。
+        if !m.located_on_page {
+            continue;
+        }
         // 行主序扁平展开：flat_cells / flat_matches / rects 三者下标一一对应
         //（均按 view.rows 迭代顺序展开，含续行格占位）。
         let flat_cells: Vec<&docx_tables::TableCellView> =
@@ -1354,6 +1366,9 @@ pub(crate) fn pdf_to_images_opt_with_tables(
     let mut next_role_id = 2u32;
     // body 流的表格视图只依赖文档结构，构建一次供所有页复用
     let views = docx_tables::build_table_views(body_stream);
+    // 跨页流游标：本页已消费元素之后的下标，供下一页作为流起点
+    //（前页元素不再消耗后页字符，防游标中毒）
+    let mut start_element = 0usize;
 
     for (index, page) in document.pages().iter().enumerate() {
         // 目标像素尺寸：页面点数（1/72 英寸）× dpi/72
@@ -1371,13 +1386,15 @@ pub(crate) fn pdf_to_images_opt_with_tables(
 
             // 0. 表格：定位 + 擦字 + 生成单元格区域（先于标签/高亮，标签排除与高亮分流依赖其矩形）
             let table_result = if views.is_empty() {
-                TablePageResult::default()
+                // 无表格：流位置保持不变（显式传递，避免 default 的 0 回退）
+                TablePageResult { next_start_element: start_element, ..TablePageResult::default() }
             } else {
                 process_tables_on_page(
-                    body_stream, &views, &page_chars, (index + 1) as i32, dpi,
+                    body_stream, &views, &page_chars, start_element, (index + 1) as i32, dpi,
                     &mut color_map, &mut next_role_id, &mut rgb_img,
                 )
             };
+            start_element = table_result.next_start_element;
 
             // 2. {{...}}/【...】标签（表格内标签已被单元格区域接管）
             let tag_regions = extract_pdf_page_tags(
@@ -2399,8 +2416,9 @@ mod tests {
         let mut color_map = std::collections::HashMap::new();
         let mut next_role_id = 2u32;
         let result = process_tables_on_page(
-            &stream, &views, &chars, 1, 200, &mut color_map, &mut next_role_id, &mut img,
+            &stream, &views, &chars, 0, 1, 200, &mut color_map, &mut next_role_id, &mut img,
         );
+        assert_eq!(result.next_start_element, 1, "2/2 定位完成 → 表格消费，流起点越过表格");
         assert_eq!(result.regions.len(), 2);
         let r0 = &result.regions[0];
         assert_eq!(r0.text, "姓名");
@@ -2432,10 +2450,45 @@ mod tests {
         let mut color_map = std::collections::HashMap::new();
         let mut next_role_id = 2u32;
         let result = process_tables_on_page(
-            &stream, &views, &chars, 1, 200, &mut color_map, &mut next_role_id, &mut img,
+            &stream, &views, &chars, 0, 1, 200, &mut color_map, &mut next_role_id, &mut img,
         );
         // 仅起始格生成区域；续行格跳过
         assert_eq!(result.regions.len(), 1);
         assert_eq!(result.regions[0].text, "合并");
+    }
+
+    #[test]
+    fn process_tables_unlocated_table_yields_no_regions() {
+        // 表格不在本页（0 格定位）：不生成区域、不擦除、不推断矩形；
+        // 流起点仍指向表格元素（下一页可继续定位）——这是用户跨页 bug 的
+        // doc_render 侧门禁：located_on_page=false 的表必须整表跳过。
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>第一页正文</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>甲格</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>乙格</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut registry = crate::core::docx_io::StyleRegistry::new();
+        let stream = crate::core::docx_io::parse_body_stream_for_test(xml, &mut registry).unwrap();
+        let views = crate::core::docx_tables::build_table_views(&stream);
+        // 本页字符流只有正文（表格字符全都不在）
+        let chars: Vec<ExtractedChar> = "第一页正文"
+            .chars()
+            .enumerate()
+            .map(|(i, c)| ExtractedChar {
+                ch: c,
+                min_x: 10.0 + i as f32 * 12.0,
+                min_y: 100.0,
+                max_x: 20.0 + i as f32 * 12.0,
+                max_y: 120.0,
+                font_size_pt: 10.5,
+                glyph_h_pt: 10.0,
+            })
+            .collect();
+        let mut img = image::RgbImage::from_pixel(600, 400, image::Rgb([255, 255, 255]));
+        let mut color_map = std::collections::HashMap::new();
+        let mut next_role_id = 2u32;
+        let result = process_tables_on_page(
+            &stream, &views, &chars, 0, 1, 200, &mut color_map, &mut next_role_id, &mut img,
+        );
+        assert!(result.regions.is_empty(), "未定位表不得生成区域");
+        assert!(result.cell_rects.is_empty());
+        assert!(result.outer_rects.is_empty());
+        assert_eq!(result.next_start_element, 1, "流起点指向表格元素（下标 1），下一页重走");
     }
 }
