@@ -329,6 +329,91 @@ pub fn merge_close_boxes(mut boxes: Vec<BoundingBox>) -> Vec<BoundingBox> {
     boxes
 }
 
+/// 换行签名合并：同一句高亮跨行折断时，行尾条纹与下一行行首条纹水平投影零重叠，
+/// 规则 3 的 40% 重叠要求判不合并 → 一句话被上下切成两个区域。此函数按换行签名
+/// 「上行条纹是行尾（同行右侧无字符）& 下行条纹是行首（同行左侧无字符）& 同色 &
+/// 垂直间隙 ≤ 1.5×较小框高」把这类条纹对合并回来；在 merge_close_boxes 之后调用，
+/// 只处理其漏网的零重叠跨行对。签名用行内字符占位而非页面版心边：对离群字符
+/// 坐标（如 loose bounds 越界）免疫。
+///
+/// 只对「原始条纹对」做单趟配对，合并结果不再参与后续配对：多行句子（3 条纹
+/// 以上）的水平重叠行已被规则 3 提前串起，到达这里的基本是 2 条纹短句；若允许
+/// 联合框继续配对，其高度会让间隙阈值（1.5×较小框高）失真，把上方无关段落
+/// 整块吞进来（实测复现过），故显式禁止链式合并。
+pub fn merge_wrap_line_boxes(
+    boxes: Vec<BoundingBox>,
+    chars: &[ExtractedChar],
+) -> Vec<BoundingBox> {
+    if boxes.len() <= 1 {
+        return boxes;
+    }
+
+    let mut result: Vec<BoundingBox> = Vec::new();
+    let mut consumed = vec![false; boxes.len()];
+    for i in 0..boxes.len() {
+        if consumed[i] {
+            continue;
+        }
+        // 判定始终用原始框 i 与原始框 j：union 后的 current 只作输出；
+        // 发射或被吸收的框都标记 consumed，防止后续框再与它配对造成重复合并
+        let mut current = boxes[i].clone();
+        for j in (i + 1)..boxes.len() {
+            if consumed[j] {
+                continue;
+            }
+            if is_wrap_pair(&boxes[i], &boxes[j], chars) {
+                current = current.union(&boxes[j]);
+                consumed[j] = true;
+            }
+        }
+        consumed[i] = true;
+        result.push(current);
+    }
+    result
+}
+
+/// 判断 b 是否是 a 的跨行延续（换行签名：上行条纹为行尾、下行条纹为行首）。
+/// 上下关系按 min_y 归一，输入顺序无关；垂直阈值沿用规则 3 的行距容差
+/// （间隙 ≤ 1.5×较小框高），行尾/行首容差为半个较小框高（可吸收行尾空格）。
+fn is_wrap_pair(a: &BoundingBox, b: &BoundingBox, chars: &[ExtractedChar]) -> bool {
+    if a.highlight != b.highlight {
+        return false;
+    }
+    let (upper, lower) = if a.min_y <= b.min_y { (a, b) } else { (b, a) };
+    // 必须严格换行到下一行（同一行内的左右分块不归换行签名管）
+    if lower.min_y <= upper.min_y {
+        return false;
+    }
+    let min_h = upper.height().min(lower.height()) as i32;
+    let gap_y = lower.min_y as i32 - upper.max_y as i32;
+    if gap_y > (min_h * 3 / 2) {
+        return false;
+    }
+    let tol = min_h as f32 / 2.0;
+
+    // 行尾：与上行条纹同行的字符中，没有谁整个落在条纹右侧（超出容差）。
+    // 行带判定要求重叠 ≥ 字高一半：相邻行条纹常在边界相触（1px 重叠），
+    // 不收紧会把下一行的字符误算进上一行
+    let in_band = |c: &ExtractedChar, b: &BoundingBox| {
+        let overlap = c.max_y.min(b.max_y as f32) - c.min_y.max(b.min_y as f32);
+        overlap > 0.0 && overlap >= (c.max_y - c.min_y) * 0.5
+    };
+    let upper_right = upper.max_x as f32 + tol;
+    let chars_right_of_upper = chars
+        .iter()
+        .any(|c| in_band(c, upper) && c.min_x > upper_right);
+    if chars_right_of_upper {
+        return false;
+    }
+
+    // 行首：与下行条纹同行的字符中，没有谁整个落在条纹左侧（超出容差）
+    let lower_left = lower.min_x as f32 - tol;
+    let chars_left_of_lower = chars
+        .iter()
+        .any(|c| in_band(c, lower) && c.max_x < lower_left);
+    !chars_left_of_lower
+}
+
 /// 在图像上将高亮矩形区域及残留的高亮像素抹白为纯白 `#FFFFFF`。
 pub fn erase_highlight_boxes(img: &mut image::RgbImage, boxes: &[BoundingBox]) {
     let width = img.width();
@@ -1409,7 +1494,12 @@ pub(crate) fn pdf_to_images_opt_with_tables(
 
             // 3. 高亮色块分区：表内框（_in_table）不整框擦白（保表格线）、不生成区域，
             //    其残留高亮像素由 erase_highlight_boxes 内的整页像素过滤步骤一并清除
-            let highlight_boxes = detect_highlight_boxes(&rgb_img);
+            let mut highlight_boxes = detect_highlight_boxes(&rgb_img);
+            // 换行签名合并：规则 3 要求水平重叠 ≥40%，"句子从行中开始、下一行
+            // 行首结束"的两行条纹零重叠会被切成上下两块，这里按行尾/行首签名补合
+            if !page_chars.is_empty() {
+                highlight_boxes = merge_wrap_line_boxes(highlight_boxes, &page_chars);
+            }
             let (_in_table, normal): (Vec<_>, Vec<_>) = highlight_boxes
                 .into_iter()
                 .partition(|b| table_result.outer_rects.iter().any(|r| rect_contains_box(r, b)));
@@ -2065,6 +2155,145 @@ mod tests {
         assert_eq!(merged.len(), 2, "间隔 109px 的同色高亮框不应合并");
         assert_eq!(merged[0].max_y, 205);
         assert_eq!(merged[1].min_y, 314);
+    }
+
+    // ---- 换行签名合并（merge_wrap_line_boxes）----
+    // 复现几何（200DPI 真实 Word 链路实测）：句子从行中开始、下一行行首附近结束，
+    // 行尾条纹 (1315,1592)-(1403,1629) 与行首条纹 (250,1629)-(979,1666)
+    // 水平零重叠，规则 3 判不合并 → 一句话被上下切成两个区域。
+    // 签名=上行条纹是「行尾」（同行右侧无字符）、下行条纹是「行首」（同行左侧无字符）。
+
+    /// 构造一个字符对象：占据 [x, x+w) × [y, y+h)
+    fn ch_at(x: f32, y: f32, w: f32, h: f32) -> ExtractedChar {
+        ExtractedChar {
+            ch: '字',
+            min_x: x,
+            min_y: y,
+            max_x: x + w,
+            max_y: y + h,
+            font_size_pt: 10.5,
+            glyph_h_pt: 10.5,
+        }
+    }
+
+    /// 己场景的字符流：行1 = 前缀(250..1310) + 句尾高亮(1315..1403)；
+    /// 行2 = 句首高亮(250..979) + 行2 后续正文(984..1390)
+    fn wrap_scene_chars() -> Vec<ExtractedChar> {
+        let mut chars = Vec::new();
+        // 行 1 前缀（未高亮）：x 250..1310
+        for i in 0..36 {
+            chars.push(ch_at(250.0 + i as f32 * 29.4, 1592.0, 29.0, 37.0));
+        }
+        // 行 1 句尾（高亮）：1315..1403
+        for i in 0..3 {
+            chars.push(ch_at(1315.0 + i as f32 * 29.4, 1592.0, 29.0, 37.0));
+        }
+        // 行 2 句首（高亮）：250..979
+        for i in 0..25 {
+            chars.push(ch_at(250.0 + i as f32 * 29.4, 1629.0, 29.0, 37.0));
+        }
+        // 行 2 后续未高亮正文：984..1390
+        for i in 0..14 {
+            chars.push(ch_at(984.0 + i as f32 * 29.4, 1629.0, 29.0, 37.0));
+        }
+        chars
+    }
+
+    #[test]
+    fn wrap_tail_and_head_merge_into_one() {
+        let boxes = vec![
+            BoundingBox::with_highlight(1315, 1592, 1403, 1629, "green"),
+            BoundingBox::with_highlight(250, 1629, 979, 1666, "green"),
+        ];
+        let merged = merge_wrap_line_boxes(boxes, &wrap_scene_chars());
+        assert_eq!(merged.len(), 1, "行尾条纹+行首条纹应按换行签名合并为 1 个框");
+        assert_eq!((merged[0].min_x, merged[0].max_x), (250, 1403));
+        assert_eq!((merged[0].min_y, merged[0].max_y), (1592, 1666));
+    }
+
+    #[test]
+    fn wrap_merge_survives_reversed_input_order() {
+        let boxes = vec![
+            BoundingBox::with_highlight(250, 1629, 979, 1666, "green"),
+            BoundingBox::with_highlight(1315, 1592, 1403, 1629, "green"),
+        ];
+        let merged = merge_wrap_line_boxes(boxes, &wrap_scene_chars());
+        assert_eq!(merged.len(), 1, "输入顺序不应影响换行签名合并");
+    }
+
+    #[test]
+    fn wrap_merge_respects_color() {
+        let boxes = vec![
+            BoundingBox::with_highlight(1315, 1592, 1403, 1629, "green"),
+            BoundingBox::with_highlight(250, 1629, 979, 1666, "blue"),
+        ];
+        let merged = merge_wrap_line_boxes(boxes, &wrap_scene_chars());
+        assert_eq!(merged.len(), 2, "不同颜色的行尾/行首条纹不得合并");
+    }
+
+    #[test]
+    fn wrap_merge_rejects_large_vertical_gap() {
+        // 行首条纹下移 200px（中间隔了未高亮内容），不构成同句换行
+        let boxes = vec![
+            BoundingBox::with_highlight(1315, 1592, 1403, 1629, "green"),
+            BoundingBox::with_highlight(250, 1830, 979, 1867, "green"),
+        ];
+        let merged = merge_wrap_line_boxes(boxes, &wrap_scene_chars());
+        assert_eq!(merged.len(), 2, "垂直间隙过大不得按换行签名合并");
+    }
+
+    #[test]
+    fn wrap_merge_requires_tail_at_line_end() {
+        // 行 1 高亮条纹右侧还有正文（1410..1490），说明句子没写到行尾，不是换行
+        let mut chars = wrap_scene_chars();
+        chars.push(ch_at(1410.0, 1592.0, 29.0, 37.0));
+        chars.push(ch_at(1440.0, 1592.0, 29.0, 37.0));
+        let boxes = vec![
+            BoundingBox::with_highlight(1315, 1592, 1403, 1629, "green"),
+            BoundingBox::with_highlight(250, 1629, 979, 1666, "green"),
+        ];
+        let merged = merge_wrap_line_boxes(boxes, &chars);
+        assert_eq!(merged.len(), 2, "条纹不在行尾时不得合并");
+    }
+
+    #[test]
+    fn wrap_merge_does_not_chain_through_unrelated_blob_above() {
+        // 回归（集成实测踩坑）：上方无关多行大框与下方换行对间隙 108px，若允许
+        // 联合框继续参与配对，其高度会让间隙阈值（1.5×较小框高）失真而整块吞并；
+        // 单趟原始框配对必须保持 3 框独立
+        let mut chars = wrap_scene_chars();
+        // 上方 blob 两行字符（y 1400..1484，右缘同 1403）
+        for i in 0..38 {
+            chars.push(ch_at(250.0 + i as f32 * 29.4, 1400.0, 29.0, 37.0));
+        }
+        for i in 0..38 {
+            chars.push(ch_at(250.0 + i as f32 * 29.4, 1447.0, 29.0, 37.0));
+        }
+        let boxes = vec![
+            BoundingBox::with_highlight(250, 1400, 1403, 1484, "green"),
+            BoundingBox::with_highlight(1315, 1592, 1403, 1629, "green"),
+            BoundingBox::with_highlight(250, 1629, 979, 1666, "green"),
+        ];
+        let merged = merge_wrap_line_boxes(boxes, &chars);
+        assert_eq!(merged.len(), 2, "blob 独立 + 换行对合并 = 2 框，不得链式吞并");
+        let wrap = merged.iter().find(|b| b.min_y == 1592).expect("换行对应独立存在");
+        assert_eq!((wrap.min_y, wrap.max_y), (1592, 1666));
+        let blob = merged.iter().find(|b| b.min_y == 1400).expect("上方 blob 应保持独立");
+        assert_eq!((blob.min_y, blob.max_y), (1400, 1484));
+    }
+
+    #[test]
+    fn wrap_merge_requires_head_at_line_start() {
+        // 行 2 高亮条纹左侧还有正文（180..245），说明句子不是从行首开始
+        let mut chars = wrap_scene_chars();
+        chars.push(ch_at(180.0, 1629.0, 29.0, 37.0));
+        chars.push(ch_at(210.0, 1629.0, 29.0, 37.0));
+        let boxes = vec![
+            BoundingBox::with_highlight(1315, 1592, 1403, 1629, "green"),
+            BoundingBox::with_highlight(250, 1629, 979, 1666, "green"),
+        ];
+        let merged = merge_wrap_line_boxes(boxes, &chars);
+        assert_eq!(merged.len(), 2, "条纹不在行首时不得合并");
     }
 
     #[test]
