@@ -25,6 +25,7 @@ import {
   startupCheckUpdate,
   store,
 } from "./store";
+import type { ThemePreference } from "./store";
 
 // 状态栏主题按钮的 Popselect 选项（自动 / 浅色 / 深色）
 const themeOptions = [
@@ -140,7 +141,7 @@ void doRender();
               <NPopselect
                 :value="store.themePreference"
                 :options="themeOptions"
-                @update:value="(val: any) => setThemePreference(val)"
+                @update:value="(val: ThemePreference) => setThemePreference(val)"
                 trigger="hover"
               >
                 <NButton size="tiny" quaternary class="status-theme-btn" @click="cycleThemePreference()">

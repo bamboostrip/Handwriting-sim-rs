@@ -51,7 +51,7 @@ import { closeHelpModal, store } from "../store";
                 <div class="step-body">
                   <div class="step-title">输入或导入文本</div>
                   <div class="step-text">
-                    在<strong>「主文本与段落排版」</strong>输入框中键入文字，支持回车自然换行、段首缩进与对齐调整。您也可以点击<strong>「导入 docx」</strong>一键提取 Word 文档内容。停止输入约 300 毫秒后，左侧预览区将自动完成全分辨率实时排版。
+                    在<strong>「文本内容」</strong>组的输入框中键入文字，支持回车自然换行、段首缩进与对齐调整。您也可以在<strong>「导入素材」</strong>组点击<strong>「导入 Word 正文文本 (.docx)」</strong>一键提取 Word 文档内容。停止输入约 300 毫秒后，左侧预览区将自动完成全分辨率实时排版。
                   </div>
                 </div>
               </div>
@@ -61,7 +61,7 @@ import { closeHelpModal, store } from "../store";
                 <div class="step-body">
                   <div class="step-title">实时预览与导出</div>
                   <div class="step-text">
-                    左侧预览区展示最终视觉效果（可翻页查看长文档）。满意后在面板底部点击<strong>「导出为图片」</strong>批量保存 PNG，或点击<strong>「导出为 PDF」</strong>生成<strong>300 DPI 印刷级无损位图层 PDF</strong>，可直接打印存档。
+                    左侧预览区展示最终视觉效果（可翻页查看长文档）。满意后在面板底部点击<strong>「导出」</strong>批量保存 PNG，或点击<strong>「导出为 PDF」</strong>生成<strong>300 DPI 印刷级无损位图层 PDF</strong>，可直接打印存档。
                   </div>
                 </div>
               </div>
@@ -100,7 +100,7 @@ import { closeHelpModal, store } from "../store";
                 <div class="section-title">第二步：导出为 PDF 导入（强烈推荐 ⭐）</div>
                 <div class="guide-text">
                   在 Word 中点击「文件」→「另存为 PDF」或「导出为 PDF」。<br />
-                  然后在软件中点击<strong>「导入文档底图」</strong>并选择该 PDF 文件。<br />
+                  然后在软件的<strong>「导入素材」</strong>组点击<strong>「导入 PDF / Word 打印底图」</strong>并选择该 PDF 文件。<br />
                   <NTag size="small" type="warning" style="margin-top: 6px">💡 为什么推荐 PDF？</NTag>
                   Word 文档直接解析受本机字体环境和排版引擎差异影响，个别版式可能轻微偏移；而 PDF 具备固化的矢量排版和嵌入字形，本软件能 <strong>100% 精确像素级还原文档每一页底图</strong>。
                 </div>
@@ -123,8 +123,8 @@ import { closeHelpModal, store } from "../store";
                 <div class="guide-text">
                   针对不同用户的使用习惯，软件会在导入时弹出确认选项：
                   <ul class="guide-list">
-                    <li><strong>PDF 想要保留背景色（不擦除、不提取选框）</strong>：导入文档底图时选择<strong>「仅作为纯底图」</strong>，软件将完整保留文档原始色彩、图像与文字，原样作为背景信纸。</li>
-                    <li><strong>Word 模板有高亮但想通篇全手写</strong>：导入 docx 时选择<strong>「全文手写模式」</strong>，软件自动忽略所有高亮背景标记，无需手动改模板，整篇直接全手写排版。</li>
+                    <li><strong>PDF 想要保留背景色（不擦除、不提取选框）</strong>：导入 PDF / Word 打印底图时选择<strong>「仅作为纯底图」</strong>，软件将完整保留文档原始色彩、图像与文字，原样作为背景信纸。</li>
+                    <li><strong>Word 模板有高亮但想通篇全手写</strong>：导入 Word 正文文本 (.docx) 时选择<strong>「全文手写模式」</strong>，软件自动忽略所有高亮背景标记，无需手动改模板，整篇直接全手写排版。</li>
                   </ul>
                 </div>
               </div>
@@ -153,7 +153,7 @@ import { closeHelpModal, store } from "../store";
               <div class="feature-section">
                 <div class="section-title">2. 笔迹角色管理（多人书写与多字体混排）</div>
                 <div class="guide-text">
-                  在参数面板中展开<strong>「笔迹角色管理」</strong>：
+                  在参数面板中展开<strong>「笔迹角色」</strong>分组：
                   <ul class="guide-list">
                     <li>系统默认为角色 0（主手写体）与角色 1（默认打印体）；导入带高亮的文档后，会自动为各高亮颜色生成角色（如手写角色 1、角色 2）。</li>
                     <li>您可以为每个角色单独设置<strong>不同的手写字体文件</strong>、<strong>墨水颜色</strong>（如黑色中性笔、蓝色圆珠笔、红笔批改）以及<strong>专属扰动强度</strong>。</li>
@@ -208,7 +208,7 @@ import { closeHelpModal, store } from "../store";
               <div class="feature-section">
                 <div class="section-title">2. 写错字涂改模拟（绝妙真实细节）</div>
                 <div class="guide-text">
-                  展开面板底部的<strong>「写错字模拟」</strong>：
+                  在<strong>「笔迹仿真与版式」</strong>分组内找到<strong>「写错字」</strong>卡片（该组默认折叠，点击组头即可展开）：
                   <ul class="guide-list">
                     <li><strong>错字率</strong>：建议设置为 <strong>2% ~ 5%</strong>。数值过大显得潦草，轻微错字更具手写真实感。</li>
                     <li><strong>涂改样式</strong>：支持<strong>单线划掉</strong>、<strong>双线划掉</strong>、<strong>斜线涂划</strong>、<strong>叉号划除</strong>。涂抹笔迹采用贝塞尔曲线与随机粗细模拟真实笔画。</li>
@@ -247,7 +247,7 @@ import { closeHelpModal, store } from "../store";
               <div class="feature-section">
                 <div class="section-title">2. 纯背景预览：先摆版式，再填内容</div>
                 <div class="guide-text">
-                  无需输入任何文字：选好背景信纸（或导入文档底图）后，左侧预览区会直接显示底图。先浏览整体版式、规划每处手写区域的位置，再逐页框选与录入文字，思路更顺畅。
+                  无需输入任何文字：选好背景信纸（或导入 PDF / Word 打印底图）后，左侧预览区会直接显示底图。先浏览整体版式、规划每处手写区域的位置，再逐页框选与录入文字，思路更顺畅。
                 </div>
               </div>
 
@@ -266,7 +266,7 @@ import { closeHelpModal, store } from "../store";
                 <div class="guide-text">
                   <ul class="guide-list">
                     <li><strong>文字颜色</strong>：支持 <code>#RRGGBB</code> 自定义墨水色，碳黑、蓝黑、红笔随意换。</li>
-                    <li><strong>深色模式</strong>：顶部标题栏一键轮转 🖥️ 跟随系统 / ☀️ 浅色 / 🌙 深色主题（也可在「关于」中精准选择）。</li>
+                    <li><strong>深色模式</strong>：底部状态栏一键轮转 🖥️ 跟随系统 / ☀️ 浅色 / 🌙 深色主题（也可在「关于」中精准选择）。</li>
                     <li><strong>预览底色</strong>：预览区下方可切换浅灰绿 / 深灰两档视口底色，长时间盯屏更护眼。</li>
                   </ul>
                 </div>

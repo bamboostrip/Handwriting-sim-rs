@@ -984,6 +984,8 @@ onMounted(() => {
   onBeforeUnmount(() => {
     unregister();
     document.removeEventListener("selectionchange", onSelectionChange);
+    // 组件卸载时复位选区状态，避免右栏「选区角色」标记条残留（纯防御）
+    store.hasTextSelection = false;
   });
 });
 </script>
