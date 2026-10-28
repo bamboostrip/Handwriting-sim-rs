@@ -2,7 +2,8 @@
 //!
 //! 每个单元格得到：清理后的可见文本（{{...}}/【...】标签已剥离）、
 //! 列起始/跨列、对齐、字号回退、印刷体判定与高亮色
-//!（w:highlight 优先，无高亮时非黑 w:color 字色回退映射为标准色名）。
+//!（w:highlight 优先，无高亮时具饱和度的彩色 w:color 字色回退映射为
+//! 标准色名；黑/灰/白字是正文配色，不映射）。
 //! 嵌套表格的内容已在 docx_io 解析时丢弃（外层格文本不含内层表格）。
 
 use crate::core::docx_io::{BodyElement, CellVMerge, ParsedCell};
@@ -38,7 +39,8 @@ pub struct TableCellView {
     /// 灰高亮 → 整格保留印刷底图（不生成区域、不擦除）。
     pub skip_printed: bool,
     /// 高亮色名（角色映射用）：首个非灰 w:highlight run；无 w:highlight 时
-    /// 回退取首个非黑 w:color run 经 classify_highlight_color 映射的标准色名。
+    /// 回退取首个具饱和度（通道差 ≥ COLOR_FILL_MIN_SPREAD）的彩色 w:color run
+    /// 经 classify_highlight_color 映射的标准色名；黑/灰/白字不映射。
     pub highlight: Option<String>,
 }
 
@@ -58,6 +60,11 @@ pub fn build_table_views(stream: &[BodyElement]) -> Vec<TableView> {
     views
 }
 
+/// 字色回退映射的最低通道差（max−min，与 doc_render::is_highlight_pixel 的
+/// 灰度差阈值同口径）：黑白灰字（7F7F7F/A6A6A6/D9D9D9/FFFFFF 等）通道差
+/// 为 0，是正文配色而非标记，不得落入 classify_highlight_color 的兜底色。
+const COLOR_FILL_MIN_SPREAD: u8 = 30;
+
 fn build_cell_view(c: &ParsedCell) -> TableCellView {
     let raw_text: String = c.runs.iter().map(|r| r.text.as_str()).collect();
     let text = strip_tag_syntax(&raw_text);
@@ -73,14 +80,20 @@ fn build_cell_view(c: &ParsedCell) -> TableCellView {
             r.style.highlight.is_some() && !r.style.highlight.as_deref().is_some_and(is_gray_highlight)
         })
         .and_then(|r| r.style.highlight.clone())
-        // 无 w:highlight 时回退取首个非黑 w:color run（用户用字体颜色而非
-        // 高亮标记单元格），映射为标准色名以复用高亮角色配色管线；
-        // 黑色是正文默认色，不构成标记。灰色判定（skip_printed）仍只看
-        // w:highlight，此处不改变印刷体语义。
+        // 无 w:highlight 时回退取首个具饱和度的彩色 w:color run（用户用字体
+        // 颜色而非高亮标记单元格），映射为标准色名以复用高亮角色配色管线。
+        // 黑色是正文默认色、灰/白是正文配色，通道差 < COLOR_FILL_MIN_SPREAD
+        // 一律不构成标记（classify 兜底分支会返回 “yellow”，必须拦在门外）。
+        // 灰色判定（skip_printed）仍只看 w:highlight，此处不改变印刷体语义。
         .or_else(|| {
             c.runs
                 .iter()
-                .find_map(|r| r.style.fill.filter(|rgb| *rgb != [0u8, 0, 0]))
+                .find_map(|r| {
+                    r.style.fill.filter(|rgb| {
+                        let [cr, cg, cb] = *rgb;
+                        cr.max(cg).max(cb) - cr.min(cg).min(cb) >= COLOR_FILL_MIN_SPREAD
+                    })
+                })
                 .map(|[r, g, b]| classify_highlight_color(r, g, b).to_string())
         });
     let align = match c.fmt.jc.as_deref() {
@@ -111,7 +124,9 @@ const CELL_WINDOW: usize = 3000;
 const CELL_MATCH_RATIO: f32 = 0.6;
 /// 表格在一页上判定“已开始输出区域”的最低定位格数（防止正文误匹配产生幻影区域）。
 const TABLE_LOCATED_MIN_CELLS: usize = 2;
-/// 表格判定“整表完成”（后续页不再重试）的定位比例。
+/// 表格判定“整表完成”（后续页不再重试）的定位比例。消费为严格大于：
+/// 恰好一半（如 4 格表 2+2 均分）仍视为分割中，后半必须留给下一页补走
+///（在 50% 处消费会让后半永不出现在任何后续页的起步元素流中）。
 const TABLE_CONSUMED_RATIO: f32 = 0.5;
 /// 段落判定匹配成功（消费字符）的最低命中比例；失败时游标回退不再推进。
 const PARAGRAPH_MATCH_RATIO: f32 = 0.6;
@@ -253,10 +268,16 @@ impl PageStreamMatcher {
 ///（其之前的元素属于更早的页，本页不触碰——否则前页段落会消耗本页字符，
 /// 游标中毒）。返回 (各表匹配结果（含 located_on_page 标记）, matched_upto)：
 /// matched_upto 为“最后一个已消费元素之后”的下标，供下一页作为 start_element。
-/// 段落匹配成功（比例达标）→ 消费；表格定位比例 >= TABLE_CONSUMED_RATIO → 整表
-/// 消费（后续页不再重走）；拆分表（已开始但未过半）与本页未定位的表不推进
-/// matched_upto——下一页重走该表时，已定位格的字符不在下一页流中，只会定位
-/// 余下部分，不会重复。
+/// 段落匹配成功（比例达标）→ 消费；表格定位比例 > TABLE_CONSUMED_RATIO → 整表
+/// 消费（后续页不再重走；恰好一半不算）；拆分表（已开始但未过半）与本页
+/// 未定位的表不推进 matched_upto——下一页重走该表时，已定位格的字符不在
+/// 下一页流中，只会定位余下部分，不会重复。
+/// 分割中的表（本页已定位但未消费）还钳制 matched_upto：按文档序其后的
+/// 段落渲染于表尾之后，只可能出现在更晚的页，本页任何段落“匹配”均为
+/// 假匹配（短段落如 甲方/乙方 2 字即可廉价误中），不得借其把 matched_upto
+/// 推过该表（否则表被永久跳过，余下半表 0 区域）。从未定位过的表
+///（located == 0）不钳制：其后的首个合法段落匹配仍可推进 matched_upto
+///（自愈路径，见 long_doc_table_on_later_page_locates）。
 /// 未命中任何文字的表也返回（row_matches 全 None、located_on_page=false，
 /// 由调用方按 located_on_page 门禁过滤）。
 pub fn locate_tables_on_page(
@@ -274,6 +295,9 @@ pub fn locate_tables_on_page(
         .filter(|el| matches!(el, BodyElement::Table(_)))
         .count();
     let mut matched_upto = start_element;
+    // 最后一个“正在分割中”的表元素下标（本页已定位未消费）：
+    // 走完后用于把 matched_upto 钳回该表（假段落匹配防护）。
+    let mut splitting_table_element: Option<usize> = None;
     for (i, el) in stream.iter().enumerate().skip(start_element) {
         match el {
             BodyElement::Paragraph(p) => {
@@ -329,11 +353,21 @@ pub fn locate_tables_on_page(
                 };
                 m.located_on_page = m.located_cell_count >= TABLE_LOCATED_MIN_CELLS
                     || (m.locatable_cell_count > 0 && ratio >= TABLE_CONSUMED_RATIO);
-                if m.locatable_cell_count > 0 && ratio >= TABLE_CONSUMED_RATIO {
-                    matched_upto = i + 1; // 整表完成：后续页不再重走
+                if m.locatable_cell_count > 0 && ratio > TABLE_CONSUMED_RATIO {
+                    matched_upto = i + 1; // 整表完成：后续页不再重走（严格大于：恰好一半仍在分割）
+                } else if located > 0 {
+                    // 分割中（已定位未消费）：记为钳制点，走完后不得让
+                    // 后续段落的假匹配把 matched_upto 推过本表。
+                    splitting_table_element = Some(i);
                 }
                 result.push(m);
             }
+        }
+    }
+    // 假段落匹配钳制：分割中的表之后的段落匹配在本页必为假命中，钳回。
+    if let Some(idx) = splitting_table_element {
+        if matched_upto > idx {
+            matched_upto = idx;
         }
     }
     (result, matched_upto)
@@ -649,6 +683,122 @@ mod tests {
         // 不重复：两页合计恰好 8，且任何一页都未输出全部
         assert_eq!(m1[0].located_cell_count + m2[0].located_cell_count, 8);
         assert!(m1[0].located_cell_count < 8 && m2[0].located_cell_count < 8);
+    }
+
+    /// 按单元格文本列表生成一行页面字符（k 格横排，格内逐字排列）。
+    fn row_chars(texts: &[&str], y0: f32) -> Vec<ExtractedChar> {
+        let mut out = Vec::new();
+        for (k, t) in texts.iter().enumerate() {
+            let x = 10.0 + (k as f32) * 100.0;
+            for (j, c) in t.chars().enumerate() {
+                out.push(ch(c, x + j as f32 * 12.0, y0));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn even_split_table_continues_on_next_page() {
+        // 恰好 50% 分割回归：4 格表第 1 页只出前 2 格，2/4 = 0.5。
+        // 旧消费判定 ratio >= 0.5 在第 1 页即整表消费，下一页从表后元素
+        // 起步，后 2 格永不被重走（保持印刷底图）。修复：消费改为严格
+        // 大于——0.5 不消费，下一页重走本表只定位余下 2 格。
+        // 注：第 2 页同样 2/4 = 0.5 仍不消费（分母始终是全部可定位格）；
+        // 表保持可重走是无害的：更晚的页定位 0 格 → located_on_page=false
+        // → 不输出区域、不擦除。
+        let cells = ["甲格", "乙格", "丙格", "丁格"];
+        let tc = |t: &str| format!(r#"<w:tc><w:p><w:r><w:t>{t}</w:t></w:r></w:p></w:tc>"#);
+        let body = format!(
+            r#"<w:tbl><w:tblGrid>{}</w:tblGrid><w:tr>{}</w:tr></w:tbl>"#,
+            "<w:gridCol/>".repeat(4),
+            cells.iter().map(|t| tc(t)).collect::<String>(),
+        );
+        let stream = table_stream_xml(&body);
+        let views = build_table_views(&stream);
+        let page1 = row_chars(&cells[..2], 100.0);
+        let page2 = row_chars(&cells[2..], 200.0);
+
+        let (m1, next1) = locate_tables_on_page(&stream, &views, &page1, 0);
+        assert!(m1[0].located_on_page, "2 >= 2：拆分表已开始输出区域");
+        assert_eq!(m1[0].located_cell_count, 2);
+        assert_eq!(m1[0].locatable_cell_count, 4);
+        assert_eq!(next1, 0, "2/4 = 0.5 恰好一半：不得消费（旧 >= 判定在此消费 → 后半丢失）");
+
+        let (m2, _) = locate_tables_on_page(&stream, &views, &page2, next1);
+        assert!(m2[0].located_on_page, "第 2 页重走表格，后 2 格定位（旧逻辑此页永不走到本表）");
+        let flat: Vec<Option<&CellMatch>> =
+            m2[0].row_matches.iter().flat_map(|r| r.iter()).map(|c| c.as_ref()).collect();
+        assert!(flat[..2].iter().all(|c| c.is_none()), "第 1 页已定位的格在第 2 页不得再定位");
+        assert!(flat[2..].iter().all(|c| c.is_some()), "后 2 格必须在第 2 页定位出区域");
+        assert_eq!(m2[0].located_cell_count, 2);
+        // 两页各出一半、任何一页都不输出全部 4 格（不重复）
+        assert_eq!(m1[0].located_cell_count + m2[0].located_cell_count, 4);
+        assert!(m1[0].located_cell_count < 4 && m2[0].located_cell_count < 4);
+    }
+
+    #[test]
+    fn false_paragraph_match_cannot_skip_splitting_table() {
+        // 假段落匹配回归：表（4 格，第 1 页出前 2 格，分割中）后跟短段落
+        // “甲方”。按文档序“甲方”渲染在表尾之后，物理上应在更晚的页，
+        // 但其字符混入第 1 页字符流（假匹配诱饵：2 字段落廉价误中）。
+        // 旧逻辑段落匹配无条件推进 matched_upto → 下一页从表后元素起步
+        // → 表被永久跳过，余下半表 0 区域。修复：分割中的表钳制
+        // matched_upto 不得越过自身。
+        let cells = ["甲格", "乙格", "丙格", "丁格"];
+        let tc = |t: &str| format!(r#"<w:tc><w:p><w:r><w:t>{t}</w:t></w:r></w:p></w:tc>"#);
+        let body = format!(
+            r#"<w:tbl><w:tblGrid>{}</w:tblGrid><w:tr>{}</w:tr></w:tbl><w:p><w:r><w:t>甲方</w:t></w:r></w:p>"#,
+            "<w:gridCol/>".repeat(4),
+            cells.iter().map(|t| tc(t)).collect::<String>(),
+        );
+        let stream = table_stream_xml(&body);
+        let views = build_table_views(&stream);
+        // 第 1 页字符流：前 2 格 + 甲方（诱饵，物理在更晚页却出现在本页流中）
+        let mut page1 = row_chars(&cells[..2], 100.0);
+        page1.extend(row_chars(&["甲方"], 500.0));
+        let (m1, next1) = locate_tables_on_page(&stream, &views, &page1, 0);
+        assert_eq!(m1[0].located_cell_count, 2, "表格前半定位（分割中）");
+        assert_eq!(
+            next1, 0,
+            "假段落匹配不得把 matched_upto 推过分割中的表（旧逻辑此处为 2，表被永久跳过）"
+        );
+
+        // 第 2 页：后 2 格正常定位（甲方不在本页流中，段落不匹配不推进）
+        let page2 = row_chars(&cells[2..], 200.0);
+        let (m2, next2) = locate_tables_on_page(&stream, &views, &page2, next1);
+        let flat: Vec<Option<&CellMatch>> =
+            m2[0].row_matches.iter().flat_map(|r| r.iter()).map(|c| c.as_ref()).collect();
+        assert!(flat[..2].iter().all(|c| c.is_none()));
+        assert!(flat[2..].iter().all(|c| c.is_some()), "余下 2 格必须在第 2 页定位");
+        assert!(m2[0].located_on_page);
+        assert_eq!(next2, 0, "2/4 = 0.5 仍在分割：流起点保持指向表格（后续页定位 0 格即安全）");
+    }
+
+    #[test]
+    fn gray_and_white_font_color_not_mapped_to_highlight() {
+        // 灰/白字回归：无 w:highlight 时字色回退要求饱和度（通道差 ≥ 30，
+        // 与 doc_render::is_highlight_pixel 的灰度差阈值同口径）。灰色
+        //（7F7F7F/A6A6A6/D9D9D9）与白色（FFFFFF）是正文配色，旧逻辑取
+        // 首个非黑 run 直落 classify_highlight_color 的兜底 “yellow”，
+        // 误配黄色角色。
+        let tc = |color: &str, text: &str| {
+            format!(r#"<w:tc><w:p><w:r><w:rPr><w:color w:val="{color}"/></w:rPr><w:t>{text}</w:t></w:r></w:p></w:tc>"#)
+        };
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblGrid>{}</w:tblGrid><w:tr>{}{}</w:tr><w:tr>{}{}</w:tr></w:tbl></w:body></w:document>"#,
+            "<w:gridCol/>".repeat(2),
+            tc("7F7F7F", "灰字格"),
+            tc("FFFFFF", "白字格"),
+            tc("A6A6A6", "浅灰格"),
+            tc("D9D9D9", "更浅灰格"),
+        );
+        let mut registry = crate::core::docx_io::StyleRegistry::new();
+        let stream = crate::core::docx_io::parse_body_stream_for_test(&xml, &mut registry).unwrap();
+        let views = build_table_views(&stream);
+        assert_eq!(views[0].rows[0].cells[0].highlight, None, "7F7F7F 灰字不映射");
+        assert_eq!(views[0].rows[0].cells[1].highlight, None, "FFFFFF 白字不映射");
+        assert_eq!(views[0].rows[1].cells[0].highlight, None, "A6A6A6 灰字不映射");
+        assert_eq!(views[0].rows[1].cells[1].highlight, None, "D9D9D9 灰字不映射");
     }
 
     #[test]
