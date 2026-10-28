@@ -19,6 +19,7 @@ export const RUST_REPO_URL = "https://github.com/bamboostrip/Handwriting-sim-rs"
 const KEY_AUTO_CHECK = "handwritesim_auto_check";
 const KEY_SKIPPED_VERSION = "handwritesim_skipped_version";
 const KEY_THEME_PREFERENCE = "handwritesim_theme_preference";
+const KEY_PANEL_COLLAPSE = "handwritesim_panel_collapse";
 
 export type ThemePreference = "auto" | "light" | "dark";
 
@@ -46,6 +47,42 @@ export function getSkippedVersion(): string {
     return localStorage.getItem(KEY_SKIPPED_VERSION) || "";
   } catch {
     return "";
+  }
+}
+
+/** 右栏 6 个折叠组的展开记录（true = 折叠）；无记录返回 null（首次使用） */
+export type PanelCollapseState = {
+  text: boolean;
+  regions: boolean;
+  roles: boolean;
+  import: boolean;
+  sim: boolean;
+  preset: boolean;
+};
+
+export function loadPanelCollapseState(): PanelCollapseState | null {
+  try {
+    const raw = localStorage.getItem(KEY_PANEL_COLLAPSE);
+    if (!raw) return null;
+    const v = JSON.parse(raw) as Partial<PanelCollapseState>;
+    return {
+      text: v.text ?? false,
+      regions: v.regions ?? false,
+      roles: v.roles ?? true,
+      import: v.import ?? false,
+      sim: v.sim ?? true,
+      preset: v.preset ?? true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function savePanelCollapseState(s: PanelCollapseState): void {
+  try {
+    localStorage.setItem(KEY_PANEL_COLLAPSE, JSON.stringify(s));
+  } catch {
+    // localStorage 不可用时静默降级为不记忆
   }
 }
 
@@ -369,6 +406,8 @@ export const store = reactive({
   paragraphs: [newPara()] as Para[],
   curParaId: null as number | null,
   paraStatus: "光标定位到段落后可用按钮设置格式",
+  /** 编辑器内存在非折叠文字选区（驱动右栏「选区角色」标记条按需显示） */
+  hasTextSelection: false,
 
   // ---- 框选文字区域 ----
   regionMode: false,
