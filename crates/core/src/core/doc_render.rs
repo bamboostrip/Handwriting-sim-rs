@@ -1165,31 +1165,46 @@ fn extract_pdf_page_tags(
             usable = y_spans;
         }
 
-        let min_x = x_spans.iter().map(|&(a, _)| a).fold(f32::INFINITY, f32::min);
-        let max_x = x_spans.iter().map(|&(_, b)| b).fold(f32::NEG_INFINITY, f32::max);
-        let min_y = usable.iter().map(|&(a, _)| a).fold(f32::INFINITY, f32::min);
-        let max_y = usable.iter().map(|&(_, b)| b).fold(f32::NEG_INFINITY, f32::max);
-
-        // 像素坐标（原点在左上角）
-        let x_px = min_x.round() as i32;
-        let y_px = min_y.round() as i32;
-        let w_px = (max_x - min_x).round().max(1.0) as i32;
-        let h_px = (max_y - min_y).round().max(1.0) as i32;
-
-        let x = x_px.max(0).min(img_width.saturating_sub(1) as i32);
-        let y = y_px.max(0).min(img_height.saturating_sub(1) as i32);
-        let w = w_px.max(1).min((img_width as i32).saturating_sub(x).max(1));
-        let h = h_px.max(1).min((img_height as i32).saturating_sub(y).max(1));
-
+        // 标签字号：纯 ASCII 标签同样可能受异常字体矩阵影响（`scaled_font_size`
+        // 报到 200+）；不可信字号置 0，让区域回退到全局主字号（见下方高度处理）。
         let avg_fs = if !font_sizes.is_empty() {
             font_sizes.iter().sum::<f32>() / font_sizes.len() as f32
         } else {
             0.0
         };
-        let font_size = resolve_font_size_px(&tag_chars, avg_fs, scale);
-        // 纯 ASCII 标签同样可能受异常字体矩阵影响（`scaled_font_size` 报到
-        // 200+）；不可信字号置 0，让标签区域回退到全局主字号，避免手写被裁。
-        let font_size = if font_size_plausible(&tag_chars, font_size) { font_size } else { 0 };
+        let raw_fs = resolve_font_size_px(&tag_chars, avg_fs, scale);
+        let font_size = if font_size_plausible(&tag_chars, raw_fs) { raw_fs } else { 0 };
+
+        let min_x = x_spans.iter().map(|&(a, _)| a).fold(f32::INFINITY, f32::min);
+        let max_x = x_spans.iter().map(|&(_, b)| b).fold(f32::NEG_INFINITY, f32::max);
+        // 纵向：字号可信时用紧包围盒（与擦除口径一致）；不可信（0，引擎用全局
+        // 主字号）时退回 loose 行框——tight 墨迹框往往只有 0.5–0.7 倍字号，
+        // 小盒子放不下全局字号，手写会被裁。
+        let (min_y, max_y) = if font_size > 0 {
+            (
+                usable.iter().map(|&(a, _)| a).fold(f32::INFINITY, f32::min),
+                usable.iter().map(|&(_, b)| b).fold(f32::NEG_INFINITY, f32::max),
+            )
+        } else {
+            (
+                tag_chars.iter().map(|c| c.min_y).fold(f32::INFINITY, f32::min),
+                tag_chars.iter().map(|c| c.max_y).fold(f32::NEG_INFINITY, f32::max),
+            )
+        };
+
+        // 像素坐标（原点在左上角）
+        let x_px = min_x.round() as i32;
+        let y_px = min_y.round() as i32;
+        let w_px = (max_x - min_x).round().max(1.0) as i32;
+        // 高度下限：字号可信时按「字号 + 6」补（与单元格区域一致），否则用
+        // loose 行框——ASCII 标签的 tight 框通常装不下按字号渲染的手写字。
+        let raw_h = (max_y - min_y).round().max(1.0) as i32;
+        let h_px = if font_size > 0 { raw_h.max(font_size + 6) } else { raw_h };
+
+        let x = x_px.max(0).min(img_width.saturating_sub(1) as i32);
+        let y = y_px.max(0).min(img_height.saturating_sub(1) as i32);
+        let w = w_px.max(1).min((img_width as i32).saturating_sub(x).max(1));
+        let h = h_px.max(1).min((img_height as i32).saturating_sub(y).max(1));
 
         // 表格单元格内的标签由单元格区域接管：仍按字形擦除标签（单元格路径只
         // 擦除命中的正文汉字，`{{`/`}}`/前缀等模板字符会残留在底图上），但不
@@ -1223,13 +1238,15 @@ fn extract_pdf_page_tags(
             erase_char_boxes(img, page_chars, &tight_idxs, 2);
         }
         if !loose_idxs.is_empty() {
-            // 钳位取像素口径的 (y, y + h)：与旧整框擦除的纵向范围一致，右端开
+            // 钳位取「中位数过滤后的行框」(min_y..max_y)，不含上面为字号补的
+            // 余量：无 tight 的字形只能按标签正常行框擦，否则补高后会连带擦掉
+            // 行框下方的表格线。右端开区间。
             erase_char_boxes_clamped_y(
                 img,
                 page_chars,
                 &loose_idxs,
                 2,
-                (y as f32, (y + h) as f32),
+                (min_y, max_y),
             );
         }
 
@@ -1447,7 +1464,7 @@ fn median_f32(mut vals: Vec<f32>) -> f32 {
 /// 报到实际字号的十几倍（如 200pt 对应 20px 字形）。判定同时看两个尺度：
 /// loose 高度中位数（正常文本 loose≈行高/字身，字号不会超过其 3 倍）与
 /// tight 高度中位数（异常矩阵撑大的是 loose，墨迹高度仍接近字形；但标点等
-/// 窄字形的 tight 可低至 0.1 字号，故 tight 侧放宽到 10 倍）。
+/// 窄字形的 tight 可低至 2–3px≈0.07 字号，故 tight 侧放宽到 20 倍）。
 /// 两者都通过才可信——既避免「loose 被撑大后放行假字号」，也避免把正常标点格
 /// 误杀。tight 全缺失时只能退回 loose 中位数：该情形下无更可靠信号，若 loose
 /// 本身被撑大则无法识别（记录为已知边界）。
@@ -1468,7 +1485,7 @@ fn font_size_plausible(refs: &[&ExtractedChar], font_size: i32) -> bool {
         .collect();
     if !tight.is_empty() {
         let tight_med = median_f32(tight);
-        if tight_med > 0.0 && fs > tight_med * 10.0 {
+        if tight_med > 0.0 && fs > tight_med * 20.0 {
             return false;
         }
     }
@@ -2233,14 +2250,44 @@ fn open_pdfium(
     // 3. 自动自解压内置的 64 位 pdfium 动态库
     if !EMBEDDED_PDFIUM.is_empty() {
         if let Some(target_path) = get_runtime_extracted_pdfium_path() {
-            // 如果已存在且大小一致，直接复用；否则写入
+            // 如果已存在且大小一致，直接复用；否则原子落盘。
+            // 不能直接 `std::fs::write(target)`：cargo nextest 每个用例是独立进程，
+            // 多个进程同时自解压同一路径时，先 truncate 再写会让另一个进程
+            // `bind_to_library` 读到半截文件（Linux 实测 "file too short"）。
+            // 先写进程私有临时文件再 rename：目标要么不存在、要么是完整文件。
             let need_write = match std::fs::metadata(&target_path) {
                 Ok(meta) => meta.len() != EMBEDDED_PDFIUM.len() as u64,
                 Err(_) => true,
             };
 
             if need_write {
-                let _ = std::fs::write(&target_path, EMBEDDED_PDFIUM);
+                // 临时名带 pid + 纳秒，避免同进程并发调用也互相踩踏
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let tmp_path = target_path.with_extension(format!(
+                    "tmp-{}-{stamp}",
+                    std::process::id()
+                ));
+                if std::fs::write(&tmp_path, EMBEDDED_PDFIUM).is_ok() {
+                    // POSIX 下 rename 覆盖旧文件是原子操作；Windows 下目标已存在
+                    // 会失败——此时大小正确说明别的进程已落盘，直接用；仍不对
+                    // （历史残留的半截文件）则删掉重试一次。
+                    let mut renamed = std::fs::rename(&tmp_path, &target_path).is_ok();
+                    if !renamed {
+                        let size_ok = std::fs::metadata(&target_path)
+                            .map(|m| m.len() == EMBEDDED_PDFIUM.len() as u64)
+                            .unwrap_or(false);
+                        if !size_ok {
+                            let _ = std::fs::remove_file(&target_path);
+                            renamed = std::fs::rename(&tmp_path, &target_path).is_ok();
+                        }
+                    }
+                    if !renamed {
+                        let _ = std::fs::remove_file(&tmp_path);
+                    }
+                }
             }
 
             if target_path.is_file() {
@@ -3516,8 +3563,9 @@ mod tests {
         }
         let regions = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img, &[]);
         assert_eq!(regions.len(), 1);
-        // 正常字 tight 52..68 → 区域 y=52、h=16；按 loose 会是 0..300。
-        assert_eq!((regions[0].y, regions[0].h), (52, 16));
+        // 正常字 tight 52..68 → 区域 y=52；h 取 max(tight 16, 字号 28 + 6) = 34，
+        // 保证按字号渲染的手写标签不被裁（按 loose 会是 0..300）。
+        assert_eq!((regions[0].y, regions[0].h), (52, 34));
         assert_eq!(img.get_pixel(120, 60), &image::Rgb([255, 255, 255]), "标签字应擦净");
         assert_eq!(img.get_pixel(100, 45), &image::Rgb([0, 0, 0]), "上表格线应保留");
         assert_eq!(img.get_pixel(100, 75), &image::Rgb([0, 0, 0]), "下表格线应保留");
@@ -3577,10 +3625,11 @@ mod tests {
         }
         let regions = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img, &[]);
         assert_eq!(regions.len(), 1);
-        // 区域矩形仍按中位数口径：离群值被过滤（不是 40..96）
+        // 区域纵向仍按中位数口径（离群值被过滤，不是 40..96）：y=52；
+        // 高度取 max(tight 16, 字号 28 + 6) = 34，避免按字号渲染的手写被裁。
         assert_eq!(
             (regions[0].x, regions[0].y, regions[0].w, regions[0].h),
-            (100, 52, 64, 16)
+            (100, 52, 64, 34)
         );
         assert_eq!(img.get_pixel(102, 60), &image::Rgb([255, 255, 255]), "正常标签字应擦净");
         assert_eq!(img.get_pixel(120, 60), &image::Rgb([255, 255, 255]), "离群字形主体应擦净");
@@ -3913,28 +3962,40 @@ mod tests {
         assert!(font_size_plausible(&refs, 29), "正常字号应判为可信");
         assert!(font_size_plausible(&refs, 0), "0 表示未知，交由回退链处理");
 
-        // 正常标点格：10.5pt≈29px，tight 只有 4px（横线/冒号），loose 40px。
-        // 不能因为 tight 小就误杀正常字号（否则标点格的 29px 会被换掉）。
+        // 正常标点格：10.5pt≈29px，tight 只有 2px（细横线/冒号），loose 40px。
+        // 不能因为 tight 小就误杀正常字号（29/2≈14.5×，在 20× 阈值内）。
         let punct = [ExtractedChar {
             ch: '-', min_x: 100.0, min_y: 0.0, max_x: 120.0, max_y: 40.0,
-            font_size_pt: 10.5, glyph_h_pt: 0.0, tight_min_y: 18.0, tight_max_y: 22.0,
+            font_size_pt: 10.5, glyph_h_pt: 0.0, tight_min_y: 19.0, tight_max_y: 21.0,
         }];
         let punct_refs: Vec<&ExtractedChar> = punct.iter().collect();
         assert!(font_size_plausible(&punct_refs, 29), "正常标点格不应被判为异常字号");
         assert!(!font_size_plausible(&punct_refs, 556), "标点格的假字号仍应被拒");
+
+        // loose 被异常矩阵撑到 300 时，loose 尺度放行 556，必须由 tight 尺度拒掉。
+        let inflated = [ExtractedChar {
+            ch: '-', min_x: 100.0, min_y: 0.0, max_x: 120.0, max_y: 300.0,
+            font_size_pt: 10.5, glyph_h_pt: 0.0, tight_min_y: 40.0, tight_max_y: 56.0,
+        }];
+        let inflated_refs: Vec<&ExtractedChar> = inflated.iter().collect();
+        assert!(font_size_plausible(&inflated_refs, 29));
+        assert!(
+            !font_size_plausible(&inflated_refs, 556),
+            "loose 被撑大时 tight 尺度仍应拒掉假字号"
+        );
     }
 
     #[test]
     fn extract_pdf_page_tags_drops_implausible_font_size() {
         // 纯 ASCII 标签 {{A}}：字体矩阵异常时 pdfium 报 200pt（≈556px），
-        // 而字形 tight 只有 16px。标签区域字号必须归零（走全局主字号），
-        // 否则手写按 556px 渲染会被裁切/爆出区域。
+        // 而字形 tight 只有 16px、loose 行框 40px。字号必须归零（走全局主字号），
+        // 且区域纵向改用 loose 行框（40px），否则 16px 的小盒子放不下全局字号。
         let mk = |ch: char, x: f32| ExtractedChar {
             ch,
             min_x: x,
-            min_y: 50.0,
+            min_y: 46.0,
             max_x: x + 8.0,
-            max_y: 70.0,
+            max_y: 86.0,
             font_size_pt: 200.0,
             glyph_h_pt: 0.0,
             tight_min_y: 52.0,
@@ -3951,7 +4012,11 @@ mod tests {
         let regions = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img, &[]);
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].font_size, 0, "不可信的 556px 字号应被丢弃");
-        assert_eq!((regions[0].x, regions[0].y, regions[0].w, regions[0].h), (100, 52, 40, 16));
+        assert_eq!(
+            (regions[0].x, regions[0].y, regions[0].w, regions[0].h),
+            (100, 46, 40, 40),
+            "字号不可信时区域纵向应退回 loose 行框（供全局主字号完整渲染）"
+        );
     }
 
     #[test]
@@ -4182,7 +4247,8 @@ mod tests {
         }
         let regions = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img, &[]);
         assert_eq!(regions.len(), 1, "零尺寸换行不应截断标签");
-        assert_eq!((regions[0].y, regions[0].h), (52, 16));
+        // 区域高度取 max(tight 16, 字号 28 + 6) = 34（手写按字号渲染不被裁）
+        assert_eq!((regions[0].y, regions[0].h), (52, 34));
         assert_eq!(img.get_pixel(120, 60), &image::Rgb([255, 255, 255]), "标签字应擦净");
         assert_eq!(img.get_pixel(100, 45), &image::Rgb([0, 0, 0]), "上表格线应保留");
         assert_eq!(img.get_pixel(100, 75), &image::Rgb([0, 0, 0]), "下表格线应保留");

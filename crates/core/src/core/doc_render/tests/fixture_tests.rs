@@ -260,8 +260,17 @@ fn pdf_table_fixture_end_to_end() {
 
     // ---- 真实链路：固定 PDF → pdfium 栅格化 → 表格定位/擦字 → 单元格区域 ----
     // 不 set_current_dir：open_pdfium 会走 build.rs 内嵌库自解压，避免干扰并行测试。
-    let (paths, regions) = pdf_to_images_opt_with_tables(&pdf_path, &out_dir, DPI, true, &stream)
-        .expect("PDF fixture 真实链路执行失败（pdfium 加载 / 栅格化 / 表格管线）");
+    // 本机未准备 pdfium 时与既有 PDF 测试口径一致（跳过而不是红灯）；CI 有库，
+    // 会真正执行下面的断言。
+    let (paths, regions) =
+        match pdf_to_images_opt_with_tables(&pdf_path, &out_dir, DPI, true, &stream) {
+            Ok(v) => v,
+            Err(DocRenderError::PdfiumUnavailable(e)) => {
+                eprintln!("跳过：pdfium 不可用（{e}）");
+                return;
+            }
+            Err(e) => panic!("PDF fixture 真实链路意外失败（栅格化 / 表格管线）：{e}"),
+        };
 
     println!("输出目录 = {}", out_dir.display());
     println!("页数 = {}，区域总数 = {}", paths.len(), regions.len());
