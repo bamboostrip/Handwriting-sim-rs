@@ -446,6 +446,11 @@ pub fn erase_highlight_boxes(img: &mut image::RgbImage, boxes: &[BoundingBox]) {
 }
 
 /// 按字符包围盒擦白（glyph 级擦除：只清字形矩形，保留穿过区域的表格线）。
+///
+/// 纵向用紧包围盒（[`ExtractedChar::ink_v_span`]），缺失时回退 loose；且按像素
+/// 覆盖取整、不再外扩：pdfium 的 loose 纵向是「行高」，表格行高紧贴边框时会
+/// 上下各压住一条线；即使 tight，字底距边框也可能只有 1–2px，再 +pad 仍会擦出
+/// 缺口。横向仍用 loose + pad（≈字前进宽度），保证左右抗锯齿清干净。
 pub(crate) fn erase_char_boxes(
     img: &mut image::RgbImage,
     chars: &[ExtractedChar],
@@ -461,8 +466,54 @@ pub(crate) fn erase_char_boxes(
         };
         let x0 = (c.min_x.floor() as i32 - pad).max(0);
         let x1 = ((c.max_x.ceil() as i32) + pad).min(w - 1);
-        let y0 = (c.min_y.floor() as i32 - pad).max(0);
-        let y1 = ((c.max_y.ceil() as i32) + pad).min(h - 1);
+        let (ink_y0, ink_y1) = c.ink_v_span();
+        // 纵向不外扩：按像素覆盖取整到紧包围盒内部。行高极紧的真实表格里
+        // 字底距边框可能只有 1.6px，再 +2 抗锯齿余量会把边框擦出缺口；
+        // tight 本身已覆盖字形像素，floor(min)..ceil(max)-1 足够清字。
+        let y0 = (ink_y0.floor() as i32).max(0);
+        let y1 = ((ink_y1.ceil() as i32) - 1).min(h - 1);
+        if x1 < x0 || y1 < y0 {
+            continue;
+        }
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                img.put_pixel(x as u32, y as u32, image::Rgb([255, 255, 255]));
+            }
+        }
+    }
+}
+
+/// 按字符包围盒擦白，但纵向额外钳制在 `clamp_y`（像素区间，右端开）内。
+///
+/// 只给 tight 缺失（[`ExtractedChar::ink_v_span`] 会回退 loose）的畸形字形用：
+/// 异常字体矩阵可能把 loose 纵向撑到整页（如 0..300），按 loose 逐字形擦会拉出
+/// 一条全高白带、把表格线切断。钳到标签中位数过滤后的区域矩形即可；横向与取整
+/// 口径和 [`erase_char_boxes`] 完全一致，钳位后为空则跳过。
+fn erase_char_boxes_clamped_y(
+    img: &mut image::RgbImage,
+    chars: &[ExtractedChar],
+    idxs: &[usize],
+    pad: i32,
+    clamp_y: (f32, f32),
+) {
+    let w = img.width() as i32;
+    let h = img.height() as i32;
+    // 右端开区间：clamp_y.1 是「不擦」的第一行，故 ceil-1 才是最后一行
+    let clamp_y0 = clamp_y.0.floor() as i32;
+    let clamp_y1 = (clamp_y.1.ceil() as i32) - 1;
+    for &i in idxs {
+        let c = match chars.get(i) {
+            Some(c) => c,
+            None => continue,
+        };
+        let x0 = (c.min_x.floor() as i32 - pad).max(0);
+        let x1 = ((c.max_x.ceil() as i32) + pad).min(w - 1);
+        let (ink_y0, ink_y1) = c.ink_v_span();
+        let y0 = (ink_y0.floor() as i32).max(clamp_y0).max(0);
+        let y1 = ((ink_y1.ceil() as i32) - 1).min(clamp_y1).min(h - 1);
+        if x1 < x0 || y1 < y0 {
+            continue;
+        }
         for y in y0..=y1 {
             for x in x0..=x1 {
                 img.put_pixel(x as u32, y as u32, image::Rgb([255, 255, 255]));
@@ -555,6 +606,58 @@ pub fn scan_text_tags(chars: &[char]) -> Vec<TagMatch> {
     matches
 }
 
+/// 页面级标签扫描：PDF 文本层可能在标签内部插入零尺寸的 `\r`/`\n`
+///（同一视觉行里相邻 run 的边界），直接 `scan_text_tags` 会把它当成换行、
+/// 放弃匹配，导致 `{{打印:}}` 前缀残留在底图上。这里先剔除零尺寸控制符，
+/// 再用匹配字符的纵向跨度拒绝真正跨行的标签（避免整框擦到两行之间的
+/// 表格线）。
+fn scan_text_tags_on_page(page_chars: &[ExtractedChar]) -> Vec<TagMatch> {
+    let mut idxs = Vec::with_capacity(page_chars.len());
+    let mut chars = Vec::with_capacity(page_chars.len());
+    for (i, c) in page_chars.iter().enumerate() {
+        if c.ch.is_control() && c.max_x <= c.min_x && c.max_y <= c.min_y {
+            continue;
+        }
+        idxs.push(i);
+        chars.push(c.ch);
+    }
+
+    let mut out = Vec::new();
+    for m in scan_text_tags(&chars) {
+        let mut spans: Vec<(f32, f32)> = Vec::new();
+        for &i in &idxs[m.start_char_idx..=m.end_char_idx] {
+            let (a, b) = page_chars[i].ink_v_span();
+            if b > a {
+                spans.push((a, b));
+            }
+        }
+        if spans.is_empty() {
+            continue;
+        }
+        let mut heights: Vec<f32> = spans.iter().map(|(a, b)| b - a).collect();
+        heights.sort_by(f32::total_cmp);
+        let median_h = heights.get(heights.len() / 2).copied().unwrap_or(0.0);
+        let usable: Vec<(f32, f32)> = spans
+            .iter()
+            .copied()
+            .filter(|(a, b)| median_h <= 0.0 || (b - a) <= median_h * 2.0)
+            .collect();
+        let usable = if usable.is_empty() { spans } else { usable };
+        let lo = usable.iter().map(|&(a, _)| a).fold(f32::INFINITY, f32::min);
+        let hi = usable.iter().map(|&(_, b)| b).fold(f32::NEG_INFINITY, f32::max);
+        // 单行标签的纵向跨度 ≈ 字高；真正跨行的标签至少多出半个行距。
+        if hi - lo > median_h * 1.6 + 6.0 {
+            continue;
+        }
+        out.push(TagMatch {
+            start_char_idx: idxs[m.start_char_idx],
+            end_char_idx: idxs[m.end_char_idx],
+            inner_text: m.inner_text,
+        });
+    }
+    out
+}
+
 /// PDF 提取的单个字符对象及其在页面像素空间的位置与字号。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtractedChar {
@@ -568,6 +671,24 @@ pub struct ExtractedChar {
     /// 用于校准 scaled_font_size 对嵌入字体矩阵的偏差（如 Word 中文 PDF 返回
     /// 值偏大 ~6%，会让原文恰好占满行宽的文本在区域内放不下而整行折行）。
     pub glyph_h_pt: f32,
+    /// 紧包围盒的像素纵向范围（原点左上）。0 表示未提供，擦除/锚定时回退 loose。
+    ///
+    /// pdfium 的 loose 纵向范围是「行高」：LibreOffice 等渲染器导出的表格 PDF 里
+    /// 行高可能紧贴表格线，按 loose 擦字会把边框擦出缺口；按 loose 生成区域又会
+    /// 让手写整体上移。tight 才是字形本身的纵向范围。
+    pub tight_min_y: f32,
+    pub tight_max_y: f32,
+}
+
+impl ExtractedChar {
+    /// 擦除/区域纵向锚定用的范围：优先紧包围盒，缺失（0 高）时回退 loose。
+    pub(crate) fn ink_v_span(&self) -> (f32, f32) {
+        if self.tight_max_y > self.tight_min_y {
+            (self.tight_min_y, self.tight_max_y)
+        } else {
+            (self.min_y, self.max_y)
+        }
+    }
 }
 
 /// 是否为全角（CJK 表意文字 / 假名 / 谚文）字符：其紧包围盒高度 ≈ 字号，
@@ -751,8 +872,9 @@ pub fn extract_pdf_page_chars(
                     (top - bottom).abs()
                 }
             };
-            let glyph_h_pt = char_obj
-                .tight_bounds()
+            let tight = char_obj.tight_bounds().ok();
+            let glyph_h_pt = tight
+                .as_ref()
                 .map(|r| (r.top().value - r.bottom().value).abs())
                 .unwrap_or(0.0);
 
@@ -762,6 +884,16 @@ pub fn extract_pdf_page_chars(
             let py2 = (page_height_pt - bottom) * scale;
             let min_y = py1.min(py2);
             let max_y = py1.max(py2);
+            // 紧包围盒像素纵向范围：与 loose 同口径换算，供擦字/区域锚定使用。
+            // tight 取不到时留 0，ink_v_span() 自动回退 loose。
+            let (tight_min_y, tight_max_y) = match tight.as_ref() {
+                Some(r) => {
+                    let t1 = (page_height_pt - r.top().value) * scale;
+                    let t2 = (page_height_pt - r.bottom().value) * scale;
+                    (t1.min(t2), t1.max(t2))
+                }
+                None => (0.0, 0.0),
+            };
 
             chars.push(ExtractedChar {
                 ch,
@@ -771,6 +903,8 @@ pub fn extract_pdf_page_chars(
                 max_y,
                 font_size_pt,
                 glyph_h_pt,
+                tight_min_y,
+                tight_max_y,
             });
         }
     }
@@ -973,41 +1107,68 @@ fn extract_pdf_page_tags(
     img: &mut image::RgbImage,
     exclude_rects: &[RectPx],
 ) -> Vec<TextRegion> {
-    let chars_vec: Vec<char> = page_chars.iter().map(|c| c.ch).collect();
-    let matches = scan_text_tags(&chars_vec);
+    let matches = scan_text_tags_on_page(page_chars);
     let scale = dpi as f32 / 72.0;
 
     let mut regions = Vec::new();
 
     for m in matches {
-        let mut min_x = f32::MAX;
-        let mut max_x = f32::MIN;
-        let mut min_y = f32::MAX;
-        let mut max_y = f32::MIN;
+        // 横向并集仍用 loose（标签整体宽度/位置）；纵向改取紧包围盒：
+        // LibreOffice/Word 导出的 PDF 里 `{`、`}`、`:` 等标点可能被异常字体
+        // 矩阵撑到整行甚至整表，按 loose 并集会一次擦掉多条表格线。
+        let mut x_spans: Vec<(f32, f32)> = Vec::new();
+        let mut y_spans: Vec<(f32, f32)> = Vec::new();
         let mut font_sizes = Vec::new();
         let mut tag_chars: Vec<&ExtractedChar> = Vec::new();
-        let mut has_valid_bounds = false;
+        // 有效字形在 page_chars 中的下标，与 tag_chars 严格一一对应。
+        // 供逐字形擦除使用：匹配范围内可能夹着零尺寸的 `\r`/`\n`
+        //（scan_text_tags_on_page 已剔除），它们不参与擦除。
+        let mut tag_idxs: Vec<usize> = Vec::new();
 
         for k in m.start_char_idx..=m.end_char_idx {
             if k < page_chars.len() {
                 let e = &page_chars[k];
                 if e.max_x > e.min_x && e.max_y > e.min_y {
-                    min_x = min_x.min(e.min_x);
-                    max_x = max_x.max(e.max_x);
-                    min_y = min_y.min(e.min_y);
-                    max_y = max_y.max(e.max_y);
+                    x_spans.push((e.min_x, e.max_x));
+                    y_spans.push(e.ink_v_span());
                     if e.font_size_pt > 0.0 {
                         font_sizes.push(e.font_size_pt);
                     }
                     tag_chars.push(e);
-                    has_valid_bounds = true;
+                    tag_idxs.push(k);
                 }
             }
         }
 
-        if !has_valid_bounds {
+        // 没有任何有效字形（全为零宽高/控制符）：跳过该标签
+        if tag_idxs.is_empty() {
             continue;
         }
+
+        // 高度离群的字形剔除（防御异常字体矩阵）：以中位数 2 倍为界；
+        // 全部离群时退回全量，保证仍能算出区域矩形。
+        // 该过滤只作用于下面的区域矩形（x/y/w/h）与 overlaps_cell 判定，
+        // 不影响擦除：擦除已改为逐字形，合法的大字号字形不会因被剔除而残留。
+        let mut heights: Vec<f32> = y_spans
+            .iter()
+            .map(|(a, b)| b - a)
+            .filter(|h| *h > 0.0)
+            .collect();
+        heights.sort_by(f32::total_cmp);
+        let median_h = heights.get(heights.len() / 2).copied().unwrap_or(0.0);
+        let mut usable: Vec<(f32, f32)> = y_spans
+            .iter()
+            .copied()
+            .filter(|(a, b)| median_h <= 0.0 || (b - a) <= median_h * 2.0)
+            .collect();
+        if usable.is_empty() {
+            usable = y_spans;
+        }
+
+        let min_x = x_spans.iter().map(|&(a, _)| a).fold(f32::INFINITY, f32::min);
+        let max_x = x_spans.iter().map(|&(_, b)| b).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = usable.iter().map(|&(a, _)| a).fold(f32::INFINITY, f32::min);
+        let max_y = usable.iter().map(|&(_, b)| b).fold(f32::NEG_INFINITY, f32::max);
 
         // 像素坐标（原点在左上角）
         let x_px = min_x.round() as i32;
@@ -1026,26 +1187,50 @@ fn extract_pdf_page_tags(
             0.0
         };
         let font_size = resolve_font_size_px(&tag_chars, avg_fs, scale);
+        // 纯 ASCII 标签同样可能受异常字体矩阵影响（`scaled_font_size` 报到
+        // 200+）；不可信字号置 0，让标签区域回退到全局主字号，避免手写被裁。
+        let font_size = if font_size_plausible(&tag_chars, font_size) { font_size } else { 0 };
 
-        // 表格单元格内的标签由单元格区域接管：仍擦除标签框（单元格路径只擦除
-        // 命中的正文汉字，`{{`/`}}`/前缀等模板字符会残留在底图上），但不生成
-        // 独立区域，避免与单元格区域重复。判定用重叠而非中心包含：标签框比
-        // 单元格正文包围盒更宽（含前缀字符），中心可能落在单元格矩形之外。
+        // 表格单元格内的标签由单元格区域接管：仍按字形擦除标签（单元格路径只
+        // 擦除命中的正文汉字，`{{`/`}}`/前缀等模板字符会残留在底图上），但不
+        // 生成独立区域，避免与单元格区域重复。判定用重叠而非中心包含：标签框
+        // 比单元格正文包围盒更宽（含前缀字符），中心可能落在单元格矩形之外。
         let overlaps_cell = exclude_rects.iter().any(|r| {
             x < r.x + r.w && x + w > r.x && y < r.y + r.h && y + h > r.y
         });
 
-        // 清理原图上的 {{...}} 标签区域为纯白色（向外扩展 2 像素以消除文字抗锯齿）
-        let pad = 2i32;
-        let erase_x0 = (x - pad).max(0) as u32;
-        let erase_y0 = (y - pad).max(0) as u32;
-        let erase_x1 = ((x + w + pad) as u32).min(img_width);
-        let erase_y1 = ((y + h + pad) as u32).min(img_height);
-
-        for ey in erase_y0..erase_y1 {
-            for ex in erase_x0..erase_x1 {
-                img.put_pixel(ex, ey, image::Rgb([255, 255, 255]));
-            }
+        // 擦除改为逐字形（glyph 级），bbox 只服务区域矩形与 overlaps_cell：
+        // 1. 有 tight 的字形（`tight_max_y > tight_min_y`）按自身紧包围盒纵向擦白、
+        //    横向 loose + 2px pad（[`erase_char_boxes`]）：中位数过滤不再影响擦除，
+        //    标签里合法的大字号字形（高度 > 2× 中位数）会按自身范围擦净；
+        // 2. tight 缺失的畸形字形（`ink_v_span()` 会回退 loose，异常字体矩阵下可能
+        //    被撑到整页）纵向钳到本标签中位数过滤后的区域矩形，否则逐字形擦会拉出
+        //    全高白带、切断表格线；横向仍是 loose + 2px pad（[`erase_char_boxes_clamped_y`]）；
+        // 3. 跨格误配（`{{` 在左格、`}}` 在右格等文本层顺序错位）时只擦各字形，
+        //    不会把两格之间的表格竖线/其他内容整块抹掉；真正跨行的标签仍由
+        //    scan_text_tags_on_page 拒绝；
+        // 4. 标签字符之间的空白（字距、上下留白）不再被涂白——那里本是背景，
+        //    保留它们才能保住穿过标签行的表格线。
+        let (tight_idxs, loose_idxs): (Vec<usize>, Vec<usize>) = tag_idxs
+            .iter()
+            .copied()
+            .partition(|&k| {
+                page_chars
+                    .get(k)
+                    .is_some_and(|c| c.tight_max_y > c.tight_min_y)
+            });
+        if !tight_idxs.is_empty() {
+            erase_char_boxes(img, page_chars, &tight_idxs, 2);
+        }
+        if !loose_idxs.is_empty() {
+            // 钳位取像素口径的 (y, y + h)：与旧整框擦除的纵向范围一致，右端开
+            erase_char_boxes_clamped_y(
+                img,
+                page_chars,
+                &loose_idxs,
+                2,
+                (y as f32, (y + h) as f32),
+            );
         }
 
         if overlaps_cell {
@@ -1199,13 +1384,222 @@ pub fn combine_page_regions_with_role_map(
 #[derive(Debug, Default)]
 pub(crate) struct TablePageResult {
     pub regions: Vec<TextRegion>,
-    /// 已生成区域的单元格矩形（供标签区域排重）。
+    /// 已生成区域的单元格矩形（锚定后的最终区域矩形 + 推断矩形），
+    /// 供标签区域排重：只给推断矩形时，单字格/文本反查格的锚定区域可能
+    /// 远离列带（表头居中、正文左对齐），格内标签会被误判为表外。
     pub cell_rects: Vec<RectPx>,
     /// 每张（有区域的）表的外包围矩形（供高亮框分流）。
     pub outer_rects: Vec<RectPx>,
     /// 下一页的流起点（本页已消费元素之后的下标；未定位/未完成的表格
     /// 保持指向自身，下一页重走）。
     pub next_start_element: usize,
+}
+
+/// 字符集合的紧包围盒纵向并集；全部无有效高度时返回 None。
+fn union_tight_y(chars: &[&ExtractedChar]) -> Option<(f32, f32)> {
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    for c in chars {
+        let (a, b) = c.ink_v_span();
+        if b > a {
+            lo = lo.min(a);
+            hi = hi.max(b);
+        }
+    }
+    if hi > lo { Some((lo, hi)) } else { None }
+}
+
+/// 匹配字符的平均原始字号（点）；无有效值时 0。
+fn avg_font_size_pt(refs: &[&ExtractedChar]) -> f32 {
+    let vals: Vec<f32> = refs
+        .iter()
+        .map(|c| c.font_size_pt)
+        .filter(|s| *s > 0.0 && !s.is_nan())
+        .collect();
+    if vals.is_empty() { 0.0 } else { vals.iter().sum::<f32>() / vals.len() as f32 }
+}
+
+/// 归一化单元格文本：丢弃空白与控制字符（与 docx_tables 的字符流匹配口径一致）。
+fn normalized_cell_chars(text: &str) -> Vec<char> {
+    text.chars().filter(|c| !c.is_whitespace() && !c.is_control()).collect()
+}
+
+/// 已定位格字号的整数中位数（空输入返回 None）；用于未定位格的同行/整表兜底。
+fn median_i32(vals: &[i32]) -> Option<i32> {
+    if vals.is_empty() {
+        return None;
+    }
+    let mut sorted = vals.to_vec();
+    sorted.sort_unstable();
+    Some(sorted[sorted.len() / 2])
+}
+
+/// 一组高度值的中位数（空输入返回 0）；只用于字号合理性判定。
+fn median_f32(mut vals: Vec<f32>) -> f32 {
+    if vals.is_empty() {
+        return 0.0;
+    }
+    vals.sort_by(f32::total_cmp);
+    vals[vals.len() / 2]
+}
+
+/// 字号合理性：pdfium 在异常字体矩阵下会把纯西文格的 `scaled_font_size`
+/// 报到实际字号的十几倍（如 200pt 对应 20px 字形）。判定同时看两个尺度：
+/// loose 高度中位数（正常文本 loose≈行高/字身，字号不会超过其 3 倍）与
+/// tight 高度中位数（异常矩阵撑大的是 loose，墨迹高度仍接近字形；但标点等
+/// 窄字形的 tight 可低至 0.1 字号，故 tight 侧放宽到 10 倍）。
+/// 两者都通过才可信——既避免「loose 被撑大后放行假字号」，也避免把正常标点格
+/// 误杀。tight 全缺失时只能退回 loose 中位数：该情形下无更可靠信号，若 loose
+/// 本身被撑大则无法识别（记录为已知边界）。
+/// 不可信时调用方回退到 `w:sz`/同行/整表字号；标签路径置 0（全局主字号）。
+fn font_size_plausible(refs: &[&ExtractedChar], font_size: i32) -> bool {
+    if font_size <= 0 {
+        return true;
+    }
+    let fs = font_size as f32;
+    let loose_med = median_f32(refs.iter().map(|c| (c.max_y - c.min_y).max(0.0)).collect());
+    if loose_med > 0.0 && fs > loose_med * 3.0 {
+        return false;
+    }
+    let tight: Vec<f32> = refs
+        .iter()
+        .filter(|c| c.tight_max_y > c.tight_min_y)
+        .map(|c| c.tight_max_y - c.tight_min_y)
+        .collect();
+    if !tight.is_empty() {
+        let tight_med = median_f32(tight);
+        if tight_med > 0.0 && fs > tight_med * 10.0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// 单元格文本行数（`\n` 分段，至少 1）。
+fn cell_line_count(text: &str) -> usize {
+    text.split('\n').count().max(1)
+}
+
+/// 区域最小尺寸：保证按 `font_size` 渲染的手写字形能完整落在区域内。
+///
+/// 区域纵向/横向都按印刷字形 bbox 锚定后，CJK 格没问题（tight 宽高≈字号），
+/// 但数字/字母的 tight 高度（数字≈0.7 字号、小写字母≈0.5 字号）与 advance
+/// 宽度都明显小于字号：区域会缩小到装不下 `font_size` 的字，手写被裁切。
+/// 这里补下限：单行 `font_size + 6` 高、`font_size + 10` 宽（横向 4+4、纵向
+/// 2+2 边距 + 字形本身）；多行按行数放宽高度。
+/// 宽度不足时按单元格对齐方式扩：左对齐向右扩、居中向两侧、右对齐向左扩，
+/// 保持印刷字在区域内的相对位置不变（引擎按 `align` 对齐手写文本）。
+///
+/// 下限不超过锚定矩形各边的 3 倍：异常字体矩阵下 `scaled_font_size` 可能被
+/// 报到 200+（见 [`resolve_font_size_px`]），照字号扩会把区域撑到跨格/跨表；
+/// 任一边的下限超过该边锚定尺寸的 3 倍即整体跳过（宽而矮的格子不能只看长边）。
+/// 正常数字/字母格的 `fs+10`/`fs+6` 只有锚定尺寸的 1.0–2.0 倍，不受影响。
+fn apply_min_region_size(rect: &mut RectPx, font_size: i32, lines: usize, align: i32) {
+    let min_w = font_size + 10;
+    let min_h = if lines > 1 { font_size * lines as i32 + 6 } else { font_size + 6 };
+    if min_w > rect.w.max(1) * 3 || min_h > rect.h.max(1) * 3 {
+        return;
+    }
+    if rect.w < min_w {
+        let extra = min_w - rect.w;
+        match align {
+            1 => rect.x -= extra / 2,
+            2 => rect.x -= extra,
+            _ => {}
+        }
+        rect.w = min_w;
+    }
+    // 纵向只向下扩：顶部保持贴字形（对齐印刷字，避免手写整体上移）。
+    if rect.h < min_h {
+        rect.h = min_h;
+    }
+}
+
+/// 未定位格的文本锚定：在「推断矩形行带 + 表横向范围」内找与单元格文本
+/// 完全一致的连续字形序列；多处命中取 bbox 中心离 `prefer_x` 最近的一处。
+///
+/// 单字格不参与字符流匹配（防跨页误匹配），只能走带推断。但推断矩形的
+/// 横向列带来自同列已定位格的 bbox——若表头居中、正文左对齐，推断矩形的
+/// x 会偏到列中间（当前 E2E 的「丙」偏约 170px）。此时仅按「字形中心落在
+/// 推断矩形内」擦不到印刷字；这里用文本在行带内反查真实字形，作为兜底。
+///
+/// 多字未定位格同理（字符流匹配失败时也只剩中心点兜底）；但多字序列可能
+/// 跨格拼接出同样的文本，因此候选序列还要过「横向连续性」闸门：相邻字形
+/// 间隙超过字形高度中位数 × 2 + 20px 判为跨格误配。
+fn find_cell_glyphs(
+    chars: &[ExtractedChar],
+    target: &[char],
+    band: (f32, f32, f32, f32),
+    prefer_x: f32,
+    used: &std::collections::HashSet<usize>,
+) -> Option<Vec<usize>> {
+    if target.is_empty() {
+        return None;
+    }
+    let (y0, y1, x0, x1) = band;
+    let seq: Vec<(usize, char)> = chars
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| {
+            !used.contains(i) && !c.ch.is_whitespace() && !c.ch.is_control()
+        })
+        .filter(|(_, c)| {
+            let cx = (c.min_x + c.max_x) * 0.5;
+            let cy = (c.min_y + c.max_y) * 0.5;
+            cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1
+        })
+        .map(|(i, c)| (i, c.ch))
+        .collect();
+    let n = target.len();
+    if seq.len() < n {
+        return None;
+    }
+
+    let mut best: Option<(f32, Vec<usize>)> = None;
+    for start in 0..=seq.len() - n {
+        if !seq[start..start + n]
+            .iter()
+            .zip(target.iter())
+            .all(|((_, c), t)| c == t)
+        {
+            continue;
+        }
+        let idxs: Vec<usize> = seq[start..start + n].iter().map(|(i, _)| *i).collect();
+        if !glyphs_x_continuous(chars, &idxs) {
+            continue;
+        }
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for &i in &idxs {
+            lo = lo.min(chars[i].min_x);
+            hi = hi.max(chars[i].max_x);
+        }
+        let d = ((lo + hi) * 0.5 - prefer_x).abs();
+        if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
+            best = Some((d, idxs));
+        }
+    }
+    best.map(|(_, idxs)| idxs)
+}
+
+/// 命中字形的横向连续性闸门：按 min_x 排序后，相邻字形间隙不得超过
+/// 字形高度中位数 × 2 + 20px（≈一个行距）。正常字距只有 0–几 px；
+/// 跨格/跨列拼接出来的「假序列」会留下一个大间隙。
+fn glyphs_x_continuous(chars: &[ExtractedChar], idxs: &[usize]) -> bool {
+    if idxs.len() < 2 {
+        return true;
+    }
+    let mut heights: Vec<f32> = idxs
+        .iter()
+        .map(|&i| {
+            let (a, b) = chars[i].ink_v_span();
+            (b - a).max(1.0)
+        })
+        .collect();
+    heights.sort_by(f32::total_cmp);
+    let limit = heights[heights.len() / 2] * 2.0 + 20.0;
+    let mut sorted: Vec<usize> = idxs.to_vec();
+    sorted.sort_by(|&a, &b| chars[a].min_x.total_cmp(&chars[b].min_x));
+    sorted.windows(2).all(|w| chars[w[1]].min_x - chars[w[0]].max_x <= limit)
 }
 
 /// 处理一页上的所有表格：定位 → 擦字 → 生成单元格 TextRegion。
@@ -1240,8 +1634,16 @@ pub(crate) fn process_tables_on_page(
         }
         // 行主序扁平展开：flat_cells / flat_matches / rects 三者下标一一对应
         //（均按 view.rows 迭代顺序展开，含续行格占位）。
-        let flat_cells: Vec<&docx_tables::TableCellView> =
-            view.rows.iter().flat_map(|r| r.cells.iter()).collect();
+        let mut flat_cells: Vec<&docx_tables::TableCellView> = Vec::new();
+        // 每个扁平格所属行号：未定位格的纯西文/数字格没有可解析的全角字形，
+        // 字号要退到同行已定位格（见下方 row_font_px）。
+        let mut cell_row: Vec<usize> = Vec::new();
+        for (r_idx, row) in view.rows.iter().enumerate() {
+            for cell in &row.cells {
+                flat_cells.push(cell);
+                cell_row.push(r_idx);
+            }
+        }
         let flat_matches: Vec<Option<&docx_tables::CellMatch>> = m
             .row_matches
             .iter()
@@ -1252,6 +1654,29 @@ pub(crate) fn process_tables_on_page(
         if rects.iter().all(|r| r.is_none()) {
             continue; // 整表未命中：保留印刷底图
         }
+
+        // 已定位格的字号（像素）：区域最小尺寸要用；未定位格的纯西文/数字格
+        // 也用它兜底（否则 font_size = 0，引擎退回全局主字号，与表格字号不符）。
+        let mut cell_font_px: Vec<i32> = vec![0; flat_cells.len()];
+        let mut row_font_samples: Vec<Vec<i32>> = vec![Vec::new(); view.rows.len()];
+        let mut table_font_samples: Vec<i32> = Vec::new();
+        for (idx, cm) in flat_matches.iter().enumerate() {
+            let Some(cm) = cm else { continue };
+            let refs: Vec<&ExtractedChar> =
+                cm.char_idxs.iter().filter_map(|&k| chars.get(k)).collect();
+            let fs = resolve_font_size_px(&refs, avg_font_size_pt(&refs), scale);
+            // 异常字体矩阵防御：纯西文格的 scaled_font_size 可能被放大到实际
+            // 字号的十几倍（如 200pt 对应 20px 字形）。不可信的字号归零，走
+            // 后面的 sz/同行/整表回退链；同时避免它污染同行/整表中位数。
+            if fs > 0 && font_size_plausible(&refs, fs) {
+                cell_font_px[idx] = fs;
+                row_font_samples[cell_row[idx]].push(fs);
+                table_font_samples.push(fs);
+            }
+        }
+        let row_font_px: Vec<i32> =
+            row_font_samples.iter().map(|v| median_i32(v).unwrap_or(0)).collect();
+        let table_font_px = median_i32(&table_font_samples).unwrap_or(0);
 
         // 参与生成区域的单元格：非续行、非灰高亮、非空文本且矩形可得（区域与排重矩形同源）
         let cells_on_page: Vec<(usize, RectPx)> = flat_cells
@@ -1267,33 +1692,61 @@ pub(crate) fn process_tables_on_page(
             .filter_map(|(i, (_, r))| r.map(|r| (i, r)))
             .collect();
 
+        // 已被字符流匹配占用的下标：未定位格的文本兜底不得再擦这些字形
+        //（尤其灰高亮 skip_printed 格，其印刷字必须保留）。
+        let mut used: std::collections::HashSet<usize> = flat_matches
+            .iter()
+            .filter_map(|cm| *cm)
+            .flat_map(|cm| cm.char_idxs.iter().copied())
+            .collect();
+        // 灰高亮格可能未参与匹配（单字格等），但其印刷字同样必须保留：
+        // 把落在 skip_printed 格矩形内的字形也加入保护集，防文本兜底误擦。
+        let protected: Vec<RectPx> = flat_cells
+            .iter()
+            .zip(rects.iter())
+            .filter(|(c, r)| c.skip_printed && r.is_some())
+            .filter_map(|(_, r)| *r)
+            .collect();
+        if !protected.is_empty() {
+            for (k, c) in chars.iter().enumerate() {
+                let cx = (c.min_x + c.max_x) * 0.5;
+                let cy = (c.min_y + c.max_y) * 0.5;
+                if protected.iter().any(|r| {
+                    cx >= r.x as f32
+                        && cx <= (r.x + r.w) as f32
+                        && cy >= r.y as f32
+                        && cy <= (r.y + r.h) as f32
+                }) {
+                    used.insert(k);
+                }
+            }
+        }
+        // 本表的横向范围：用已定位格的字符 bbox 估计，供未定位格文本兜底
+        // 在表内找字（避免扫到同页正文）。
+        let (mut table_x0, mut table_x1) = (f32::INFINITY, f32::NEG_INFINITY);
+        for cm in flat_matches.iter().filter_map(|cm| *cm) {
+            for &k in &cm.char_idxs {
+                if let Some(c) = chars.get(k) {
+                    table_x0 = table_x0.min(c.min_x);
+                    table_x1 = table_x1.max(c.max_x);
+                }
+            }
+        }
+        let has_table_x = table_x1 > table_x0;
+
         let mut table_regions = Vec::new();
+        // 锚定后的最终区域矩形：标签排重要用它（推断矩形可能因列带偏移
+        // 落在别处，格内标签会漏判为表外，产生重复的独立标签区域）。
+        let mut anchored_rects: Vec<RectPx> = Vec::new();
         for &(i, rect) in &cells_on_page {
             let cell = flat_cells[i];
             let located = flat_matches.get(i).copied().flatten();
             // 命中字符：擦除原印刷字（保留表格线）；字号取命中字符校准值
             let mut font_size = 0i32;
-            if let Some(cm) = located {
-                erase_char_boxes(img, chars, &cm.char_idxs, 2);
-                let refs: Vec<&ExtractedChar> =
-                    cm.char_idxs.iter().filter_map(|&k| chars.get(k)).collect();
-                let avg_pt = {
-                    let vals: Vec<f32> = refs
-                        .iter()
-                        .map(|c| c.font_size_pt)
-                        .filter(|s| *s > 0.0 && !s.is_nan())
-                        .collect();
-                    if vals.is_empty() { 0.0 } else { vals.iter().sum::<f32>() / vals.len() as f32 }
-                };
-                font_size = resolve_font_size_px(&refs, avg_pt, scale);
-            }
-            if font_size <= 0 {
-                if let Some(h) = cell.sz_half_pt {
-                    font_size = ((h as f32 / 2.0) * scale).round() as i32;
-                }
-            }
-            // 区域矩形：命中 bbox 外扩（水平 6 / 竖直 4）；推断矩形已内缩
-            let region_rect = if located.is_some() {
+            // 区域矩形：命中格横向仍用 loose bbox 外扩；纵向默认旧行为
+            //（rect.y-4 / +8），拿到 tight 后改以字形纵向为锚。
+            // 未定位格默认沿用推断矩形（已内缩）。
+            let mut region_rect = if located.is_some() {
                 RectPx {
                     x: rect.x - 6,
                     y: rect.y - 4,
@@ -1303,6 +1756,137 @@ pub(crate) fn process_tables_on_page(
             } else {
                 rect
             };
+
+            if let Some(cm) = located {
+                erase_char_boxes(img, chars, &cm.char_idxs, 2);
+                let refs: Vec<&ExtractedChar> =
+                    cm.char_idxs.iter().filter_map(|&k| chars.get(k)).collect();
+                font_size = cell_font_px[i];
+                // 纵向锚点取字形 tight：loose 是行高，直接按 loose 会让手写上移。
+                if let Some((top, bottom)) = union_tight_y(&refs) {
+                    region_rect.y = top.round() as i32 - 6;
+                    region_rect.h = (bottom - top).round() as i32 + 12;
+                }
+            } else {
+                // 未定位格（单字格/带推断）：先按单元格文本在行带内反查真实
+                // 字形——推断矩形的横向列带可能因同列其它格居中而偏移。
+                let target = normalized_cell_chars(&cell.text);
+                let mut text_match: Option<Vec<usize>> = None;
+                // 单字格不参与字符流匹配，多字格也可能因游标/流序失配而未定位：
+                // 两类都按文本反查真实字形。多字序列的跨格拼接由
+                // find_cell_glyphs 的横向连续性闸门拦下。
+                if !target.is_empty() {
+                    let (sx0, sx1) = if has_table_x {
+                        (
+                            table_x0.min(rect.x as f32) - 16.0,
+                            table_x1.max((rect.x + rect.w) as f32) + 16.0,
+                        )
+                    } else {
+                        (rect.x as f32 - 32.0, (rect.x + rect.w) as f32 + 32.0)
+                    };
+                    let prefer_x = rect.x as f32 + rect.w as f32 / 2.0;
+                    if let Some(idxs) = find_cell_glyphs(
+                        chars,
+                        &target,
+                        (
+                            rect.y as f32 - 6.0,
+                            (rect.y + rect.h) as f32 + 6.0,
+                            sx0,
+                            sx1,
+                        ),
+                        prefer_x,
+                        &used,
+                    ) {
+                        // 距离闸门：最近的同名序列也不应离推断格太远，防止
+                        // 误擦相邻格同名字形；按格宽放宽到 4 倍/200px。
+                        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+                        for &k in &idxs {
+                            lo = lo.min(chars[k].min_x);
+                            hi = hi.max(chars[k].max_x);
+                        }
+                        if ((lo + hi) * 0.5 - prefer_x).abs()
+                            <= (rect.w as f32 * 4.0).max(200.0)
+                        {
+                            text_match = Some(idxs);
+                        }
+                    }
+                }
+
+                if let Some(idxs) = text_match {
+                    // 占位：同一字形不得再被后续未定位格当作锚点（两格抢一处
+                    // 会导致一个字被擦两次、区域锚到别人的字上）。
+                    used.extend(idxs.iter().copied());
+                    erase_char_boxes(img, chars, &idxs, 2);
+                    let refs: Vec<&ExtractedChar> =
+                        idxs.iter().filter_map(|&k| chars.get(k)).collect();
+                    // 纯西文不猜字号（异常字体矩阵下 scaled_font_size 可能
+                    // 是 200+），保留后面的 sz_half_pt 回退。
+                    if refs
+                        .iter()
+                        .any(|c| is_full_width_char(c.ch) && c.glyph_h_pt > 0.0)
+                    {
+                        font_size =
+                            resolve_font_size_px(&refs, avg_font_size_pt(&refs), scale);
+                    }
+                    let (mut x0, mut x1) = (f32::INFINITY, f32::NEG_INFINITY);
+                    for &k in &idxs {
+                        x0 = x0.min(chars[k].min_x);
+                        x1 = x1.max(chars[k].max_x);
+                    }
+                    if let Some((top, bottom)) = union_tight_y(&refs) {
+                        region_rect = RectPx {
+                            x: x0.floor() as i32 - 8,
+                            y: top.round() as i32 - 6,
+                            w: (x1.ceil() - x0.floor()) as i32 + 16,
+                            h: (bottom - top).round() as i32 + 12,
+                        };
+                    }
+                } else {
+                    // Python 兜底：未定位格按「字形中心落在推断矩形内」逐字擦。
+                    // 已被其它格匹配的字形（含灰高亮 skip_printed）不碰。
+                    let inside: Vec<usize> = chars
+                        .iter()
+                        .enumerate()
+                        .filter(|(k, _)| !used.contains(k))
+                        .filter(|(_, c)| {
+                            let cx = (c.min_x + c.max_x) * 0.5;
+                            let cy = (c.min_y + c.max_y) * 0.5;
+                            cx >= rect.x as f32
+                                && cx <= (rect.x + rect.w) as f32
+                                && cy >= rect.y as f32
+                                && cy <= (rect.y + rect.h) as f32
+                        })
+                        .map(|(k, _)| k)
+                        .collect();
+                    if !inside.is_empty() {
+                        erase_char_boxes(img, chars, &inside, 2);
+                    }
+                }
+            }
+            if font_size <= 0 {
+                if let Some(h) = cell.sz_half_pt {
+                    font_size = ((h as f32 / 2.0) * scale).round() as i32;
+                }
+            }
+            // 未定位的纯西文/数字格没有全角字形可校准字号（异常字体矩阵下
+            // scaled_font_size 可能是 200+），退到同行已定位格、再退到整表字号：
+            // 保持与表格一致，且让下面的区域最小尺寸有值可算。
+            if font_size <= 0 {
+                font_size = row_font_px[cell_row[i]];
+            }
+            if font_size <= 0 {
+                font_size = table_font_px;
+            }
+            // 区域下限：按字形 bbox 锚定后，数字/字母格的 tight 高度与 advance
+            // 宽度都小于字号，区域会小到装不下手写字（横向/纵向裁切）。
+            if font_size > 0 {
+                apply_min_region_size(
+                    &mut region_rect,
+                    font_size,
+                    cell_line_count(&cell.text),
+                    cell.align,
+                );
+            }
             let (rx, ry) = (region_rect.x.max(0), region_rect.y.max(0));
             let rw = region_rect.w.min(img.width() as i32 - rx).max(1);
             let rh = region_rect.h.min(img.height() as i32 - ry).max(1);
@@ -1337,6 +1921,7 @@ pub(crate) fn process_tables_on_page(
                 table_index: Some(view.index as u32),
                 ..TextRegion::default()
             });
+            anchored_rects.push(RectPx { x: rx, y: ry, w: rw, h: rh });
         }
 
         if table_regions.is_empty() {
@@ -1360,6 +1945,9 @@ pub(crate) fn process_tables_on_page(
             });
         }
         result.cell_rects.extend(cells_on_page.into_iter().map(|(_, r)| r));
+        // 追加锚定后的区域矩形：单字格/文本反查格的区域可能不在推断矩形内
+        //（表头居中、正文左对齐），只按推断矩形排重会漏掉格内标签。
+        result.cell_rects.extend(anchored_rects);
         result.regions.extend(table_regions);
     }
     result
@@ -1951,7 +2539,7 @@ mod tests {
                 max_x: 29.2,
                 max_y: 58.7,
                 font_size_pt: 11.16,
-                glyph_h_pt: 10.18,
+                glyph_h_pt: 10.18, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '三',
@@ -1960,7 +2548,7 @@ mod tests {
                 max_x: 58.4,
                 max_y: 58.7,
                 font_size_pt: 11.16,
-                glyph_h_pt: 10.19,
+                glyph_h_pt: 10.19, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '丰',
@@ -1969,7 +2557,7 @@ mod tests {
                 max_x: 87.6,
                 max_y: 58.7,
                 font_size_pt: 11.16,
-                glyph_h_pt: 10.15,
+                glyph_h_pt: 10.15, tight_min_y: 0.0, tight_max_y: 0.0,
             },
         ];
         let refs: Vec<&ExtractedChar> = chars.iter().collect();
@@ -1986,7 +2574,7 @@ mod tests {
             max_x: 18.0,
             max_y: 26.78,
             font_size_pt: 24.0,
-            glyph_h_pt: 17.3,
+            glyph_h_pt: 17.3, tight_min_y: 0.0, tight_max_y: 0.0,
         }];
         let latin_refs: Vec<&ExtractedChar> = latin.iter().collect();
         assert_eq!(
@@ -2002,7 +2590,7 @@ mod tests {
             max_x: 29.2,
             max_y: 58.7,
             font_size_pt: 12.0,
-            glyph_h_pt: 0.0,
+            glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
         }];
         let no_glyph_refs: Vec<&ExtractedChar> = no_glyph.iter().collect();
         assert_eq!(
@@ -2022,7 +2610,7 @@ mod tests {
                 max_x: 120.0,
                 max_y: 70.0,
                 font_size_pt: 12.0,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '三',
@@ -2031,7 +2619,7 @@ mod tests {
                 max_x: 145.0,
                 max_y: 70.0,
                 font_size_pt: 12.0,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '外',
@@ -2040,7 +2628,7 @@ mod tests {
                 max_x: 520.0,
                 max_y: 520.0,
                 font_size_pt: 10.0,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
         ];
 
@@ -2069,7 +2657,7 @@ mod tests {
                 max_x: 105.0,
                 max_y: 155.0,
                 font_size_pt: 12.0,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '一',
@@ -2078,7 +2666,7 @@ mod tests {
                 max_x: 85.0,
                 max_y: 116.0,
                 font_size_pt: 12.0,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '第',
@@ -2087,7 +2675,7 @@ mod tests {
                 max_x: 65.0,
                 max_y: 115.0,
                 font_size_pt: 12.0,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '二',
@@ -2096,7 +2684,7 @@ mod tests {
                 max_x: 85.0,
                 max_y: 156.0,
                 font_size_pt: 12.0,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '行',
@@ -2105,7 +2693,7 @@ mod tests {
                 max_x: 105.0,
                 max_y: 114.0,
                 font_size_pt: 12.0,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '第',
@@ -2114,7 +2702,7 @@ mod tests {
                 max_x: 65.0,
                 max_y: 155.0,
                 font_size_pt: 12.0,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
         ];
 
@@ -2177,7 +2765,7 @@ mod tests {
             max_x: x + w,
             max_y: y + h,
             font_size_pt: 10.5,
-            glyph_h_pt: 10.5,
+            glyph_h_pt: 10.5, tight_min_y: 0.0, tight_max_y: 0.0,
         }
     }
 
@@ -2359,7 +2947,7 @@ mod tests {
                 max_x: 150.0,
                 max_y: 65.0,
                 font_size_pt: font_size,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '一',
@@ -2368,7 +2956,7 @@ mod tests {
                 max_x: 185.0,
                 max_y: 65.0,
                 font_size_pt: font_size,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '行',
@@ -2377,7 +2965,7 @@ mod tests {
                 max_x: 220.0,
                 max_y: 65.0,
                 font_size_pt: font_size,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '第',
@@ -2386,7 +2974,7 @@ mod tests {
                 max_x: 90.0,
                 max_y: 105.0,
                 font_size_pt: font_size,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '二',
@@ -2395,7 +2983,7 @@ mod tests {
                 max_x: 125.0,
                 max_y: 105.0,
                 font_size_pt: font_size,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '行',
@@ -2404,7 +2992,7 @@ mod tests {
                 max_x: 160.0,
                 max_y: 105.0,
                 font_size_pt: font_size,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '第',
@@ -2413,7 +3001,7 @@ mod tests {
                 max_x: 90.0,
                 max_y: 145.0,
                 font_size_pt: font_size,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '三',
@@ -2422,7 +3010,7 @@ mod tests {
                 max_x: 125.0,
                 max_y: 145.0,
                 font_size_pt: font_size,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '行',
@@ -2431,7 +3019,7 @@ mod tests {
                 max_x: 160.0,
                 max_y: 145.0,
                 font_size_pt: font_size,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
         ];
 
@@ -2483,7 +3071,7 @@ mod tests {
                 max_x: 80.0,
                 max_y: 125.0,
                 font_size_pt: 12.0,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '签',
@@ -2492,7 +3080,7 @@ mod tests {
                 max_x: 105.0,
                 max_y: 125.0,
                 font_size_pt: 12.0,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
             ExtractedChar {
                 ch: '名',
@@ -2501,7 +3089,7 @@ mod tests {
                 max_x: 130.0,
                 max_y: 125.0,
                 font_size_pt: 12.0,
-                glyph_h_pt: 0.0,
+                glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
             },
         ];
 
@@ -2538,12 +3126,12 @@ mod tests {
     fn extract_pdf_page_tags_excludes_table_cells() {
         // 字符流中有一个 {{姓名}} 标签；排除矩形覆盖它 → 不生成区域，但仍擦除标签框
         let chars = vec![
-            ExtractedChar { ch: '{', min_x: 100.0, min_y: 50.0, max_x: 106.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
-            ExtractedChar { ch: '{', min_x: 106.0, min_y: 50.0, max_x: 112.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
-            ExtractedChar { ch: '姓', min_x: 112.0, min_y: 50.0, max_x: 122.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
-            ExtractedChar { ch: '名', min_x: 122.0, min_y: 50.0, max_x: 132.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
-            ExtractedChar { ch: '}', min_x: 132.0, min_y: 50.0, max_x: 138.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
-            ExtractedChar { ch: '}', min_x: 138.0, min_y: 50.0, max_x: 144.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0 },
+            ExtractedChar { ch: '{', min_x: 100.0, min_y: 50.0, max_x: 106.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0 },
+            ExtractedChar { ch: '{', min_x: 106.0, min_y: 50.0, max_x: 112.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0 },
+            ExtractedChar { ch: '姓', min_x: 112.0, min_y: 50.0, max_x: 122.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0 },
+            ExtractedChar { ch: '名', min_x: 122.0, min_y: 50.0, max_x: 132.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0 },
+            ExtractedChar { ch: '}', min_x: 132.0, min_y: 50.0, max_x: 138.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0 },
+            ExtractedChar { ch: '}', min_x: 138.0, min_y: 50.0, max_x: 144.0, max_y: 70.0, font_size_pt: 10.5, glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0 },
         ];
         let mut img = image::RgbImage::from_pixel(400, 300, image::Rgb([255, 255, 255]));
         // 预涂黑标签区域，验证被单元格矩形覆盖时仍会擦除（模板字符不能残留底图）
@@ -2652,7 +3240,7 @@ mod tests {
             max_x: 100.0,
             max_y: 80.0,
             font_size_pt: 12.0,
-            glyph_h_pt: 0.0,
+            glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
         }];
         erase_char_boxes(&mut img, &chars, &[0], 2);
         // 字形区域被擦白
@@ -2677,10 +3265,10 @@ mod tests {
         let stream = crate::core::docx_io::parse_body_stream_for_test(xml, &mut registry).unwrap();
         let views = crate::core::docx_tables::build_table_views(&stream);
         let chars = vec![
-            ExtractedChar { ch: '姓', min_x: 100.0, min_y: 100.0, max_x: 120.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0 },
-            ExtractedChar { ch: '名', min_x: 120.0, min_y: 100.0, max_x: 140.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0 },
-            ExtractedChar { ch: '张', min_x: 300.0, min_y: 100.0, max_x: 320.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0 },
-            ExtractedChar { ch: '三', min_x: 320.0, min_y: 100.0, max_x: 340.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0 },
+            ExtractedChar { ch: '姓', min_x: 100.0, min_y: 100.0, max_x: 120.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 0.0, tight_max_y: 0.0 },
+            ExtractedChar { ch: '名', min_x: 120.0, min_y: 100.0, max_x: 140.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 0.0, tight_max_y: 0.0 },
+            ExtractedChar { ch: '张', min_x: 300.0, min_y: 100.0, max_x: 320.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 0.0, tight_max_y: 0.0 },
+            ExtractedChar { ch: '三', min_x: 320.0, min_y: 100.0, max_x: 340.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 0.0, tight_max_y: 0.0 },
         ];
         let mut img = image::RgbImage::from_pixel(600, 400, image::Rgb([255, 255, 255]));
         // 印上"张三"字形（模拟底图上的印刷字）
@@ -2707,8 +3295,8 @@ mod tests {
         assert_eq!(r1.role_id, 2);
         // 擦除后底图上的"张三"字形消失
         assert_eq!(img.get_pixel(310, 110), &image::Rgb([255, 255, 255]));
-        // 排除矩形与外包围
-        assert_eq!(result.cell_rects.len(), 2);
+        // 排除矩形与外包围：每格一条推断矩形 + 一条锚定区域矩形（供标签排重）
+        assert_eq!(result.cell_rects.len(), 4);
         assert_eq!(result.outer_rects.len(), 1);
     }
 
@@ -2719,8 +3307,8 @@ mod tests {
         let stream = crate::core::docx_io::parse_body_stream_for_test(xml, &mut registry).unwrap();
         let views = crate::core::docx_tables::build_table_views(&stream);
         let chars = vec![
-            ExtractedChar { ch: '合', min_x: 100.0, min_y: 100.0, max_x: 120.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0 },
-            ExtractedChar { ch: '并', min_x: 120.0, min_y: 100.0, max_x: 140.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0 },
+            ExtractedChar { ch: '合', min_x: 100.0, min_y: 100.0, max_x: 120.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 0.0, tight_max_y: 0.0 },
+            ExtractedChar { ch: '并', min_x: 120.0, min_y: 100.0, max_x: 140.0, max_y: 120.0, font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 0.0, tight_max_y: 0.0 },
         ];
         let mut img = image::RgbImage::from_pixel(600, 400, image::Rgb([255, 255, 255]));
         let mut color_map = std::collections::HashMap::new();
@@ -2753,7 +3341,7 @@ mod tests {
                 max_x: 20.0 + i as f32 * 12.0,
                 max_y: 120.0,
                 font_size_pt: 10.5,
-                glyph_h_pt: 10.0,
+                glyph_h_pt: 10.0, tight_min_y: 0.0, tight_max_y: 0.0,
             })
             .collect();
         let mut img = image::RgbImage::from_pixel(600, 400, image::Rgb([255, 255, 255]));
@@ -2767,4 +3355,894 @@ mod tests {
         assert!(result.outer_rects.is_empty());
         assert_eq!(result.next_start_element, 1, "流起点指向表格元素（下标 1），下一页重走");
     }
+
+    #[test]
+    fn erase_char_boxes_uses_tight_vertical_span() {
+        // loose 纵向 60..140（行高），字形实际 85..115；上下各有一条表格线。
+        // 按 loose 擦会同时抹掉 y=80/120 的线；按 tight 应只擦字形。
+        let mut img = image::RgbImage::from_pixel(200, 200, image::Rgb([255, 255, 255]));
+        for x in 40..160 {
+            img.put_pixel(x, 80, image::Rgb([0, 0, 0]));
+            img.put_pixel(x, 120, image::Rgb([0, 0, 0]));
+        }
+        for y in 85..115 {
+            for x in 60..100 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        let chars = [ExtractedChar {
+            ch: '字',
+            min_x: 60.0,
+            min_y: 60.0,
+            max_x: 100.0,
+            max_y: 140.0,
+            font_size_pt: 10.5,
+            glyph_h_pt: 10.0,
+            tight_min_y: 85.0,
+            tight_max_y: 115.0,
+        }];
+        erase_char_boxes(&mut img, &chars, &[0], 2);
+        assert_eq!(img.get_pixel(80, 100), &image::Rgb([255, 255, 255]), "字形应擦净");
+        assert_eq!(img.get_pixel(80, 80), &image::Rgb([0, 0, 0]), "上边框线应保留");
+        assert_eq!(img.get_pixel(80, 120), &image::Rgb([0, 0, 0]), "下边框线应保留");
+    }
+
+    #[test]
+    fn erase_char_boxes_clamped_y_limits_loose_span() {
+        // 异常字体矩阵：loose 纵向 0..300、tight 缺失；钳到 (52, 68) 后只擦
+        // 52..67，横向仍按 loose + 2px pad，钳位外的表格线/像素保留。
+        let mut img = image::RgbImage::from_pixel(200, 320, image::Rgb([255, 255, 255]));
+        for x in 40..160 {
+            img.put_pixel(x, 45, image::Rgb([0, 0, 0]));
+            img.put_pixel(x, 75, image::Rgb([0, 0, 0]));
+        }
+        for y in 0..320 {
+            for x in 100..120 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        let chars = [ExtractedChar {
+            ch: '{',
+            min_x: 106.0,
+            min_y: 0.0,
+            max_x: 112.0,
+            max_y: 300.0,
+            font_size_pt: 10.5,
+            glyph_h_pt: 10.0,
+            tight_min_y: 0.0,
+            tight_max_y: 0.0,
+        }];
+        assert_eq!(chars[0].ink_v_span(), (0.0, 300.0), "无 tight 时必须回退 loose");
+        erase_char_boxes_clamped_y(&mut img, &chars, &[0], 2, (52.0, 68.0));
+        assert_eq!(img.get_pixel(110, 52), &image::Rgb([255, 255, 255]), "钳位带首行应擦净");
+        assert_eq!(img.get_pixel(110, 67), &image::Rgb([255, 255, 255]), "钳位带末行应擦净");
+        assert_eq!(img.get_pixel(110, 51), &image::Rgb([0, 0, 0]), "钳位上界外 1px 不擦");
+        assert_eq!(img.get_pixel(110, 45), &image::Rgb([0, 0, 0]), "上表格线应保留");
+        assert_eq!(img.get_pixel(110, 75), &image::Rgb([0, 0, 0]), "下表格线应保留");
+        assert_eq!(img.get_pixel(103, 60), &image::Rgb([0, 0, 0]), "横向 pad 外不擦");
+        assert_eq!(img.get_pixel(114, 60), &image::Rgb([255, 255, 255]), "横向 pad 内含末列");
+        assert_eq!(img.get_pixel(115, 60), &image::Rgb([0, 0, 0]), "横向 pad 外 1px 不擦");
+        // 钳位后为空区间时跳过（不 panic、不擦）
+        erase_char_boxes_clamped_y(&mut img, &chars, &[0], 2, (100.0, 100.0));
+        assert_eq!(img.get_pixel(110, 100), &image::Rgb([0, 0, 0]), "空钳位区间应跳过");
+    }
+
+    #[test]
+    fn extract_pdf_page_tags_uses_tight_and_filters_outlier() {
+        // `{{姓名}}`；第二个 `{` 的 loose 纵向被异常字体矩阵撑到 0..300，
+        // tight 缺失（0）→ 回退 loose，必须被中位数 2 倍规则剔除。
+        // 正常字 tight 纵向 52..68；标签区域矩形应回到 52..68，不碰 45/75 的线；
+        // 该畸形字的逐字形擦除同样钳到 52..68（否则回退 loose 会擦出全高白带）。
+        let chars = vec![
+            ExtractedChar {
+                ch: '{',
+                min_x: 100.0,
+                min_y: 50.0,
+                max_x: 106.0,
+                max_y: 70.0,
+                font_size_pt: 10.5,
+                glyph_h_pt: 10.0,
+                tight_min_y: 52.0,
+                tight_max_y: 68.0,
+            },
+            ExtractedChar {
+                ch: '{',
+                min_x: 106.0,
+                min_y: 0.0,
+                max_x: 112.0,
+                max_y: 300.0,
+                font_size_pt: 10.5,
+                glyph_h_pt: 0.0,
+                tight_min_y: 0.0,
+                tight_max_y: 0.0,
+            },
+            ExtractedChar {
+                ch: '姓',
+                min_x: 112.0,
+                min_y: 50.0,
+                max_x: 122.0,
+                max_y: 70.0,
+                font_size_pt: 10.5,
+                glyph_h_pt: 10.0,
+                tight_min_y: 52.0,
+                tight_max_y: 68.0,
+            },
+            ExtractedChar {
+                ch: '名',
+                min_x: 122.0,
+                min_y: 50.0,
+                max_x: 132.0,
+                max_y: 70.0,
+                font_size_pt: 10.5,
+                glyph_h_pt: 10.0,
+                tight_min_y: 52.0,
+                tight_max_y: 68.0,
+            },
+            ExtractedChar {
+                ch: '}',
+                min_x: 132.0,
+                min_y: 50.0,
+                max_x: 138.0,
+                max_y: 70.0,
+                font_size_pt: 10.5,
+                glyph_h_pt: 10.0,
+                tight_min_y: 52.0,
+                tight_max_y: 68.0,
+            },
+            ExtractedChar {
+                ch: '}',
+                min_x: 138.0,
+                min_y: 50.0,
+                max_x: 144.0,
+                max_y: 70.0,
+                font_size_pt: 10.5,
+                glyph_h_pt: 10.0,
+                tight_min_y: 52.0,
+                tight_max_y: 68.0,
+            },
+        ];
+        // 防止润色/重构时把 outlier 改掉而测试失效：显式确认它就是 300 高。
+        assert_eq!(chars[1].ink_v_span(), (0.0, 300.0));
+
+        let mut img = image::RgbImage::from_pixel(400, 300, image::Rgb([255, 255, 255]));
+        for x in 90..150 {
+            img.put_pixel(x, 45, image::Rgb([0, 0, 0]));
+            img.put_pixel(x, 75, image::Rgb([0, 0, 0]));
+        }
+        for y in 50..70 {
+            for x in 100..144 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        let regions = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img, &[]);
+        assert_eq!(regions.len(), 1);
+        // 正常字 tight 52..68 → 区域 y=52、h=16；按 loose 会是 0..300。
+        assert_eq!((regions[0].y, regions[0].h), (52, 16));
+        assert_eq!(img.get_pixel(120, 60), &image::Rgb([255, 255, 255]), "标签字应擦净");
+        assert_eq!(img.get_pixel(100, 45), &image::Rgb([0, 0, 0]), "上表格线应保留");
+        assert_eq!(img.get_pixel(100, 75), &image::Rgb([0, 0, 0]), "下表格线应保留");
+        // 无 tight 的离群字（x 106..112，loose 0..300）纵向钳到区域矩形 52..68：
+        // 未钳位的逐字形实现会按 loose 擦出 x 104..114 的全高白带，把 (110,45)
+        // 与 (110,75) 处的表格线切断；钳位后这两处必须仍是黑线。
+        assert_eq!(img.get_pixel(110, 60), &image::Rgb([255, 255, 255]), "离群字应擦净");
+        assert_eq!(img.get_pixel(110, 45), &image::Rgb([0, 0, 0]), "离群字不得擦断上表格线");
+        assert_eq!(img.get_pixel(110, 75), &image::Rgb([0, 0, 0]), "离群字不得擦断下表格线");
+    }
+
+    #[test]
+    fn extract_pdf_page_tags_erases_outlier_glyph_per_char() {
+        // `{{大姓名}}`：`大` 的字号异常（tight 高 56 = 其余字 16 的 3.5 倍）。
+        // 中位数 2 倍规则只用于区域矩形（仍是 y=52、h=16），擦除改为逐字形后
+        // 该字形必须按自身 tight 40..96 擦净——旧整框实现只擦 52..68，
+        // 40..52 与 68..96 的字形会残留在底图上。
+        let mk = |ch: char, x0: f32, x1: f32, t0: f32, t1: f32| ExtractedChar {
+            ch,
+            min_x: x0,
+            min_y: 50.0,
+            max_x: x1,
+            max_y: 70.0,
+            font_size_pt: 10.5,
+            glyph_h_pt: 10.0,
+            tight_min_y: t0,
+            tight_max_y: t1,
+        };
+        let chars = vec![
+            mk('{', 100.0, 106.0, 52.0, 68.0),
+            mk('{', 106.0, 112.0, 52.0, 68.0),
+            mk('大', 112.0, 132.0, 40.0, 96.0),
+            mk('姓', 132.0, 142.0, 52.0, 68.0),
+            mk('名', 142.0, 152.0, 52.0, 68.0),
+            mk('}', 152.0, 158.0, 52.0, 68.0),
+            mk('}', 158.0, 164.0, 52.0, 68.0),
+        ];
+        // 防止润色时把离群值改小导致测试失效：它必须 > 2× 中位数（32）
+        assert_eq!(chars[2].ink_v_span(), (40.0, 96.0));
+        let mut img = image::RgbImage::from_pixel(400, 300, image::Rgb([255, 255, 255]));
+        // 标签上下的表格线（40..96 与 52..68 之外）
+        for x in 90..170 {
+            img.put_pixel(x, 30, image::Rgb([0, 0, 0]));
+            img.put_pixel(x, 105, image::Rgb([0, 0, 0]));
+        }
+        // 正常字形的行带
+        for y in 52..68 {
+            for x in 100..164 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        // 离群字形比整行更高：旧整框擦除碰不到 y<52 与 y>=68 的部分
+        for y in 40..96 {
+            for x in 112..132 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        let regions = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img, &[]);
+        assert_eq!(regions.len(), 1);
+        // 区域矩形仍按中位数口径：离群值被过滤（不是 40..96）
+        assert_eq!(
+            (regions[0].x, regions[0].y, regions[0].w, regions[0].h),
+            (100, 52, 64, 16)
+        );
+        assert_eq!(img.get_pixel(102, 60), &image::Rgb([255, 255, 255]), "正常标签字应擦净");
+        assert_eq!(img.get_pixel(120, 60), &image::Rgb([255, 255, 255]), "离群字形主体应擦净");
+        // 旧实现（整框擦 52..68）会在这两处留下黑色字形残片
+        assert_eq!(img.get_pixel(120, 44), &image::Rgb([255, 255, 255]), "离群字形上缘应擦净");
+        assert_eq!(img.get_pixel(120, 90), &image::Rgb([255, 255, 255]), "离群字形下缘应擦净");
+        assert_eq!(img.get_pixel(95, 30), &image::Rgb([0, 0, 0]), "上表格线应保留");
+        assert_eq!(img.get_pixel(95, 105), &image::Rgb([0, 0, 0]), "下表格线应保留");
+    }
+
+    #[test]
+    fn extract_pdf_page_tags_cross_cell_fake_tag_erases_glyphs_only() {
+        // 畸形文本层顺序：`{{` 在左格、`}}` 在右格，中间隔着表格竖线与别的字形。
+        // 旧整框擦除（bbox 横向并集 100..212，±2px pad）会连 x=150 的竖线和
+        // x=160..180 的无关字形一起抹掉；逐字形擦除只清 4 个标签字形。
+        let mk = |ch: char, x0: f32| ExtractedChar {
+            ch,
+            min_x: x0,
+            min_y: 50.0,
+            max_x: x0 + 6.0,
+            max_y: 70.0,
+            font_size_pt: 10.5,
+            glyph_h_pt: 10.0,
+            tight_min_y: 52.0,
+            tight_max_y: 68.0,
+        };
+        let chars = vec![mk('{', 100.0), mk('{', 106.0), mk('}', 200.0), mk('}', 206.0)];
+        let mut img = image::RgbImage::from_pixel(400, 300, image::Rgb([255, 255, 255]));
+        // 两格之间的竖直表格边框，跨越标签行
+        for y in 20..110 {
+            img.put_pixel(150, y, image::Rgb([0, 0, 0]));
+        }
+        // 竖线右侧的无关字形（不属于标签）
+        for y in 52..68 {
+            for x in 160..180 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        // 两个标签字形本身
+        for y in 52..68 {
+            for x in 100..112 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+            for x in 200..212 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        // 两个单元格各由一个排除矩形代表（真实场景来自表格单元格路径）：
+        // bbox 100..212 与左格相交 → overlaps_cell，不生成跨两格的区域。
+        let cells = [
+            crate::core::docx_tables::RectPx { x: 90, y: 40, w: 70, h: 40 },
+            crate::core::docx_tables::RectPx { x: 190, y: 40, w: 70, h: 40 },
+        ];
+        let regions = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img, &cells);
+        assert!(regions.is_empty(), "跨格假标签由单元格接管，不应生成区域");
+        assert_eq!(img.get_pixel(105, 60), &image::Rgb([255, 255, 255]), "左格标签字形应擦净");
+        assert_eq!(img.get_pixel(203, 60), &image::Rgb([255, 255, 255]), "右格标签字形应擦净");
+        // 旧实现（整框擦 98..214）会把下面两处也涂白
+        assert_eq!(img.get_pixel(150, 60), &image::Rgb([0, 0, 0]), "两格之间的竖线应保留");
+        assert_eq!(img.get_pixel(170, 60), &image::Rgb([0, 0, 0]), "无关字形应保留");
+        assert_eq!(img.get_pixel(150, 25), &image::Rgb([0, 0, 0]), "竖线标签行外部分应保留");
+    }
+
+    #[test]
+    fn process_tables_located_cell_anchors_region_to_tight() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>甲乙</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>丙丁</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut registry = crate::core::docx_io::StyleRegistry::new();
+        let stream = crate::core::docx_io::parse_body_stream_for_test(xml, &mut registry).unwrap();
+        let views = crate::core::docx_tables::build_table_views(&stream);
+        let mk = |ch: char, x: f32| ExtractedChar {
+            ch,
+            min_x: x,
+            min_y: 100.0,
+            max_x: x + 20.0,
+            max_y: 140.0,
+            font_size_pt: 10.5,
+            glyph_h_pt: 10.0,
+            tight_min_y: 110.0,
+            tight_max_y: 130.0,
+        };
+        let chars = vec![mk('甲', 100.0), mk('乙', 120.0), mk('丙', 300.0), mk('丁', 320.0)];
+        let mut img = image::RgbImage::from_pixel(600, 400, image::Rgb([255, 255, 255]));
+        let mut color_map = std::collections::HashMap::new();
+        let mut next_role_id = 2u32;
+        let result = process_tables_on_page(
+            &stream, &views, &chars, 0, 1, 200, &mut color_map, &mut next_role_id, &mut img,
+        );
+        let r = result.regions.iter().find(|r| r.text == "甲乙").unwrap();
+        // rect = loose 并集(100..140,100..140) pad2 → x=98,w=44；
+        // 横向仍外扩 6 → x=92,w=56；纵向 tight 110..130 → y=104,h=32；
+        // 字号 resolve = min(10.5pt×200/72=29, glyph 10pt×200/72=28) = 28 →
+        // 区域下限 font_size+6 = 34（纵向只向下扩），宽度 56 已够。
+        assert_eq!((r.x, r.y, r.w, r.h), (92, 104, 56, 34));
+    }
+
+    #[test]
+    fn process_tables_unlocated_cell_erases_offset_glyph() {
+        // 表头「备注」居中（列带 300..340），正文「丙」左对齐（真实字形 200..220）。
+        // 推断矩形会把「丙」放到列中间（x≈303），按中心点判据擦不到 200..220；
+        // 文本锚定应找到真实字形、擦除并把区域锚到 200..220。
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>甲乙</w:t></w:r></w:p></w:tc><w:tc><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>备注</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>丙丁</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>丙</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut registry = crate::core::docx_io::StyleRegistry::new();
+        let stream = crate::core::docx_io::parse_body_stream_for_test(xml, &mut registry).unwrap();
+        let views = crate::core::docx_tables::build_table_views(&stream);
+        let mk = |ch: char, x: f32, y: f32| ExtractedChar {
+            ch,
+            min_x: x,
+            min_y: y,
+            max_x: x + 20.0,
+            max_y: y + 20.0,
+            font_size_pt: 10.5,
+            glyph_h_pt: 10.0,
+            tight_min_y: y + 5.0,
+            tight_max_y: y + 15.0,
+        };
+        let chars = vec![
+            mk('甲', 100.0, 100.0),
+            mk('乙', 120.0, 100.0),
+            mk('备', 300.0, 100.0),
+            mk('注', 320.0, 100.0),
+            mk('丙', 100.0, 200.0),
+            mk('丁', 120.0, 200.0),
+            // 单字格：真实字形左对齐在 200..220，但列带来自表头 300..340。
+            mk('丙', 200.0, 200.0),
+        ];
+        let mut img = image::RgbImage::from_pixel(600, 400, image::Rgb([255, 255, 255]));
+        // 在「丙」真实字形处涂黑，模拟底图印刷字。
+        for y in 205..215 {
+            for x in 200..220 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        let mut color_map = std::collections::HashMap::new();
+        let mut next_role_id = 2u32;
+        let result = process_tables_on_page(
+            &stream, &views, &chars, 0, 1, 200, &mut color_map, &mut next_role_id, &mut img,
+        );
+        let r = result.regions.iter().find(|r| r.text == "丙").unwrap();
+        // 锚点 x=200-8、y=205-6、w=20+16、h=10+12；字号 28 → 区域下限
+        // w=38（左对齐只向右扩）、h=34（只向下扩），保证手写字不被裁切。
+        assert_eq!((r.x, r.y, r.w, r.h), (192, 199, 38, 34));
+        assert!(r.font_size > 0, "文本锚定后应能校准字号");
+        assert_eq!(img.get_pixel(210, 210), &image::Rgb([255, 255, 255]), "偏移的印刷字应被擦除");
+    }
+
+    #[test]
+    fn process_tables_digit_cell_region_meets_font_size_min() {
+        // 数字单字格：字形 advance 14px、tight 高度 18px（≈0.6 字号），
+        // 按字形 bbox 锚定后区域只有 30x30，装不下 font_size=29 的手写字。
+        // 表头「备注」居中提供列带（x≈301），正文数字左对齐在 x=200（列带偏移），
+        // 文本反查负责擦除并锚定真实字形。
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>甲乙</w:t></w:r></w:p></w:tc><w:tc><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>备注</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>丙丁</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>1</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut registry = crate::core::docx_io::StyleRegistry::new();
+        let stream = crate::core::docx_io::parse_body_stream_for_test(xml, &mut registry).unwrap();
+        let views = crate::core::docx_tables::build_table_views(&stream);
+        // CJK 字：loose 行高 40、tight 20（≈字号 28）
+        let cjk = |ch: char, x: f32, y: f32| ExtractedChar {
+            ch,
+            min_x: x,
+            min_y: y,
+            max_x: x + 20.0,
+            max_y: y + 40.0,
+            font_size_pt: 10.5,
+            glyph_h_pt: 10.0,
+            tight_min_y: y + 10.0,
+            tight_max_y: y + 30.0,
+        };
+        // 数字：advance 14px、tight 高度 18px
+        let digit = ExtractedChar {
+            ch: '1',
+            min_x: 200.0,
+            min_y: 200.0,
+            max_x: 214.0,
+            max_y: 240.0,
+            font_size_pt: 10.5,
+            glyph_h_pt: 0.0,
+            tight_min_y: 212.0,
+            tight_max_y: 230.0,
+        };
+        let chars = vec![
+            cjk('甲', 100.0, 100.0),
+            cjk('乙', 120.0, 100.0),
+            cjk('备', 300.0, 100.0),
+            cjk('注', 320.0, 100.0),
+            cjk('丙', 100.0, 200.0),
+            cjk('丁', 120.0, 200.0),
+            digit,
+        ];
+        let mut img = image::RgbImage::from_pixel(600, 400, image::Rgb([255, 255, 255]));
+        // 底图印刷数字「1」
+        for y in 212..230 {
+            for x in 200..214 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        let mut color_map = std::collections::HashMap::new();
+        let mut next_role_id = 2u32;
+        let result = process_tables_on_page(
+            &stream, &views, &chars, 0, 1, 200, &mut color_map, &mut next_role_id, &mut img,
+        );
+        let r = result.regions.iter().find(|r| r.text == "1").unwrap();
+        // 数字格字号取 run 的 w:sz=21 → 10.5pt × 200/72 ≈ 29px。
+        assert_eq!(r.font_size, 29, "应回退到单元格声明的字号");
+        // 锚点 x=200-8、y=212-6、w=14+16=30、h=18+12=30。
+        assert_eq!((r.x, r.y), (192, 206), "区域应锚到真实字形而非列带中心");
+        assert!(
+            r.w >= r.font_size + 10,
+            "横向应补到字号下限：w={} < font_size+10={}",
+            r.w,
+            r.font_size + 10
+        );
+        assert!(
+            r.h >= r.font_size + 6,
+            "纵向应补到字号下限：h={} < font_size+6={}",
+            r.h,
+            r.font_size + 6
+        );
+        assert_eq!(
+            (r.w, r.h),
+            (39, 35),
+            "单字格区域应放宽到 字号+10 × 字号+6（左对齐向右/向下扩）"
+        );
+        assert_eq!(
+            img.get_pixel(207, 220),
+            &image::Rgb([255, 255, 255]),
+            "单字格印刷数字应被擦除"
+        );
+    }
+
+    #[test]
+    fn process_tables_abnormal_font_size_does_not_blow_up_region() {
+        // 异常字体矩阵防御：pdfium 把字号报到 200pt（200dpi ≈ 556px），
+        // 而单元格字形只有 20px 高。该字号不可信 → 不参与区域下限、也不污染
+        // 同行/整表中位数，最终回退到同行字号（28px），区域保持字号下限。
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>甲乙</w:t></w:r></w:p></w:tc><w:tc><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>备注</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>丙丁</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>AB</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut registry = crate::core::docx_io::StyleRegistry::new();
+        let stream = crate::core::docx_io::parse_body_stream_for_test(xml, &mut registry).unwrap();
+        let views = crate::core::docx_tables::build_table_views(&stream);
+        let cjk = |ch: char, x: f32, y: f32| ExtractedChar {
+            ch,
+            min_x: x,
+            min_y: y,
+            max_x: x + 20.0,
+            max_y: y + 40.0,
+            font_size_pt: 10.5,
+            glyph_h_pt: 10.0,
+            tight_min_y: y + 10.0,
+            tight_max_y: y + 30.0,
+        };
+        let bad = |ch: char, x: f32| ExtractedChar {
+            ch,
+            min_x: x,
+            min_y: 100.0,
+            max_x: x + 10.0,
+            max_y: 140.0,
+            // 异常字体矩阵：字号 200pt，字形高度只有 ~20px
+            font_size_pt: 200.0,
+            glyph_h_pt: 0.0,
+            tight_min_y: 110.0,
+            tight_max_y: 130.0,
+        };
+        let chars = vec![
+            cjk('甲', 100.0, 100.0),
+            cjk('乙', 120.0, 100.0),
+            cjk('备', 300.0, 100.0),
+            cjk('注', 320.0, 100.0),
+            cjk('丙', 100.0, 200.0),
+            cjk('丁', 120.0, 200.0),
+            bad('A', 300.0),
+            bad('B', 310.0),
+        ];
+        let mut img = image::RgbImage::from_pixel(600, 400, image::Rgb([255, 255, 255]));
+        let mut color_map = std::collections::HashMap::new();
+        let mut next_role_id = 2u32;
+        let result = process_tables_on_page(
+            &stream, &views, &chars, 0, 1, 200, &mut color_map, &mut next_role_id, &mut img,
+        );
+        let r = result.regions.iter().find(|r| r.text == "AB").unwrap();
+        assert_eq!(r.font_size, 28, "异常字号应被丢弃并回退到同行字号，而不是保留 556");
+        // 锚定：x=300-2-6=292、w=(322-298)+12=36；纵向 tight 110..130 → y=104、h=32；
+        // 字号 28 → 区域补到 38x34（不按 556 扩张）。
+        assert_eq!(
+            (r.x, r.y, r.w, r.h),
+            (292, 104, 38, 34),
+            "异常字号不应把区域扩到按字号计算的下限（556+6）"
+        );
+    }
+
+    #[test]
+    fn apply_min_region_size_skips_abnormal_font_on_wide_anchor() {
+        // 宽而矮的锚定矩形：异常字号 556 的纵向下限 562 超过该边（30）的 3 倍，
+        // 必须整体跳过——不能因为长边 400 足够大就放行。
+        let mut wide = RectPx { x: 0, y: 10, w: 400, h: 30 };
+        apply_min_region_size(&mut wide, 556, 1, 0);
+        assert_eq!((wide.x, wide.y, wide.w, wide.h), (0, 10, 400, 30));
+
+        // 正常字号：仍按字号下限扩（左对齐向右/向下）。
+        let mut left = RectPx { x: 0, y: 10, w: 30, h: 30 };
+        apply_min_region_size(&mut left, 29, 1, 0);
+        assert_eq!((left.x, left.y, left.w, left.h), (0, 10, 39, 35));
+
+        // 居中对齐：宽度向两侧均分扩张，中心不变。
+        let mut centered = RectPx { x: 100, y: 10, w: 30, h: 30 };
+        apply_min_region_size(&mut centered, 29, 1, 1);
+        assert_eq!((centered.x, centered.w), (96, 39));
+
+        // 右对齐：向左扩，右缘不变。
+        let mut right = RectPx { x: 100, y: 10, w: 30, h: 30 };
+        apply_min_region_size(&mut right, 29, 1, 2);
+        assert_eq!((right.x, right.w), (91, 39));
+    }
+
+    #[test]
+    fn font_size_plausible_ignores_inflated_loose() {
+        // 异常字体矩阵：字形的 loose 纵向被撑到 300px，但 tight 只有 16px。
+        // 判定尺度用 tight 中位数（16），不能用 loose 最大值（300）——否则
+        // 556px 的假字号会落在 3×300 内被误判为可信。
+        let chars = [
+            ExtractedChar {
+                ch: 'A', min_x: 100.0, min_y: 0.0, max_x: 120.0, max_y: 300.0,
+                font_size_pt: 200.0, glyph_h_pt: 0.0, tight_min_y: 52.0, tight_max_y: 68.0,
+            },
+            ExtractedChar {
+                ch: 'B', min_x: 120.0, min_y: 52.0, max_x: 140.0, max_y: 68.0,
+                font_size_pt: 200.0, glyph_h_pt: 0.0, tight_min_y: 52.0, tight_max_y: 68.0,
+            },
+        ];
+        let refs: Vec<&ExtractedChar> = chars.iter().collect();
+        assert!(!font_size_plausible(&refs, 556), "556px 字号应判为不可信");
+        assert!(font_size_plausible(&refs, 29), "正常字号应判为可信");
+        assert!(font_size_plausible(&refs, 0), "0 表示未知，交由回退链处理");
+
+        // 正常标点格：10.5pt≈29px，tight 只有 4px（横线/冒号），loose 40px。
+        // 不能因为 tight 小就误杀正常字号（否则标点格的 29px 会被换掉）。
+        let punct = [ExtractedChar {
+            ch: '-', min_x: 100.0, min_y: 0.0, max_x: 120.0, max_y: 40.0,
+            font_size_pt: 10.5, glyph_h_pt: 0.0, tight_min_y: 18.0, tight_max_y: 22.0,
+        }];
+        let punct_refs: Vec<&ExtractedChar> = punct.iter().collect();
+        assert!(font_size_plausible(&punct_refs, 29), "正常标点格不应被判为异常字号");
+        assert!(!font_size_plausible(&punct_refs, 556), "标点格的假字号仍应被拒");
+    }
+
+    #[test]
+    fn extract_pdf_page_tags_drops_implausible_font_size() {
+        // 纯 ASCII 标签 {{A}}：字体矩阵异常时 pdfium 报 200pt（≈556px），
+        // 而字形 tight 只有 16px。标签区域字号必须归零（走全局主字号），
+        // 否则手写按 556px 渲染会被裁切/爆出区域。
+        let mk = |ch: char, x: f32| ExtractedChar {
+            ch,
+            min_x: x,
+            min_y: 50.0,
+            max_x: x + 8.0,
+            max_y: 70.0,
+            font_size_pt: 200.0,
+            glyph_h_pt: 0.0,
+            tight_min_y: 52.0,
+            tight_max_y: 68.0,
+        };
+        let chars = vec![
+            mk('{', 100.0),
+            mk('{', 108.0),
+            mk('A', 116.0),
+            mk('}', 124.0),
+            mk('}', 132.0),
+        ];
+        let mut img = image::RgbImage::from_pixel(400, 300, image::Rgb([255, 255, 255]));
+        let regions = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img, &[]);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].font_size, 0, "不可信的 556px 字号应被丢弃");
+        assert_eq!((regions[0].x, regions[0].y, regions[0].w, regions[0].h), (100, 52, 40, 16));
+    }
+
+    #[test]
+    fn process_tables_unlocated_multi_char_cell_anchors_to_text() {
+        // 2 字未定位格（字符流顺序错位导致匹配失败）：推断矩形来自居中的表头
+        // （x≈301..339），真实印刷字在 x=250..290。只靠中心点判据擦不到，
+        // 多字文本反查应找到真实字形、擦除并锚定。
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>甲乙</w:t></w:r></w:p></w:tc><w:tc><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>备注</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>丙丁</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>张三</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut registry = crate::core::docx_io::StyleRegistry::new();
+        let stream = crate::core::docx_io::parse_body_stream_for_test(xml, &mut registry).unwrap();
+        let views = crate::core::docx_tables::build_table_views(&stream);
+        let mk = |ch: char, x: f32, y: f32| ExtractedChar {
+            ch,
+            min_x: x,
+            min_y: y,
+            max_x: x + 20.0,
+            max_y: y + 40.0,
+            font_size_pt: 10.5,
+            glyph_h_pt: 10.0,
+            tight_min_y: y + 10.0,
+            tight_max_y: y + 30.0,
+        };
+        // 字符流顺序：甲乙 → 备注 → 张三 → 丙丁（「张三」排在「丙丁」之前，
+        // 匹配器游标越过它之后，「张三」格匹配失败，只剩文本反查路径）。
+        let chars = vec![
+            mk('甲', 100.0, 100.0),
+            mk('乙', 120.0, 100.0),
+            mk('备', 300.0, 100.0),
+            mk('注', 320.0, 100.0),
+            mk('张', 250.0, 200.0),
+            mk('三', 270.0, 200.0),
+            mk('丙', 100.0, 200.0),
+            mk('丁', 120.0, 200.0),
+        ];
+        // 前置校验：确认「张三」格真的未定位（否则本用例测不到文本反查）。
+        let (page_matches, _) =
+            crate::core::docx_tables::locate_tables_on_page(&stream, &views, &chars, 0);
+        assert!(
+            page_matches[0].row_matches[1][1].is_none(),
+            "「张三」格应因字符流顺序错位而未定位"
+        );
+        let mut img = image::RgbImage::from_pixel(600, 400, image::Rgb([255, 255, 255]));
+        for y in 210..230 {
+            for x in 250..290 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        let mut color_map = std::collections::HashMap::new();
+        let mut next_role_id = 2u32;
+        let result = process_tables_on_page(
+            &stream, &views, &chars, 0, 1, 200, &mut color_map, &mut next_role_id, &mut img,
+        );
+        let r = result.regions.iter().find(|r| r.text == "张三").unwrap();
+        // 锚点 x=250-8、w=40+16；y=210-6、h=20+12；字号 28 → 高度补到 34。
+        assert_eq!((r.x, r.y, r.w, r.h), (242, 204, 56, 34));
+        assert_eq!(r.font_size, 28, "CJK 文本反查应校准字号");
+        assert_eq!(
+            img.get_pixel(260, 220),
+            &image::Rgb([255, 255, 255]),
+            "偏移的 2 字印刷字应被擦除"
+        );
+    }
+
+    #[test]
+    fn process_tables_single_char_tag_cell_has_no_duplicate_tag_region() {
+        // 单字标签格：单元格文本 "A"（`{{A}}` 被 strip），列带来自居中表头
+        // 「备注」→ 推断矩形 x≈301，而真实印刷 `{{A}}` 在 x=250..288。
+        // 锚定后的区域不在推断矩形内：若标签排重只给推断矩形，格内标签会被
+        // 判为表外，额外生成一个 table_index=None 的 "A" 区域（重复手写）。
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>甲乙</w:t></w:r></w:p></w:tc><w:tc><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>备注</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>丙丁</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>{{A}}</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut registry = crate::core::docx_io::StyleRegistry::new();
+        let stream = crate::core::docx_io::parse_body_stream_for_test(xml, &mut registry).unwrap();
+        let views = crate::core::docx_tables::build_table_views(&stream);
+        let cjk = |ch: char, x: f32, y: f32| ExtractedChar {
+            ch,
+            min_x: x,
+            min_y: y,
+            max_x: x + 20.0,
+            max_y: y + 40.0,
+            font_size_pt: 10.5,
+            glyph_h_pt: 10.0,
+            tight_min_y: y + 12.0,
+            tight_max_y: y + 30.0,
+        };
+        let glyph = |ch: char, x: f32, w: f32| ExtractedChar {
+            ch,
+            min_x: x,
+            min_y: 200.0,
+            max_x: x + w,
+            max_y: 240.0,
+            font_size_pt: 10.5,
+            glyph_h_pt: 10.0,
+            tight_min_y: 212.0,
+            tight_max_y: 230.0,
+        };
+        let chars = vec![
+            cjk('甲', 100.0, 100.0),
+            cjk('乙', 120.0, 100.0),
+            cjk('备', 300.0, 100.0),
+            cjk('注', 320.0, 100.0),
+            cjk('丙', 100.0, 200.0),
+            cjk('丁', 120.0, 200.0),
+            // 第二行第二格的印刷内容：{{A}}
+            glyph('{', 250.0, 6.0),
+            glyph('{', 256.0, 6.0),
+            glyph('A', 262.0, 14.0),
+            glyph('}', 276.0, 6.0),
+            glyph('}', 282.0, 6.0),
+        ];
+        let mut img = image::RgbImage::from_pixel(600, 400, image::Rgb([255, 255, 255]));
+        for y in 212..230 {
+            for x in 250..288 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        let mut color_map = std::collections::HashMap::new();
+        let mut next_role_id = 2u32;
+        let result = process_tables_on_page(
+            &stream, &views, &chars, 0, 1, 200, &mut color_map, &mut next_role_id, &mut img,
+        );
+        let a = result.regions.iter().find(|r| r.text == "A").unwrap();
+        // 锚定到真实字形 A(262..276)：x=254、w=30→补到 39；y=206、h=30→补到 35。
+        assert_eq!((a.x, a.y, a.w, a.h), (254, 206, 39, 35));
+        // 标签排重：以单元格结果里的排除矩形跑标签提取，格内标签应被接管。
+        let tag_regions = extract_pdf_page_tags(
+            &chars,
+            0,
+            200,
+            img.width(),
+            img.height(),
+            &mut img,
+            &result.cell_rects,
+        );
+        assert!(
+            tag_regions.is_empty(),
+            "格内 `{{A}}` 标签不应再生成独立区域（重复手写）：{tag_regions:?}"
+        );
+        // 标签字符本身仍要擦净（`{{`/`}}` 不在单元格文本里，单元格路径擦不到）
+        assert_eq!(img.get_pixel(252, 220), &image::Rgb([255, 255, 255]));
+        assert_eq!(img.get_pixel(285, 220), &image::Rgb([255, 255, 255]));
+    }
+
+    #[test]
+    fn find_cell_glyphs_rejects_cross_cell_sequence() {
+        // 两个单字格相距 280px：拼出的「张三」不是同一个格子的文本，应被
+        // 横向连续性闸门拒绝（否则会把两格的字形擦掉、区域跨过竖线）。
+        let far = vec![
+            ExtractedChar {
+                ch: '张', min_x: 100.0, min_y: 100.0, max_x: 120.0, max_y: 140.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 0.0, tight_max_y: 0.0,
+            },
+            ExtractedChar {
+                ch: '三', min_x: 400.0, min_y: 100.0, max_x: 420.0, max_y: 140.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 0.0, tight_max_y: 0.0,
+            },
+        ];
+        let used = std::collections::HashSet::new();
+        assert_eq!(
+            find_cell_glyphs(&far, &['张', '三'], (95.0, 145.0, 80.0, 440.0), 100.0, &used),
+            None,
+            "跨格拼接的序列应被拒绝"
+        );
+
+        // 正常字距（间隙 4px）应命中。
+        let near = vec![
+            ExtractedChar {
+                ch: '张', min_x: 100.0, min_y: 100.0, max_x: 120.0, max_y: 140.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 0.0, tight_max_y: 0.0,
+            },
+            ExtractedChar {
+                ch: '三', min_x: 124.0, min_y: 100.0, max_x: 144.0, max_y: 140.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 0.0, tight_max_y: 0.0,
+            },
+        ];
+        assert_eq!(
+            find_cell_glyphs(&near, &['张', '三'], (95.0, 145.0, 80.0, 200.0), 120.0, &used),
+            Some(vec![0, 1])
+        );
+    }
+
+    #[test]
+    fn extract_pdf_page_tags_ignores_zero_size_linebreak_inside_tag() {
+        // LibreOffice PDF 文本层会在同一视觉行的 run 边界插入零尺寸 \r\n；
+        // 旧 scan_text_tags 会把标签截断，导致 {{打印:}} 前缀残留。
+        let chars = vec![
+            ExtractedChar {
+                ch: '{', min_x: 100.0, min_y: 50.0, max_x: 106.0, max_y: 70.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 52.0, tight_max_y: 68.0,
+            },
+            ExtractedChar {
+                ch: '{', min_x: 106.0, min_y: 50.0, max_x: 112.0, max_y: 70.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 52.0, tight_max_y: 68.0,
+            },
+            ExtractedChar {
+                ch: '姓', min_x: 112.0, min_y: 50.0, max_x: 122.0, max_y: 70.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 52.0, tight_max_y: 68.0,
+            },
+            ExtractedChar {
+                ch: '\r', min_x: 122.0, min_y: 60.0, max_x: 122.0, max_y: 60.0,
+                font_size_pt: 0.0, glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
+            },
+            ExtractedChar {
+                ch: '\n', min_x: 122.0, min_y: 60.0, max_x: 122.0, max_y: 60.0,
+                font_size_pt: 0.0, glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
+            },
+            ExtractedChar {
+                ch: '名', min_x: 122.0, min_y: 50.0, max_x: 132.0, max_y: 70.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 52.0, tight_max_y: 68.0,
+            },
+            ExtractedChar {
+                ch: '}', min_x: 132.0, min_y: 50.0, max_x: 138.0, max_y: 70.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 52.0, tight_max_y: 68.0,
+            },
+            ExtractedChar {
+                ch: '}', min_x: 138.0, min_y: 50.0, max_x: 144.0, max_y: 70.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 52.0, tight_max_y: 68.0,
+            },
+        ];
+        let mut img = image::RgbImage::from_pixel(400, 300, image::Rgb([255, 255, 255]));
+        for x in 90..150 {
+            img.put_pixel(x, 45, image::Rgb([0, 0, 0]));
+            img.put_pixel(x, 75, image::Rgb([0, 0, 0]));
+        }
+        for y in 50..70 {
+            for x in 100..144 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        let regions = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img, &[]);
+        assert_eq!(regions.len(), 1, "零尺寸换行不应截断标签");
+        assert_eq!((regions[0].y, regions[0].h), (52, 16));
+        assert_eq!(img.get_pixel(120, 60), &image::Rgb([255, 255, 255]), "标签字应擦净");
+        assert_eq!(img.get_pixel(100, 45), &image::Rgb([0, 0, 0]), "上表格线应保留");
+        assert_eq!(img.get_pixel(100, 75), &image::Rgb([0, 0, 0]), "下表格线应保留");
+    }
+
+    #[test]
+    fn extract_pdf_page_tags_rejects_tag_across_real_lines() {
+        // 真跨行标签（第二行 y 明显不同）仍应被拒绝：否则整框擦除会跨过
+        // 两行之间的表格线。
+        let chars = vec![
+            ExtractedChar {
+                ch: '{', min_x: 100.0, min_y: 50.0, max_x: 106.0, max_y: 70.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 52.0, tight_max_y: 68.0,
+            },
+            ExtractedChar {
+                ch: '{', min_x: 106.0, min_y: 50.0, max_x: 112.0, max_y: 70.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 52.0, tight_max_y: 68.0,
+            },
+            ExtractedChar {
+                ch: '\r', min_x: 112.0, min_y: 85.0, max_x: 112.0, max_y: 85.0,
+                font_size_pt: 0.0, glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
+            },
+            ExtractedChar {
+                ch: '\n', min_x: 112.0, min_y: 85.0, max_x: 112.0, max_y: 85.0,
+                font_size_pt: 0.0, glyph_h_pt: 0.0, tight_min_y: 0.0, tight_max_y: 0.0,
+            },
+            ExtractedChar {
+                ch: '姓', min_x: 112.0, min_y: 100.0, max_x: 122.0, max_y: 120.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 102.0, tight_max_y: 118.0,
+            },
+            ExtractedChar {
+                ch: '名', min_x: 122.0, min_y: 100.0, max_x: 132.0, max_y: 120.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 102.0, tight_max_y: 118.0,
+            },
+            ExtractedChar {
+                ch: '}', min_x: 132.0, min_y: 100.0, max_x: 138.0, max_y: 120.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 102.0, tight_max_y: 118.0,
+            },
+            ExtractedChar {
+                ch: '}', min_x: 138.0, min_y: 100.0, max_x: 144.0, max_y: 120.0,
+                font_size_pt: 10.5, glyph_h_pt: 10.0, tight_min_y: 102.0, tight_max_y: 118.0,
+            },
+        ];
+        let mut img = image::RgbImage::from_pixel(400, 300, image::Rgb([255, 255, 255]));
+        for y in 50..70 {
+            for x in 100..144 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        for y in 100..120 {
+            for x in 112..144 {
+                img.put_pixel(x, y, image::Rgb([0, 0, 0]));
+            }
+        }
+        let regions = extract_pdf_page_tags(&chars, 0, 200, 400, 300, &mut img, &[]);
+        assert!(regions.is_empty(), "跨行标签不应被接受");
+        assert_eq!(img.get_pixel(110, 60), &image::Rgb([0, 0, 0]), "跨行标签不应擦除");
+        assert_eq!(img.get_pixel(120, 110), &image::Rgb([0, 0, 0]));
+    }
+
+    // 真实 PDF fixture 链路（不依赖 Word/LibreOffice，CI 三平台可跑）
+    mod fixture_tests;
 }

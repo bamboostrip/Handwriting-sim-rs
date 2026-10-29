@@ -511,7 +511,7 @@ mod tests {
             max_x: x + 10.0,
             max_y: y + 10.0,
             font_size_pt: 10.5,
-            glyph_h_pt: 10.0,
+            glyph_h_pt: 10.0, tight_min_y: 0.0, tight_max_y: 0.0,
         }
     }
 

@@ -120,6 +120,36 @@ fn docx_table_import_end_to_end() {
         (r as u32 + g as u32 + b as u32) / 3
     };
 
+    // ---- 验证点 3b：单字格（丙）防双影 ----
+    // 单字格不参与字符流匹配，只能靠推断；其区域必须锚到真实字形（第三列
+    // 左侧，而不是列带中心），且底图印刷字必须被擦净。修复前区域在 x≈1200、
+    // 印刷「丙」在 x≈1019 原样保留，这里会同时暴露两个问题。
+    // 注意：下面的 x<1100 只针对本测试的固定文档（真实文档的期望值应从该页
+    // PDF 字符位置推算，运行时没有这个约束）。
+    let bing = table_regions
+        .iter()
+        .copied()
+        .find(|r| r.text == "丙")
+        .expect("应存在「丙」单元格区域");
+    assert!(
+        bing.x < 1100,
+        "单字格区域应锚到实际字形（x≈1019），而不是列中心 x≈1200：{bing:?}"
+    );
+    let (ix0, iy0) = ((bing.x + 3).max(0) as u32, (bing.y + 3).max(0) as u32);
+    let (ix1, iy1) = (
+        (bing.x + bing.w - 3).min(w) as u32,
+        (bing.y + bing.h - 3).min(h) as u32,
+    );
+    let mut bing_dark = 0u32;
+    for y in iy0..iy1 {
+        for x in ix0..ix1 {
+            if lum(*img.get_pixel(x, y)) < 160 {
+                bing_dark += 1;
+            }
+        }
+    }
+    assert_eq!(bing_dark, 0, "单字格「丙」的印刷字形应被擦除（区域 {bing:?}）");
+
     // 水平线：某行中连续暗像素的最长 run ≥ 框宽 50%（表格线是页面上唯一
     // 的通栏暗元素，正文文字有字间隙，不会产生长连续 run）
     let box_w = x1 - x0;
