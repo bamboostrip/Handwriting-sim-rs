@@ -107,8 +107,8 @@ fn docx_table_import_end_to_end() {
     for r in &table_regions {
         bx0 = bx0.min(r.x);
         by0 = by0.min(r.y);
-        bx1 = bx1.max(r.x + r.w as i32);
-        by1 = by1.max(r.y + r.h as i32);
+        bx1 = bx1.max(r.x + r.w);
+        by1 = by1.max(r.y + r.h);
     }
     let m = 40i32;
     let x0 = (bx0 - m).max(0) as u32;

@@ -870,7 +870,7 @@ fn parse_body_stream(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<Body
                                 if !cell.runs.is_empty() {
                                     cell.runs.push(TextRun::from_text("\n"));
                                 }
-                                cell.runs.extend(cur_runs.drain(..));
+                                cell.runs.append(&mut cur_runs);
                             }
                         }
                         in_cell_para = false;

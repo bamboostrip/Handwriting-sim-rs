@@ -1213,6 +1213,9 @@ pub(crate) struct TablePageResult {
 /// located_on_page == false 的表整表跳过（不定位出区域、不擦除、不推断矩形），
 /// 但流位置（next_start_element）由 locate 结果决定，与是否输出区域无关。
 /// 无表格或整表未命中时返回空结果（表格保留印刷底图）。
+// 参数是页处理管线的正交输入（流/视图/字符/页号/DPI/角色状态/图像），
+// 收益不抵为凑参数上限重组结构体的改动面，保持显式传参
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn process_tables_on_page(
     stream: &[BodyElement],
     views: &[TableView],
