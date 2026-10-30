@@ -175,7 +175,8 @@ body,
   display: flex;
   flex-direction: column;
   min-height: 0;
-  padding: 10px 10px 6px 4px;
+  /* 左右留白对称，卡片才能和底部按钮行一样居中；右侧多出的 8px 是滚动条沟槽 */
+  padding: 10px 10px 6px;
 }
 
 .params-scroll {
@@ -183,7 +184,36 @@ body,
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding-right: 6px;
+  /* 滚动条常驻占位：折叠/展开时内容变高变矮会让滚动条出现或消失，
+     不给它留固定沟槽的话，整列卡片宽度会在 435px / 450px 之间来回跳。 */
+  scrollbar-gutter: stable;
+}
+
+/* 细滚动条：沟槽固定 8px，进一步压缩「折叠后卡片变宽」的观感差 */
+.params-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.params-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.params-scroll::-webkit-scrollbar-thumb {
+  background: rgba(36, 49, 46, 0.22);
+  border-radius: 4px;
+}
+
+.params-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(36, 49, 46, 0.36);
+}
+
+html.dark .params-scroll::-webkit-scrollbar-thumb {
+  background: rgba(232, 240, 235, 0.22);
+}
+
+html.dark .params-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(232, 240, 235, 0.36);
 }
 
 .section-title {
@@ -272,20 +302,33 @@ body,
   font-size: 15px;
 }
 
-/* ---------------- 折叠分组面板 ---------------- */
-.panel-collapse .n-collapse-item {
+/* ---------------- 折叠分组面板 ----------------
+   naive-ui 的 Collapse 默认是「无边框分段列表」：组间距靠 itemMargin 的 16px 上边距、
+   非首组靠一条 border-top 分割线，组头 padding 只有上边距（16px 0 0），而且
+   :first-child 的 padding-top 被强制归零。这里要做的是「独立卡片」外观，必须把这些
+   默认度量全部覆盖，否则会出现：首组比其余组矮一截、组头文字贴底不居中、
+   卡片间距忽大忽小、非首组上边框颜色与其余三边不一致。 */
+.panel-collapse.n-collapse .n-collapse-item {
+  /* 只清掉 naive 的 itemMargin 上边距，保留嵌套折叠项（笔迹角色卡内）的 margin-left 缩进 */
+  margin-top: 0;
+  margin-bottom: 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--card-bg);
-  margin-bottom: 8px;
 }
 
-.panel-collapse .n-collapse-item__header {
+/* 组头：四个方向的内边距交给 min-height + flex 居中，首组与其余组必须完全一致
+   （同时用 :first-child 提高权重，压过 naive 的 `padding-top: 0`） */
+.panel-collapse.n-collapse .n-collapse-item .n-collapse-item__header,
+.panel-collapse.n-collapse .n-collapse-item:first-child > .n-collapse-item__header {
+  min-height: 38px;
+  padding: 0 12px;
   font-weight: 700;
   font-size: 13px;
 }
 
-.panel-collapse .n-collapse-item__content-inner {
+/* 内容区：naive 的 padding-top 16px 写在多层选择器里，这里用同层权重压过它 */
+.panel-collapse.n-collapse .n-collapse-item .n-collapse-item__content-wrapper .n-collapse-item__content-inner {
   padding: 4px 12px 10px;
 }
 

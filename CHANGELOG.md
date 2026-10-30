@@ -10,6 +10,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **修复右侧参数面板六组折叠卡片的样式错位**（`src/styles.css`）：
+  - 组头改为「左右内边距 + `min-height` + flex 居中」，收起时六组等高、标题垂直居中。此前 naive-ui 的默认 `padding: 16px 0 0` 让标题贴底，且 `:first-child` 的 `padding-top` 被强制归零，首组比其他组矮一截（22.8px vs 38.8px）。
+  - 覆盖 naive-ui Collapse 的「无边框分段列表」默认度量：组间距固定 8px（原 16px 上边距 + 8px 下边距叠加后忽大忽小）、非首组不再多出一条 divider 上边框（四边边框颜色统一）、展开内容区顶部留白回到 4px（原被 16px 覆盖）。
+  - 参数列左右留白对称；滚动条改为 8px 细条并常驻占位（`scrollbar-gutter: stable`），折叠 / 展开时整列卡片宽度不再在 435px / 450px 之间跳动。
+
 ## [0.5.1] - 2026-10-29
 
 ### Fixed
