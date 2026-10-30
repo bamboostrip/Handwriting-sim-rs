@@ -7,18 +7,24 @@ import ParamsPanel from "./components/ParamsPanel.vue";
 import AboutModal from "./components/AboutModal.vue";
 import HelpModal from "./components/HelpModal.vue";
 import UpdateModal from "./components/UpdateModal.vue";
+import FirstRunModal from "./components/FirstRunModal.vue";
 import {
   APP_VERSION,
   buildParams,
   cancelRegionEdit,
   cycleThemePreference,
   doRender,
+  ensureUsableBackground,
+  ensureUsableFont,
+  ensureStarterLayout,
   initSystemFonts,
   initThemeSystem,
   isDarkActive,
   loadBgDimensions,
+  maybeOpenOnboarding,
   openAboutModal,
   openHelpModal,
+  openOnboarding,
   refreshPresets,
   scheduleRender,
   setThemePreference,
@@ -99,12 +105,19 @@ watch(paramSnapshot, () => {
   scheduleRender();
 });
 
-onMounted(() => {
+onMounted(async () => {
   initThemeSystem();
-  void initSystemFonts();
-  void refreshPresets();
+  await initSystemFonts();
+  // 冷启动兜底：没选字体/纸张时自动挑系统楷体和内置纸张，避免首屏直接报错
+  await ensureUsableFont();
+  await refreshPresets();
+  await ensureUsableBackground();
+  await ensureStarterLayout();
   loadBgDimensions(store.backgroundPath);
-  void startupCheckUpdate();
+  maybeOpenOnboarding();
+  // 首次引导打开时不叠加更新弹窗，避免首屏两个模态框打架
+  if (!store.onboardingOpen) void startupCheckUpdate();
+  await doRender();
 });
 
 
@@ -120,9 +133,6 @@ function onKeydown(e: KeyboardEvent): void {
 }
 window.addEventListener("keydown", onKeydown);
 onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
-
-// 启动即尝试一次渲染（无字体/背景时后端返回可读错误，显示在状态栏）
-void doRender();
 </script>
 
 <template>
@@ -153,6 +163,10 @@ void doRender();
                 </NButton>
               </NPopselect>
               <span class="status-sep">·</span>
+              <span class="status-link" @click="openOnboarding()" title="重新查看新手引导">
+                ✨ 新手引导
+              </span>
+              <span class="status-sep">·</span>
               <span class="status-link" @click="openHelpModal()" title="查看软件使用教程与技巧">
                 📖 使用教程
               </span>
@@ -167,6 +181,7 @@ void doRender();
         <HelpModal />
         <AboutModal />
         <UpdateModal />
+        <FirstRunModal />
       </NMessageProvider>
     </NDialogProvider>
   </NConfigProvider>

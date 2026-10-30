@@ -4,7 +4,7 @@
 //!
 //! 渲染代次守卫：renderSeq 只采纳最新一次请求结果，过期响应直接丢弃。
 
-import { reactive, watch } from "vue";
+import { nextTick, reactive, watch } from "vue";
 import { createDiscreteApi } from "naive-ui";
 import { useDebounceFn } from "@vueuse/core";
 import { api, assetUrl, dialogs } from "./api";
@@ -19,7 +19,27 @@ export const RUST_REPO_URL = "https://github.com/bamboostrip/Handwriting-sim-rs"
 const KEY_AUTO_CHECK = "handwritesim_auto_check";
 const KEY_SKIPPED_VERSION = "handwritesim_skipped_version";
 const KEY_THEME_PREFERENCE = "handwritesim_theme_preference";
-const KEY_PANEL_COLLAPSE = "handwritesim_panel_collapse";
+const KEY_PANEL_COLLAPSE = "handwritesim_panel_collapse_v2";
+const KEY_ONBOARDING_DONE = "handwritesim_onboarding_done";
+const KEY_CHECKLIST_DISMISSED = "handwritesim_checklist_dismissed";
+const KEY_HAS_EXPORTED = "handwritesim_has_exported";
+
+function readStoredBool(key: string, fallback = false): boolean {
+  try {
+    const v = localStorage.getItem(key);
+    return v === null ? fallback : v === "true";
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStoredBool(key: string, value: boolean): void {
+  try {
+    localStorage.setItem(key, String(value));
+  } catch {
+    // localStorage 不可用时静默降级
+  }
+}
 
 export type ThemePreference = "auto" | "light" | "dark";
 
@@ -50,14 +70,12 @@ export function getSkippedVersion(): string {
   }
 }
 
-/** 右栏 6 个折叠组的展开记录（true = 折叠）；无记录返回 null（首次使用） */
+/** 右栏阶段分组的展开记录（true = 折叠）；无记录返回 null（首次使用） */
 export type PanelCollapseState = {
-  text: boolean;
+  content: boolean;
+  style: boolean;
+  layout: boolean;
   regions: boolean;
-  roles: boolean;
-  import: boolean;
-  sim: boolean;
-  preset: boolean;
 };
 
 export function loadPanelCollapseState(): PanelCollapseState | null {
@@ -66,12 +84,10 @@ export function loadPanelCollapseState(): PanelCollapseState | null {
     if (!raw) return null;
     const v = JSON.parse(raw) as Partial<PanelCollapseState>;
     return {
-      text: v.text ?? false,
-      regions: v.regions ?? false,
-      roles: v.roles ?? true,
-      import: v.import ?? false,
-      sim: v.sim ?? true,
-      preset: v.preset ?? true,
+      content: v.content ?? false,
+      style: v.style ?? true,
+      layout: v.layout ?? true,
+      regions: v.regions ?? true,
     };
   } catch {
     return null;
@@ -437,9 +453,31 @@ export const store = reactive({
 
   presets: [] as { name: string; path: string }[],
 
+  // ---- 当前方案（预设 / 字体 / 纸张）----
+  currentPresetPath: "",
+  currentPresetName: "",
+  presetDirty: false,
+  /** 预设资产缺失等非阻断提示，显示在「当前方案」卡片里 */
+  presetNotice: "",
+  /** 自动兜底选中的系统字体路径（用于提示「已自动使用系统字体」） */
+  autoFontPath: "",
+
+  // ---- 新手引导 / 首屏状态 ----
+  onboardingOpen: false,
+  onboardingDone: readStoredBool(KEY_ONBOARDING_DONE),
+  checklistDismissed: readStoredBool(KEY_CHECKLIST_DISMISSED),
+  hasExported: readStoredBool(KEY_HAS_EXPORTED),
+  textEditorOpen: false,
+
+  // ---- 可恢复的错误（替代只在状态栏里报错）----
+  errorBanner: "",
+  errorKind: "" as "" | "font" | "background" | "other",
+  errorSource: "" as "" | "render" | "export" | "preset",
+
   // ---- 关于与版本更新 ----
   aboutModalOpen: false,
   helpModalOpen: false,
+  helpTab: "quickstart",
   updateModalOpen: false,
   updateInfo: null as UpdateInfo | null,
   checkingUpdate: false,
@@ -545,6 +583,345 @@ export function initThemeSystem(): void {
 initThemeSystem();
 
 
+// ---------------------------------------------------------------- 首次使用与当前方案
+
+/** 取路径中的文件名（兼容 Windows 反斜杠）。 */
+export function fileName(path: string): string {
+  const s = path.replace(/\\/g, "/");
+  const i = s.lastIndexOf("/");
+  return i >= 0 ? s.slice(i + 1) : s;
+}
+
+/** 以目录原始分隔符拼接路径（Windows 用 \，Unix 用 /）。 */
+function joinFsPath(dir: string, ...parts: string[]): string {
+  const sep = dir.includes("\\") ? "\\" : "/";
+  return [dir.replace(/[\\/]+$/, ""), ...parts].join(sep);
+}
+
+/** 当前字体的人类可读名称（系统字体用名称，本地字体用文件名）。 */
+export function currentFontLabel(): string {
+  const p = store.fontPath.trim();
+  if (!p) return "未选择字体";
+  const found = store.systemFonts.find((f) => f.path === p);
+  return found ? found.name : fileName(p);
+}
+
+export function currentBackgroundLabel(): string {
+  if ((store.docPages?.length ?? 0) > 0) return `文档底图 ${store.docPages!.length} 页`;
+  const p = store.backgroundPath.trim();
+  return p ? fileName(p) : "未选择纸张";
+}
+
+export function hasTextContent(): boolean {
+  return store.paragraphs.some(
+    (p) =>
+      cleanText(p.text).trim() !== "" ||
+      (p.runs?.some((run) => cleanText(run.text).trim() !== "") ?? false),
+  );
+}
+
+export function hasContent(): boolean {
+  return (
+    hasTextContent() ||
+    (store.docPages?.length ?? 0) > 0 ||
+    store.regions.some((r) => r.text.trim() !== "")
+  );
+}
+
+export type WorkflowMode = "empty" | "text" | "document";
+
+/** 当前处于哪种工作流：空 / 纯文字 / 文档填空。 */
+export function workflowMode(): WorkflowMode {
+  if ((store.docPages?.length ?? 0) > 0) return "document";
+  return hasTextContent() || store.regions.length > 0 ? "text" : "empty";
+}
+
+/** 首启期间 App 跳过了更新检查；引导结束后补一次，避免新用户整场都不检查更新。 */
+function scheduleStartupUpdateCheck(): void {
+  if (!store.autoCheckUpdate) return;
+  window.setTimeout(() => {
+    if (!store.onboardingOpen && !store.checkingUpdate) void startupCheckUpdate();
+  }, 3000);
+}
+
+export function finishOnboarding(): void {
+  store.onboardingDone = true;
+  writeStoredBool(KEY_ONBOARDING_DONE, true);
+  store.onboardingOpen = false;
+  scheduleStartupUpdateCheck();
+}
+
+export function openOnboarding(): void {
+  store.onboardingOpen = true;
+}
+
+/** 首次启动且没看过引导时自动弹出（用户已导入过内容则不打扰）。 */
+export function maybeOpenOnboarding(): void {
+  if (!store.onboardingDone && !hasContent()) store.onboardingOpen = true;
+}
+
+/** 关闭引导（跳过 / 点了关闭都算已看过，不再自动弹出）。 */
+export function dismissOnboarding(): void {
+  store.onboardingOpen = false;
+  store.onboardingDone = true;
+  writeStoredBool(KEY_ONBOARDING_DONE, true);
+  scheduleStartupUpdateCheck();
+}
+
+export function dismissChecklist(): void {
+  store.checklistDismissed = true;
+  writeStoredBool(KEY_CHECKLIST_DISMISSED, true);
+}
+
+export function markExported(): void {
+  store.hasExported = true;
+  writeStoredBool(KEY_HAS_EXPORTED, true);
+}
+
+/**
+ * 字体兜底：用户没选字体时，自动挑一款系统字体（楷体优先）。
+ * 这样首次启动不会因为「未指定字体文件」直接失败。
+ */
+export async function ensureUsableFont(): Promise<string> {
+  const existing = store.fontPath.trim();
+  if (existing) {
+    // 路径可能来自旧预设 / 已被用户删除：失效时清掉再兜底
+    try {
+      if (await api.pathExists(existing)) return existing;
+    } catch {
+      // path_exists 不可用时按可用处理，交给渲染错误横幅兜底
+      return existing;
+    }
+    store.fontPath = "";
+    if (store.autoFontPath === existing) store.autoFontPath = "";
+  }
+  if (store.systemFonts.length === 0) await initSystemFonts();
+
+  const candidates = ["楷体", "华文楷体", "华文行楷", "楷体_GB2312", "仿宋", "苹方", "微软雅黑", "宋体"];
+  for (const name of candidates) {
+    const f = matchSystemFont(name);
+    if (f) {
+      store.fontPath = f.path;
+      store.autoFontPath = f.path;
+      return f.path;
+    }
+  }
+
+  const first =
+    store.systemFonts.find((f) =>
+      /kai|song|hei|yahei|noto.*cjk|sourcehan|cjk|pingfang|苹方|hiragino|stheiti|songti/i.test(
+        `${f.name} ${f.family} ${f.path}`,
+      ),
+    ) ?? store.systemFonts[0];
+  if (first) {
+    store.fontPath = first.path;
+    store.autoFontPath = first.path;
+    return first.path;
+  }
+  return "";
+}
+
+/**
+ * 纸张兜底：没选背景时，从内置预设里借一张确实存在的纸张，
+ * 避免「字体好了、背景又是空」的二次失败。
+ */
+export async function ensureUsableBackground(ignoreCurrent = false): Promise<string> {
+  const existing = store.backgroundPath.trim();
+  if (!ignoreCurrent && existing) {
+    try {
+      if (await api.pathExists(existing)) return existing;
+    } catch {
+      return existing;
+    }
+    store.backgroundPath = "";
+  }
+  if (store.presets.length === 0) await refreshPresets();
+
+  // 首屏优先纯白 / A4 白纸：版式参数（140px/97 行距）按 A4 纸张给，白纸最稳。
+  // 其次才是任意 A4、任意白纸；都没有时退回任意内置纸张。
+  const score = (name: string) => {
+    const n = name.toLowerCase();
+    if (n.includes("a4") && n.includes("白纸")) return 3;
+    if (n.includes("白纸")) return 2;
+    if (n.includes("a4")) return 1;
+    return 0;
+  };
+  const ordered = [...store.presets].sort((a, b) => score(b.name) - score(a.name));
+  const preferred = ordered.filter((p) => score(p.name) > 0);
+  const candidates = preferred.length > 0 ? preferred : ordered;
+
+  for (const p of candidates) {
+    try {
+      const params = await api.loadPreset(p.path);
+      const bg = (params.backgroundPath || "").trim();
+      if (bg && (await api.pathExists(bg))) {
+        store.backgroundPath = bg;
+        return bg;
+      }
+    } catch {
+      // 单个预设损坏不影响兜底
+    }
+  }
+
+  // presets/ 缺失或全部不可读时，直接探测 exe 旁的 backgrounds/：
+  // 发布包/开发仓库都带有这张 A4 纯白，不能因为预设坏了就没有纸。
+  try {
+    const presetDir = await api.defaultPresetDir();
+    const root = presetDir.replace(/[\\/]presets[\\/]?$/i, "");
+    for (const name of ["A4纯白.webp", "实线信纸.webp"]) {
+      const candidate = joinFsPath(root, "backgrounds", name);
+      if (await api.pathExists(candidate)) {
+        store.backgroundPath = candidate;
+        return candidate;
+      }
+    }
+  } catch {
+    // 命令层不可用时保持原有兜底结果
+  }
+  return ignoreCurrent ? "" : store.backgroundPath;
+}
+
+/**
+ * 首屏默认版式：内置纸张是 4200×5930 级的 A4 图，
+ * 直接沿用 36px 字号会小到看不清。这里按 A4 纸张给一套和内置预设同量级的
+ * 起步参数（只在用户还没动过参数、也没载入预设时生效）。
+ */
+export async function ensureStarterLayout(): Promise<void> {
+  if (store.currentPresetPath) return;
+  if (hasContent()) return;
+  const atDefaults =
+    store.fontSize === 36 &&
+    store.wordSpacing === 5 &&
+    store.lineSpacing === 48 &&
+    store.marginTop === 30 &&
+    store.marginBottom === 30 &&
+    store.marginLeft === 30 &&
+    store.marginRight === 30;
+  if (!atDefaults) return;
+  if (!store.backgroundPath.trim()) await ensureUsableBackground();
+
+  store.fontSize = 140;
+  store.wordSpacing = 0;
+  store.lineSpacing = 97;
+  store.wordSpacingSigma = 2;
+  store.lineSpacingSigma = 4;
+  store.fontSizeSigma = 4;
+  store.perturbX = 5;
+  store.perturbY = 6;
+  store.perturbThetaText = "0.07";
+  store.marginTop = 300;
+  store.marginBottom = 600;
+  store.marginLeft = 350;
+  store.marginRight = 350;
+  store.fontColor = "#130e0b";
+}
+
+/** 打开正文编辑弹窗（先保证有可用字体，避免编辑完渲染失败）。 */
+export async function openTextEditor(): Promise<void> {
+  await ensureUsableFont();
+  store.textEditorOpen = true;
+}
+
+export function closeTextEditor(): void {
+  store.textEditorOpen = false;
+}
+
+export const SAMPLE_PARAGRAPHS = [
+  "见字如面。",
+  "最近天气转凉，夜里写作业时总觉得手有些僵。我把这段时间的笔记重新誊了一遍，字还是有点潦草，你别见笑。",
+  "等忙完这一阵，找个周末回去看看。到时候一起去巷口那家小馆子，吃顿热乎的。",
+];
+
+/** 一键示例：铺好字体、纸张、版式和正文，直接出第一张成品。 */
+export async function loadSample(): Promise<void> {
+  await ensureUsableFont();
+  await ensureUsableBackground();
+
+  store.currentPresetPath = "";
+  store.currentPresetName = "";
+  store.presetDirty = false;
+  store.presetNotice = "";
+
+  store.fontSize = 140;
+  store.wordSpacing = 0;
+  store.lineSpacing = 97;
+  store.wordSpacingSigma = 2;
+  store.lineSpacingSigma = 4;
+  store.fontSizeSigma = 4;
+  store.perturbX = 5;
+  store.perturbY = 6;
+  store.perturbThetaText = "0.07";
+  store.marginTop = 300;
+  store.marginBottom = 600;
+  store.marginLeft = 350;
+  store.marginRight = 350;
+  store.fontColor = "#130e0b";
+  store.miswriteRate = 0;
+  store.boundsVisible = false;
+  store.roles = defaultRoles();
+  store.regions.splice(0);
+  store.regionMode = false;
+  store.editingIndex = -1;
+  store.highlightIndex = -1;
+  store.selectedRegionIndex = -1;
+  store.docPages = null;
+  store.docStatus = "";
+  setParagraphs(SAMPLE_PARAGRAPHS.map((text, i) => newPara(text, 0, i === 0 ? 0 : 2)));
+
+  store.currentPresetPath = "";
+  store.currentPresetName = "";
+  store.presetDirty = false;
+  store.status = "已载入示例，可直接导出，也可以换成你自己的文字";
+
+  finishOnboarding();
+  await doRender();
+  store.status = "已载入示例：可直接导出，或换成你自己的文字";
+}
+
+/** 首次引导的三个入口：写文字 / 填文档 / 看示例。 */
+export async function handleOnboardingTask(task: "text" | "document" | "sample"): Promise<void> {
+  // 只有「示例」需要在这里预确认；「填文档」由 importDocument 自己确认一次，避免连弹两次
+  if (task === "sample" && hasContent()) {
+    const ok = await confirmReplaceContent();
+    if (!ok) return;
+  }
+
+  if (task === "text") {
+    // 文档模式不显示主文字：先退出文档/区域模式，再打开正文编辑器
+    if (!(await confirmDiscardDocPages("text"))) return;
+    if ((store.docPages?.length ?? 0) > 0 || store.regions.length > 0) {
+      store.docPages = null;
+      store.docStatus = "";
+      store.regions.splice(0);
+      store.regionMode = false;
+      store.editingIndex = -1;
+      store.highlightIndex = -1;
+      store.selectedRegionIndex = -1;
+      store.backgroundPath = "";
+      await ensureUsableBackground();
+    }
+    await ensureUsableFont();
+    await ensureUsableBackground();
+    await ensureStarterLayout();
+    finishOnboarding();
+    await openTextEditor();
+    scheduleRender();
+    return;
+  }
+
+  await ensureUsableFont();
+  await ensureUsableBackground();
+  await ensureStarterLayout();
+  finishOnboarding();
+
+  if (task === "document") {
+    await importDocument();
+    return;
+  }
+  await loadSample();
+}
+
+
 
 
 // ---------------------------------------------------------------- 参数构建
@@ -619,6 +996,17 @@ export function buildParams(): UiParams {
 
 let renderSeq = 0;
 
+function classifyRenderError(message: string): "font" | "background" | "other" {
+  // 角色 / 文字区域的字体、文档后续页背景都不是「换主字体 / 换纸张」能修的
+  if ((message.includes("角色") || message.includes("文字区域")) && message.includes("字体")) {
+    return "other";
+  }
+  if (message.includes("页背景")) return "other";
+  if (message.includes("字体")) return "font";
+  if (message.includes("背景")) return "background";
+  return "other";
+}
+
 /** 立即重渲染（后台执行，UI 不阻塞；过期结果丢弃）。 */
 export async function doRender(): Promise<void> {
   const seq = ++renderSeq;
@@ -635,9 +1023,19 @@ export async function doRender(): Promise<void> {
     }));
     if (store.pageIndex >= pages.length) store.pageIndex = 0;
     store.status = `预览完成，共 ${pages.length} 页`;
+    // 只清理「渲染产生」的错误：导出/预设错误不应被一次成功渲染顺手擦掉
+    if (store.errorSource === "render") {
+      store.errorBanner = "";
+      store.errorKind = "";
+      store.errorSource = "";
+    }
   } catch (e) {
     if (seq !== renderSeq) return;
-    store.status = `渲染失败：${e}`;
+    const message = String(e);
+    store.status = `渲染失败：${message}`;
+    store.errorBanner = message;
+    store.errorKind = classifyRenderError(message);
+    store.errorSource = "render";
   } finally {
     if (seq === renderSeq) store.rendering = false;
   }
@@ -701,13 +1099,23 @@ watch(
 
 // ---------------------------------------------------------------- 系统字体管理与匹配
 
+let systemFontsPromise: Promise<void> | null = null;
+
 export async function initSystemFonts(): Promise<void> {
-  try {
-    store.systemFonts = await api.listSystemFonts();
-  } catch (e) {
-    console.warn("获取系统字体列表失败:", e);
-    store.systemFonts = [];
+  if (store.systemFonts.length > 0) return;
+  if (!systemFontsPromise) {
+    systemFontsPromise = (async () => {
+      try {
+        store.systemFonts = await api.listSystemFonts();
+      } catch (e) {
+        console.warn("获取系统字体列表失败:", e);
+        store.systemFonts = [];
+        // 允许下次重试（例如启动早期命令层尚未就绪）
+        systemFontsPromise = null;
+      }
+    })();
   }
+  await systemFontsPromise;
 }
 
 const FONT_ALIAS_GROUPS: string[][] = [
@@ -903,6 +1311,17 @@ export function askDocumentImportMode(): Promise<"detect" | "pure" | "cancel"> {
 export async function importDocx(): Promise<void> {
   const p = await dialogs.pickDocx();
   if (!p) return;
+  await ensureUsableFont();
+
+  // Word 正文会覆盖当前内容：文档/区域/已输入文字任一存在时都先确认
+  const hadDoc = (store.docPages?.length ?? 0) > 0;
+  const hadRegions = store.regions.length > 0;
+  const hadText = hasTextContent();
+  if (hadDoc || hadRegions || hadText) {
+    const ok = await confirmReplaceContent();
+    if (!ok) return;
+  }
+
   try {
     if (store.systemFonts.length === 0) {
       await initSystemFonts();
@@ -1046,6 +1465,20 @@ export async function importDocx(): Promise<void> {
     nextRoles.sort((a, b) => a.id - b.id);
     store.roles = nextRoles;
 
+    // 导入成功后再退出文档模式，失败时原文档底图/区域仍保留
+    if (hadDoc) {
+      store.docPages = null;
+      store.docStatus = "";
+      store.backgroundPath = "";
+      await ensureUsableBackground();
+    }
+    if (hadRegions) {
+      store.regions.splice(0);
+      store.editingIndex = -1;
+      store.highlightIndex = -1;
+      store.selectedRegionIndex = -1;
+    }
+
     focusPara(store.paragraphs[0].id, 0);
     store.status = `已导入 ${rows.length} 个段落${useHighlights ? "（混合填空模式）" : "（全文手写模式）"}`;
     scheduleRender();
@@ -1057,6 +1490,15 @@ export async function importDocx(): Promise<void> {
 export async function importDocument(): Promise<void> {
   const p = await dialogs.pickDocument();
   if (!p) return;
+  await ensureUsableFont();
+
+  // 文档模式不显示主文字：已有正文/底图/区域时先确认，导入成功后收起旧内容
+  const hadText = hasTextContent();
+  const hadDocState = (store.docPages?.length ?? 0) > 0 || store.regions.length > 0;
+  if (hadText || hadDocState) {
+    const ok = await confirmReplaceContent();
+    if (!ok) return;
+  }
 
   const mode = await askDocumentImportMode();
   if (mode === "cancel") return;
@@ -1066,6 +1508,11 @@ export async function importDocument(): Promise<void> {
   try {
     const res = await api.importDocument(p, extractRegions);
     if (!res.pages.length) throw new Error("未得到任何页面");
+    // 新文档底图会替换旧底图：旧区域坐标全部失效，先清空再写入本次识别结果
+    store.regions.splice(0);
+    store.editingIndex = -1;
+    store.highlightIndex = -1;
+    store.selectedRegionIndex = -1;
     store.docPages = res.pages; // 先写 docPages 再切背景，避免 syncDocState 误清
     store.backgroundPath = res.pages[0];
     loadBgDimensions(res.pages[0]);
@@ -1111,6 +1558,8 @@ export async function importDocument(): Promise<void> {
         ? `已导入文档底图（共 ${res.pages.length} 页，未检测到高亮填空标记）`
         : `已导入文档底图（共 ${res.pages.length} 页，已保留原文档全部背景与色彩）`;
     }
+    // 成功切换后再收起正文：失败时用户的原文字还在
+    if (hadText) setParagraphs([newPara()]);
     triggerPreview();
   } catch (e) {
     store.docStatus = "";
@@ -1126,7 +1575,13 @@ export async function importDocument(): Promise<void> {
 
 // ---------------------------------------------------------------- 预设
 
-export function applyPreset(p: UiParams, msg?: string): void {
+export function applyPreset(
+  p: UiParams,
+  msg?: string,
+  meta?: { path?: string; name?: string },
+): void {
+  suppressPresetDirty = true;
+  store.presetNotice = "";
   store.fontPath = p.fontPath;
   store.backgroundPath = p.backgroundPath;
   loadBgDimensions(p.backgroundPath);
@@ -1177,7 +1632,143 @@ export function applyPreset(p: UiParams, msg?: string): void {
   }
   store.docPages = null;
   store.docStatus = "";
+  // 预设会同时换纸张：旧底图上的区域坐标随之失效，一并清掉（载入前已确认）
+  store.regions.splice(0);
+  store.regionMode = false;
+  store.editingIndex = -1;
+  store.highlightIndex = -1;
+  store.selectedRegionIndex = -1;
+  store.currentPresetPath = meta?.path ?? "";
+  store.currentPresetName = meta?.name ?? "";
+  store.presetDirty = false;
   if (msg) store.status = msg;
+  // applyPreset 自身会触发参数快照 watch；在 nextTick 里复位，避免刚载入就显示「已修改」
+  void nextTick(() => {
+    suppressPresetDirty = false;
+    store.presetDirty = false;
+  });
+}
+
+let suppressPresetDirty = false;
+
+/** 预设只关心这些字段；用户改任意一项就标记「已修改」。 */
+const presetParamSnapshot = (): string =>
+  JSON.stringify({
+    fontPath: store.fontPath,
+    backgroundPath: store.backgroundPath,
+    fontSize: store.fontSize,
+    wordSpacing: store.wordSpacing,
+    lineSpacing: store.lineSpacing,
+    wordSpacingSigma: store.wordSpacingSigma,
+    lineSpacingSigma: store.lineSpacingSigma,
+    fontSizeSigma: store.fontSizeSigma,
+    perturbX: store.perturbX,
+    perturbY: store.perturbY,
+    perturbThetaText: store.perturbThetaText,
+    miswriteRate: store.miswriteRate,
+    miswriteModeIndex: store.miswriteModeIndex,
+    strikeoutStyleIndex: store.strikeoutStyleIndex,
+    fontColor: store.fontColor,
+    marginTop: store.marginTop,
+    marginBottom: store.marginBottom,
+    marginLeft: store.marginLeft,
+    marginRight: store.marginRight,
+    boundsVisible: store.boundsVisible,
+    boundsColor: store.boundsColor,
+    endChars: store.endChars,
+    startChars: store.startChars,
+    roles: store.roles,
+  });
+
+watch(presetParamSnapshot, () => {
+  if (suppressPresetDirty) return;
+  if (store.currentPresetPath || store.currentPresetName) store.presetDirty = true;
+});
+
+// 用户手动换字体 / 纸张后，上一条「预设资产缺失」提示就过期了
+watch(
+  () => `${store.fontPath}\u0000${store.backgroundPath}`,
+  () => {
+    if (!suppressPresetDirty) store.presetNotice = "";
+  },
+);
+
+/** 已有内容时，从引导里重选「示例 / 填文档」需要确认，避免覆盖当前工作。 */
+function confirmReplaceContent(): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    appDialog.warning({
+      title: "当前已有内容",
+      content: "继续会替换或叠加当前内容。建议先导出，或先保存成预设。",
+      positiveText: "继续",
+      negativeText: "取消",
+      onPositiveClick: () => finish(true),
+      onNegativeClick: () => finish(false),
+      onClose: () => finish(false),
+      onMaskClick: () => finish(false),
+    });
+  });
+}
+
+function confirmDiscardDocPages(reason: "preset" | "text" = "preset"): Promise<boolean> {
+  if (!store.docPages?.length && store.regions.length === 0) return Promise.resolve(true);
+  const toText = reason === "text";
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    appDialog.warning({
+      title: toText ? "切换到文字模式？" : "切换预设会重置文档底图与文字区域",
+      content: toText
+        ? "当前已导入文档底图或创建了文字区域。继续会清空这些内容，回到纯文字排版；建议先导出。"
+        : "当前已导入文档底图或手动创建了文字区域。切换预设会清空这些内容，建议先导出或保存当前设置。",
+      positiveText: toText ? "切换并编辑" : "继续切换",
+      negativeText: "取消",
+      onPositiveClick: () => finish(true),
+      onNegativeClick: () => finish(false),
+      onClose: () => finish(false),
+      onMaskClick: () => finish(false),
+    });
+  });
+}
+
+/** 预设里的字体 / 纸张可能在本机不存在：能兜底就兜底，并给出可读提示。 */
+async function sanitizePresetAssets(p: UiParams): Promise<{ params: UiParams; warning: string }> {
+  const warnings: string[] = [];
+
+  let fontPath = (p.fontPath || "").trim();
+  if (!fontPath) {
+    fontPath = await ensureUsableFont();
+  } else if (!(await api.pathExists(fontPath))) {
+    const missing = fileName(fontPath);
+    await ensureUsableFont();
+    if (store.fontPath.trim()) {
+      warnings.push(`字体「${missing}」本机未安装，已沿用当前字体`);
+      fontPath = store.fontPath;
+    } else {
+      warnings.push(`字体「${missing}」本机未安装，请先选择一款字体`);
+      fontPath = "";
+    }
+  }
+
+  let backgroundPath = (p.backgroundPath || "").trim();
+  const inDocumentMode = (store.docPages?.length ?? 0) > 0;
+  if (backgroundPath && !(await api.pathExists(backgroundPath))) {
+    warnings.push("纸张图片缺失，已回退到可用纸张");
+    // 文档模式下 store.backgroundPath 是底图 PNG，不能拿它当新预设的纸张
+    backgroundPath = inDocumentMode ? "" : store.backgroundPath;
+  }
+  if (!backgroundPath) backgroundPath = await ensureUsableBackground(inDocumentMode);
+
+  return { params: { ...p, fontPath, backgroundPath }, warning: warnings.join("；") };
 }
 
 function normalizeHex(s: string): string {
@@ -1195,11 +1786,29 @@ export async function refreshPresets(): Promise<void> {
 
 export async function selectPreset(path: string): Promise<void> {
   try {
+    if (!(await confirmDiscardDocPages())) return;
     const p = await api.loadPreset(path);
-    applyPreset(p, `已载入预设：${path}`);
+    const safe = await sanitizePresetAssets(p);
+    const name =
+      store.presets.find((x) => x.path === path)?.name ||
+      fileName(path).replace(/\.json$/i, "");
+    applyPreset(
+      safe.params,
+      safe.warning ? `已载入预设：${name}（${safe.warning}）` : `已载入预设：${name}`,
+      { path, name },
+    );
+    store.presetNotice = safe.warning;
+    if (store.errorSource === "preset") {
+      store.errorBanner = "";
+      store.errorKind = "";
+      store.errorSource = "";
+    }
     scheduleRender();
   } catch (e) {
     store.status = `载入失败：${e}`;
+    store.errorBanner = `预设载入失败：${e}`;
+    store.errorKind = "other";
+    store.errorSource = "preset";
   }
 }
 
@@ -1207,7 +1816,6 @@ export async function loadPresetFromDialog(): Promise<void> {
   const p = await dialogs.pickPreset();
   if (!p) return;
   await selectPreset(p);
-  store.status = "预设已载入（含边距/扰动参数）";
 }
 
 export async function savePresetToDialog(): Promise<void> {
@@ -1220,6 +1828,10 @@ export async function savePresetToDialog(): Promise<void> {
     if (target.replace(/\\/g, "/").startsWith(defaultDir.replace(/\\/g, "/"))) {
       await refreshPresets();
     }
+    store.currentPresetPath = target;
+    store.currentPresetName = fileName(target).replace(/\.json$/i, "");
+    store.presetDirty = false;
+    store.presetNotice = "";
   } catch (e) {
     store.status = `保存失败：${e}`;
   }
@@ -1234,8 +1846,17 @@ export async function exportFiles(): Promise<void> {
   try {
     const files = await api.exportFiles(buildParams(), dir);
     store.status = `已导出 ${files.length} 个文件到 ${dir}`;
+    markExported();
+    if (store.errorSource === "export") {
+      store.errorBanner = "";
+      store.errorKind = "";
+      store.errorSource = "";
+    }
   } catch (e) {
     store.status = `导出失败：${e}`;
+    store.errorBanner = `导出失败：${e}`;
+    store.errorKind = "other";
+    store.errorSource = "export";
   }
 }
 
@@ -1246,8 +1867,17 @@ export async function exportPdf(): Promise<void> {
   try {
     await api.exportPdf(buildParams(), path);
     store.status = `PDF 已导出：${path}`;
+    markExported();
+    if (store.errorSource === "export") {
+      store.errorBanner = "";
+      store.errorKind = "";
+      store.errorSource = "";
+    }
   } catch (e) {
     store.status = `导出 PDF 失败：${e}`;
+    store.errorBanner = `导出 PDF 失败：${e}`;
+    store.errorKind = "other";
+    store.errorSource = "export";
   }
 }
 
@@ -1750,7 +2380,8 @@ export function closeAboutModal(): void {
   store.aboutModalOpen = false;
 }
 
-export function openHelpModal(): void {
+export function openHelpModal(tab = "quickstart"): void {
+  store.helpTab = tab;
   store.helpModalOpen = true;
 }
 
@@ -1824,9 +2455,11 @@ export async function manualCheckUpdate(): Promise<void> {
   }
 }
 
-/** 软件启动时静默检查更新 */
+/** 软件启动时静默检查更新（本次会话只跑一次，避免首启补检与正常启动重复） */
+let startupUpdateChecked = false;
 export async function startupCheckUpdate(): Promise<void> {
-  if (!store.autoCheckUpdate) return;
+  if (!store.autoCheckUpdate || startupUpdateChecked) return;
+  startupUpdateChecked = true;
 
   try {
     const info = await api.checkForUpdates(APP_VERSION);

@@ -14,9 +14,13 @@
 
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { NButton, NTooltip } from "naive-ui";
+import QuickStart from "./QuickStart.vue";
+import ErrorBanner from "./ErrorBanner.vue";
 import {
   clampRect,
   cancelRegionEdit,
+  doRender,
+  hasContent,
   jumpToRegion,
   nextPage,
   openEditRegionDialog,
@@ -407,6 +411,7 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
 
 <template>
   <div class="preview-col">
+    <ErrorBanner />
     <div
       ref="boxEl"
       class="preview-box"
@@ -448,7 +453,10 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
           />
         </div>
       </template>
-      <div v-else class="empty-hint">选择字体与背景后点击「预览」开始生成手写体</div>
+      <QuickStart v-if="!hasContent()" />
+      <div v-else-if="!hasPreview" class="empty-hint">
+        {{ store.rendering ? "正在生成预览…" : "内容已就绪，点击下方「刷新」重试" }}
+      </div>
     </div>
 
     <div class="pagenav">
@@ -470,6 +478,7 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
         勾选后在预览图上按住鼠标拖出矩形，松开后输入该区域的文字<br />
         （可独立选择手写体 / 打印体，实现混排）
       </NTooltip>
+      <NButton size="small" :loading="store.rendering" @click="doRender()">↻ 刷新</NButton>
     </div>
   </div>
 </template>

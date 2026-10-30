@@ -703,3 +703,161 @@ html.dark .role-tag-btn:hover {
   font-size: 11.5px;
   padding: 4px 6px;
 }
+
+/* ---------------- 当前方案 + 阶段式右栏 ---------------- */
+.setup-card {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--card-bg);
+  padding: 9px 10px 8px;
+  margin-bottom: 8px;
+}
+
+.setup-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--text-sub);
+}
+
+.setup-kicker {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+
+.preset-dirty {
+  font-size: 10.5px;
+  line-height: 1.5;
+  padding: 0 5px;
+  border-radius: 999px;
+  color: #9a5b00;
+  background: rgba(230, 162, 60, 0.16);
+}
+
+html.dark .preset-dirty {
+  color: #f0c27a;
+  background: rgba(230, 162, 60, 0.22);
+}
+
+.setup-spacer {
+  flex: 1;
+}
+
+.setup-dot {
+  opacity: 0.4;
+}
+
+.setup-preset-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.setup-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.setup-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-bg);
+  color: var(--text-sub);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.setup-chip.ok {
+  border-color: rgba(46, 125, 116, 0.35);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.setup-note {
+  margin: 6px 0 0;
+}
+
+.setup-note.is-warn {
+  color: #9a5b00;
+}
+
+html.dark .setup-note.is-warn {
+  color: #f0c27a;
+}
+
+.step-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border-radius: 7px;
+  background: var(--hover-bg);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.step-summary-main {
+  min-width: 0;
+}
+
+.step-sub {
+  color: var(--text-sub);
+  font-size: 11.5px;
+}
+
+.step-empty {
+  color: var(--text-sub);
+}
+
+.step-tag {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border: 1px solid rgba(46, 125, 116, 0.35);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.roles-toggle-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 2px 0 6px;
+}
+
+.role-manager-wrap {
+  margin: 6px 0 4px;
+}
+
+.role-manager-wrap .role-manager-card {
+  margin-bottom: 0;
+}
+
+.advanced-toggle {
+  display: flex;
+  justify-content: center;
+  margin: 2px 0 6px;
+}
+
+/* 正文编辑弹窗：modal 根节点带 class，用全局选择器放宽编辑区 */
+.text-editor-modal .para-editor {
+  height: min(46vh, 420px);
+  min-height: 240px;
+}
