@@ -552,7 +552,7 @@ fn handle_r_pr_tag(
     raw: &mut RawRunProps,
     fmt: &mut ParaFmt,
 ) {
-    match local_name(e.name().as_ref()) {
+    match local_name(e.name().as_ref().as_bytes()) {
         b"sz" => {
             if let Some(v) = attr_val(e, "val").and_then(|v| v.parse::<u32>().ok()) {
                 if fmt.run_sz_half_pt.is_none() {
@@ -586,7 +586,7 @@ fn handle_r_pr_tag(
 
 /// 处理 pPr 属性节点。
 fn handle_p_pr_tag(e: &quick_xml::events::BytesStart, fmt: &mut ParaFmt) {
-    match local_name(e.name().as_ref()) {
+    match local_name(e.name().as_ref().as_bytes()) {
         b"pStyle" => {
             if let Some(v) = attr_val(e, "val") {
                 fmt.style_id = Some(v);
@@ -648,7 +648,7 @@ fn parse_body_stream(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<Body
         match reader.read_event() {
             Ok(Event::Start(e)) => {
                 let qname = e.name();
-                let name = local_name(qname.as_ref());
+                let name = local_name(qname.as_ref().as_bytes());
                 if txbx_depth > 0 {
                     if name == b"txbxContent" {
                         txbx_depth += 1;
@@ -735,7 +735,7 @@ fn parse_body_stream(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<Body
                 if txbx_depth > 0 {
                     continue;
                 }
-                match local_name(e.name().as_ref()) {
+                match local_name(e.name().as_ref().as_bytes()) {
                     b"tab" if in_body_para || in_cell_para => cur_run_text.push('\t'),
                     b"br" | b"cr" if in_body_para || in_cell_para => cur_run_text.push('\n'),
                     // 实际文档中 w:gridCol 为自闭合（无子元素），需在 Empty 事件计数
@@ -770,15 +770,15 @@ fn parse_body_stream(xml: &str, registry: &mut StyleRegistry) -> Result<Vec<Body
                 if txbx_depth > 0 || cell_inner_tbl > 0 || !((in_body_para || in_cell_para) && in_t) {
                     continue;
                 }
-                if let Ok(s) = std::str::from_utf8(t.as_ref()) {
-                    if let Ok(v) = unescape(s) {
-                        cur_run_text.push_str(&v);
-                    }
+                // quick-xml 0.42 起 `BytesText::as_ref()` 已是 `&str`（内部完成 UTF-8 校验），
+                // 无需再走 `std::str::from_utf8`
+                if let Ok(v) = unescape(t.as_ref()) {
+                    cur_run_text.push_str(&v);
                 }
             }
             Ok(Event::End(e)) => {
                 let qname = e.name();
-                let name = local_name(qname.as_ref());
+                let name = local_name(qname.as_ref().as_bytes());
                 if txbx_depth > 0 {
                     if name == b"txbxContent" {
                         txbx_depth -= 1;
@@ -934,7 +934,7 @@ fn read_ind_attrs(e: &quick_xml::events::BytesStart, fmt: &mut ParaFmt) {
 fn attr_val(e: &quick_xml::events::BytesStart, name: &str) -> Option<String> {
     for attr in e.attributes() {
         let Ok(attr) = attr else { continue };
-        if local_name(attr.key.as_ref()) == name.as_bytes() {
+        if local_name(attr.key.as_ref().as_bytes()) == name.as_bytes() {
             return attr
                 .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                 .ok()
@@ -966,7 +966,7 @@ fn parse_styles(xml: &Option<String>) -> (Vec<StyleDef>, Option<u32>) {
 
     loop {
         match reader.read_event() {
-            Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
+            Ok(Event::Start(e)) => match local_name(e.name().as_ref().as_bytes()) {
                 b"style" => {
                     in_style = true;
                     let style_id = attr_val(&e, "styleId").unwrap_or_default();
@@ -986,7 +986,7 @@ fn parse_styles(xml: &Option<String>) -> (Vec<StyleDef>, Option<u32>) {
                 b"rPr" if in_r_pr_default => in_r_pr = true,
                 _ => {}
             },
-            Ok(Event::Empty(e)) => match local_name(e.name().as_ref()) {
+            Ok(Event::Empty(e)) => match local_name(e.name().as_ref().as_bytes()) {
                 b"basedOn" if in_style => {
                     if let Some(s) = cur.as_mut() {
                         s.based_on = attr_val(&e, "val");
@@ -1025,7 +1025,7 @@ fn parse_styles(xml: &Option<String>) -> (Vec<StyleDef>, Option<u32>) {
                 }
                 _ => {}
             },
-            Ok(Event::End(e)) => match local_name(e.name().as_ref()) {
+            Ok(Event::End(e)) => match local_name(e.name().as_ref().as_bytes()) {
                 b"style" => {
                     if let Some(s) = cur.take() {
                         styles.push(s);

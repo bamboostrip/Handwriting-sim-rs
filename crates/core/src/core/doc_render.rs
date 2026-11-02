@@ -2071,7 +2071,10 @@ pub(crate) fn pdf_to_images_opt_with_tables(
         let bitmap = page
             .render(w_px, h_px, None)
             .map_err(|e| DocRenderError::Other(format!("第 {} 页渲染失败：{e}", index + 1)))?;
-        let image = bitmap.as_image();
+        // pdfium-render 0.9 起 `as_image()` 返回 Result（位图格式转换失败不再 panic）
+        let image = bitmap
+            .as_image()
+            .map_err(|e| DocRenderError::Other(format!("第 {} 页位图转换失败：{e}", index + 1)))?;
         let mut rgb_img = image.to_rgb8();
 
         if extract_regions {

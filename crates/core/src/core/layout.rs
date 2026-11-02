@@ -5,6 +5,9 @@
 //! 便于未来用 golden 样本做迁移验收。
 
 use rand::Rng;
+// rand 0.10 起 `random`/`random_range`/`random_bool` 等消费型方法
+// 从 `Rng` 拆到扩展 trait `RngExt`，需显式引入。
+use rand::RngExt;
 use rand_distr::{Distribution, Normal};
 
 use crate::core::font::FontFace;
