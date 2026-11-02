@@ -106,18 +106,18 @@ function getRegionBadge(r: Region) {
   white-space: nowrap;
 }
 
-/* 聚焦放大：默认半透明，悬浮 / 选中时提亮，避免每行太抢眼 */
+/* 聚焦放大：默认半透明，悬浮 / 选中时提亮，避免每行太抢眼；加一点内边距扩大点击热区 */
 .region-focus {
   margin-left: auto;
   flex-shrink: 0;
-  padding: 1px 3px;
+  padding: 4px 5px;
   border: 0;
   border-radius: 4px;
   background: transparent;
   cursor: pointer;
-  font-size: 11px;
-  line-height: 1.4;
-  opacity: 0.55;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.6;
 }
 
 .region-focus:hover {

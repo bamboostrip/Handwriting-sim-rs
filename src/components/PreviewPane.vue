@@ -132,14 +132,19 @@ watch([natW, natH], resetView);
 watch(() => store.pageIndex, resetView);
 watch(() => store.backgroundPath, resetView);
 
-/** 列表「🔍」请求聚焦：store 先切页再自增 token，本 watcher 在其后应用 */
+/** 列表「🔍」请求聚焦：store 先切页再自增 token。
+ *  `flush: "post"` 保证在 pageIndex / natW 的 reset watcher 之后执行（不依赖 watcher 创建顺序）。 */
 watch(
   () => store.previewFocusToken,
   () => {
     const r = store.regions[store.previewFocusIndex];
     if (!r || !hasPreview.value || r.page - 1 !== store.pageIndex) return;
+    // 区域坐标存的是背景原始像素；预览图可能因 >4096 降采样而更小，
+    // 必须先换算到预览图像素，否则居中会按降采样比例偏移。
+    const kx = store.bgNatW > 0 ? natW.value / store.bgNatW : 1;
+    const ky = store.bgNatH > 0 ? natH.value / store.bgNatH : 1;
     view.value = focusRectView(
-      { x: r.x, y: r.y, w: r.w, h: r.h },
+      { x: r.x * kx, y: r.y * ky, w: r.w * kx, h: r.h * ky },
       natW.value,
       natH.value,
       cw.value,
@@ -147,6 +152,7 @@ watch(
       36,
     );
   },
+  { flush: "post" },
 );
 
 const pageText = computed(() => {
@@ -345,7 +351,9 @@ function onWheel(e: WheelEvent): void {
 }
 
 function beginPan(e: PointerEvent): void {
-  if (!hasPreview.value || !canPan.value) return;
+  // 调整 / 新建拖拽期间禁止另起平移（例如左键拖动选框时按中键），
+  // 否则几何映射会在拖动中途变化，写回坐标出错。
+  if (!hasPreview.value || !canPan.value || adjusting.value || rubberLive.value) return;
   panning.value = true;
   panStart.clientX = e.clientX;
   panStart.clientY = e.clientY;
@@ -665,7 +673,7 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
             size="tiny"
             quaternary
             :type="atActual ? 'primary' : 'default'"
-            title="原始像素（100%）"
+            title="预览图 1:1（100%）"
             @click="setActual"
           >
             100%
@@ -673,7 +681,7 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
           <NButton size="tiny" quaternary :disabled="atMax" title="放大" @click="zoomIn">
             +
           </NButton>
-          <span class="zoom-percent" title="当前显示比例（CSS 像素 / 底图像素）">
+          <span class="zoom-percent" title="当前显示比例（CSS 像素 / 预览图像素）">
             {{ zoomPercent }}%
           </span>
         </div>
