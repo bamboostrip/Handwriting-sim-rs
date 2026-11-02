@@ -967,7 +967,7 @@ fn preview_pages_impl(seed: u64, params: &HandwritingParams) -> Result<Vec<RgbaI
 /// 把 RGB 缓冲包装为 RGBA 图像（前景不透明）。
 fn rgba_from_rgb(rgb: &[u8], width: usize, height: usize) -> RgbaImage {
     let mut buf = Vec::with_capacity(rgb.len() / 3 * 4);
-    for px in rgb.chunks_exact(3) {
+    for px in rgb.as_chunks::<3>().0 {
         buf.extend_from_slice(&[px[0], px[1], px[2], 255]);
     }
     RgbaImage::from_raw(width as u32, height as u32, buf)
@@ -1045,7 +1045,7 @@ pub fn export_pdf(
     let mut lopdf_doc = lopdf::Document::load_mem(&bytes)
         .map_err(|e| EngineError::Pdf(format!("解析 PDF 字节失败：{e}")))?;
 
-    for (_, object) in lopdf_doc.objects.iter_mut() {
+    for object in lopdf_doc.objects.values_mut() {
         if let lopdf::Object::Stream(ref mut stream) = object {
             if let Ok(subtype) = stream.dict.get(b"Subtype") {
                 if subtype == &lopdf::Object::Name(b"Image".to_vec()) {
@@ -1190,7 +1190,7 @@ mod tests {
         // 存在有效前景（黑字白底）
         let gray_min = pages[0]
             .as_raw()
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .map(|px| (px[0] as u16 + px[1] as u16 + px[2] as u16) / 3)
             .min()
             .unwrap();
@@ -1242,7 +1242,7 @@ mod tests {
             assert_eq!(saved.as_raw(), page.as_raw());
         }
         assert!(
-            pages[0].as_raw().chunks_exact(4).any(|px| (px[0] as u16 + px[1] as u16 + px[2] as u16) / 3 < 128),
+            pages[0].as_raw().as_chunks::<4>().0.iter().any(|px| (px[0] as u16 + px[1] as u16 + px[2] as u16) / 3 < 128),
             "段落路径应有深色前景"
         );
         fs::remove_dir_all(dir.path()).ok();
@@ -1269,7 +1269,7 @@ mod tests {
         // 降采样后预览输出缩略背景尺寸（PREVIEW_MAX_WIDTH 宽）
         assert_eq!(page.width(), PREVIEW_MAX_WIDTH, "降采样后预览应输出缩略背景尺寸");
         // 预览仍应正确渲染（有深色前景）
-        let gray_min = page.as_raw().chunks_exact(4).map(|px| (px[0] as u16 + px[1] as u16 + px[2] as u16) / 3).min().unwrap();
+        let gray_min = page.as_raw().as_chunks::<4>().0.iter().map(|px| (px[0] as u16 + px[1] as u16 + px[2] as u16) / 3).min().unwrap();
         assert!(gray_min < 128, "降采样预览应有深色前景：{gray_min}");
         fs::remove_dir_all(dir.path()).ok();
     }
@@ -1296,7 +1296,7 @@ mod tests {
         // 预览仍应正确渲染（有深色前景）
         let gray_min = page
             .as_raw()
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .map(|px| (px[0] as u16 + px[1] as u16 + px[2] as u16) / 3)
             .min()
             .unwrap();
@@ -1495,7 +1495,7 @@ mod tests {
         let lopdf_doc = lopdf::Document::load_mem(&bytes).unwrap();
         let mut image_count = 0;
         let (w, h) = pages[0].dimensions();
-        for (_, object) in lopdf_doc.objects.iter() {
+        for object in lopdf_doc.objects.values() {
             if let lopdf::Object::Stream(ref stream) = object {
                 if let Ok(subtype) = stream.dict.get(b"Subtype") {
                     if subtype == &lopdf::Object::Name(b"Image".to_vec()) {
@@ -1539,7 +1539,7 @@ mod tests {
     /// 白底黑字的墨迹掩码。
     fn region_ink_mask(page: &RgbaImage) -> Vec<bool> {
         page.as_raw()
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .map(|px| ((px[0] as u16 + px[1] as u16 + px[2] as u16) / 3) < 128)
             .collect()
     }
@@ -1899,7 +1899,7 @@ mod tests {
         assert_eq!(pages.len(), 1);
         assert_eq!((pages[0].width(), pages[0].height()), (400, 300));
         // 无墨迹
-        assert!(pages[0].as_raw().chunks_exact(4).all(|px| px[0] == 255));
+        assert!(pages[0].as_raw().as_chunks::<4>().0.iter().all(|px| px[0] == 255));
     }
 
     /// 多页文档背景：background_pages 提供逐页底图，主文字只占首页，
@@ -1980,12 +1980,12 @@ mod tests {
 
         // 提取两张图上的黑色像素（印刷体）
         let black_pixels1: Vec<usize> = raw1
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .enumerate()
             .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 0 { Some(idx) } else { None })
             .collect();
         let black_pixels2: Vec<usize> = raw2
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .enumerate()
             .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 0 { Some(idx) } else { None })
             .collect();
@@ -1998,12 +1998,12 @@ mod tests {
 
         // 提取两张图上的蓝色像素（手写体）
         let blue_pixels1: Vec<usize> = raw1
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .enumerate()
             .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 255 { Some(idx) } else { None })
             .collect();
         let blue_pixels2: Vec<usize> = raw2
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .enumerate()
             .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 255 { Some(idx) } else { None })
             .collect();
@@ -2057,9 +2057,9 @@ mod tests {
         let page = DefaultEngine::new(42).render_preview(&params).unwrap();
         let raw = page.as_raw();
 
-        let has_black = raw.chunks_exact(4).any(|px| px[0] == 0 && px[1] == 0 && px[2] == 0);
-        let has_blue = raw.chunks_exact(4).any(|px| px[0] == 0 && px[1] == 0 && px[2] == 255);
-        let has_red = raw.chunks_exact(4).any(|px| px[0] == 255 && px[1] == 0 && px[2] == 0);
+        let has_black = raw.as_chunks::<4>().0.iter().any(|px| px[0] == 0 && px[1] == 0 && px[2] == 0);
+        let has_blue = raw.as_chunks::<4>().0.iter().any(|px| px[0] == 0 && px[1] == 0 && px[2] == 255);
+        let has_red = raw.as_chunks::<4>().0.iter().any(|px| px[0] == 255 && px[1] == 0 && px[2] == 0);
 
         assert!(has_black, "应渲染黑色印刷体");
         assert!(has_blue, "应渲染蓝色手写体");
@@ -2136,9 +2136,9 @@ mod tests {
         let raw2 = page2.as_raw();
 
         // 验证黑字（Run 1）、灰字（Run 2）和蓝字（Run 3）均有像素
-        let has_black = raw1.chunks_exact(4).any(|px| px[0] == 0 && px[1] == 0 && px[2] == 0);
-        let has_gray = raw1.chunks_exact(4).any(|px| px[0] == 100 && px[1] == 100 && px[2] == 100);
-        let has_blue = raw1.chunks_exact(4).any(|px| px[0] == 0 && px[1] == 0 && px[2] == 255);
+        let has_black = raw1.as_chunks::<4>().0.iter().any(|px| px[0] == 0 && px[1] == 0 && px[2] == 0);
+        let has_gray = raw1.as_chunks::<4>().0.iter().any(|px| px[0] == 100 && px[1] == 100 && px[2] == 100);
+        let has_blue = raw1.as_chunks::<4>().0.iter().any(|px| px[0] == 0 && px[1] == 0 && px[2] == 255);
 
         assert!(has_black, "应渲染黑色印刷体 Run 1");
         assert!(has_gray, "应渲染灰色印刷体 Run 2");
@@ -2146,36 +2146,36 @@ mod tests {
 
         // 验证印刷体零扰动（同坐标），手写体存在扰动
         let black_px1: Vec<usize> = raw1
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .enumerate()
             .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 0 { Some(idx) } else { None })
             .collect();
         let black_px2: Vec<usize> = raw2
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .enumerate()
             .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 0 { Some(idx) } else { None })
             .collect();
         assert_eq!(black_px1, black_px2, "印刷标题 Run 1 跨 seed 应保持零扰动像素一致");
 
         let gray_px1: Vec<usize> = raw1
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .enumerate()
             .filter_map(|(idx, px)| if px[0] == 100 && px[1] == 100 && px[2] == 100 { Some(idx) } else { None })
             .collect();
         let gray_px2: Vec<usize> = raw2
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .enumerate()
             .filter_map(|(idx, px)| if px[0] == 100 && px[1] == 100 && px[2] == 100 { Some(idx) } else { None })
             .collect();
         assert_eq!(gray_px1, gray_px2, "印刷说明 Run 2 跨 seed 应保持零扰动像素一致");
 
         let blue_px1: Vec<usize> = raw1
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .enumerate()
             .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 255 { Some(idx) } else { None })
             .collect();
         let blue_px2: Vec<usize> = raw2
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .enumerate()
             .filter_map(|(idx, px)| if px[0] == 0 && px[1] == 0 && px[2] == 255 { Some(idx) } else { None })
             .collect();

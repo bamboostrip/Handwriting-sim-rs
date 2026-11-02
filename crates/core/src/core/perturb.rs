@@ -332,8 +332,8 @@ mod tests {
 
         // 前景像素（黑色）
         let mut out_mask = vec![false; w * h];
-        for (i, px) in canvas.chunks_exact(3).enumerate() {
-            if px == [0, 0, 0] {
+        for (i, px) in canvas.as_chunks::<3>().0.iter().enumerate() {
+            if px == &[0, 0, 0] {
                 out_mask[i] = true;
             }
         }
