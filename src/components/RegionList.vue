@@ -6,6 +6,7 @@ import { NButton } from "naive-ui";
 import {
   clearRegions,
   deleteSelectedRegion,
+  focusRegion,
   getHighlightInfo,
   getRoleBadgeInfo,
   isDarkActive,
@@ -42,7 +43,7 @@ function getRegionBadge(r: Region) {
 
 <template>
   <div class="hint-line">
-    在左侧预览勾选「框选文字」后拖出矩形生成文字；单击列表项调整位置，双击重新编辑文字与参数。
+    在左侧预览勾选「框选文字」后拖出矩形生成文字；单击列表项调整位置，双击重新编辑文字与参数；🔍 放大查看该区域。
   </div>
 
   <div class="region-list">
@@ -66,6 +67,15 @@ function getRegionBadge(r: Region) {
         :title="getRegionBadge(r).label"
       />
       <span class="region-label-text">{{ regionLabel(r, i + 1) }}</span>
+      <button
+        class="region-focus"
+        type="button"
+        title="放大查看该区域"
+        @click.stop="focusRegion(i)"
+        @dblclick.stop
+      >
+        🔍
+      </button>
     </div>
     <div v-if="store.regions.length === 0" class="region-empty">（暂无区域）</div>
   </div>
@@ -89,8 +99,29 @@ function getRegionBadge(r: Region) {
 }
 
 .region-label-text {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 聚焦放大：默认半透明，悬浮 / 选中时提亮，避免每行太抢眼 */
+.region-focus {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 1px 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1.4;
+  opacity: 0.55;
+}
+
+.region-focus:hover {
+  background: var(--hover-bg);
+  opacity: 1;
 }
 </style>

@@ -138,10 +138,12 @@ body,
   pointer-events: none;
 }
 
-/* 调整态编辑框：加粗边框 + 手柄圆点，提示可拖动 / 缩放 */
+/* 调整态编辑框：加粗边框 + 手柄圆点，提示可拖动 / 缩放。
+   填充透明：放大查看填空效果时，蓝色半透明底会盖住笔迹。 */
 .rubber-band.is-editing {
   border-width: 2px;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.65);
+  background: transparent;
 }
 
 .handle-dot {
@@ -158,6 +160,32 @@ body,
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/* ---------------- 预览缩放条 ---------------- */
+.zoom-bar {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
+  user-select: none;
+}
+
+.zoom-percent {
+  min-width: 38px;
+  padding: 0 2px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-sub);
+  font-variant-numeric: tabular-nums;
 }
 
 .pagenav .page-text {

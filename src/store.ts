@@ -446,6 +446,9 @@ export const store = reactive({
   previewPages: [] as { url: string; width: number; height: number }[],
   pageIndex: 0,
   previewBgIdx: 0,
+  /** 列表「🔍」请求聚焦的区域索引（-1 = 无）；token 自增驱动预览组件应用 */
+  previewFocusIndex: -1,
+  previewFocusToken: 0,
   bgNatW: 0,
   bgNatH: 0,
   rendering: false,
@@ -2351,6 +2354,15 @@ export function jumpToRegion(index: number): void {
   }
   store.selectedRegionIndex = index;
   store.editingIndex = index;
+}
+
+/** 列表「🔍」：跳到该区域所在页、选中，并请求预览居中放大到该区域。 */
+export function focusRegion(index: number): void {
+  const r = store.regions[index];
+  if (!r) return;
+  jumpToRegion(index);
+  store.previewFocusIndex = index;
+  store.previewFocusToken += 1;
 }
 
 export function deleteSelectedRegion(): void {
