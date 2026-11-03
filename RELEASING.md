@@ -69,6 +69,11 @@ Release 说明由 CI 自动生成，**不要在 GitHub 网页上手动编辑 Rel
 4. 本地验证：
    - `cargo test -p handwrite-sim --lib` 通过；
    - `cargo clippy -p handwrite-sim --lib -- -D warnings` 通过；
+   - `pnpm build`（`vue-tsc` 类型检查 + `vite build`）通过；
+   - `pnpm tauri build --no-bundle` 通过。**这条最容易漏、也最值得跑**：`tauri build`
+     会校验 Rust crate 与 `@tauri-apps/*` npm 包的 major.minor 是否一致，而 `tauri dev`
+     不做这项校验；0.6.0 发版时正是因此让 CI 三平台 Portable 全红，本地却毫无征兆。
+     跑一次同时也能确认内置 pdfium 真的被重新嵌入（见 §4 对应条目）。
    - 预览 release notes 提取：确认 `## [x.y.z]` 小节存在且非空。
 5. Commit（只含版本 + CHANGELOG，不混功能改动），push 到 `origin/master`。
 6. 确认 CI `master` 分支构建为绿色后，打 tag 并推送：
@@ -89,3 +94,5 @@ Release 说明由 CI 自动生成，**不要在 GitHub 网页上手动编辑 Rel
 | 手动在网页改 Release 正文 | 与 CHANGELOG 脱节，下次被覆盖 | 只改 CHANGELOG + 模板，重打 tag 修正 |
 | master 推送与 tag 推送间隔太短 | concurrency 取消旧运行（预期内） | 先等 master 变绿再打 tag |
 | 更新 bat 用 `ping`/`timeout`/`choice` 做延时 | Win11 默认终端为每个控制台子进程弹新窗口，重试循环放大成循环弹窗（0.4.1 教训） | 延时只用 `wscript //B //Nologo` + `.vbs`，有回归测试锁定 |
+| 只升 Rust 侧 `tauri` / `tauri-plugin-*`，漏升 `@tauri-apps/*` | `tauri build` 报 `Found version mismatched Tauri packages`，CI Portable 三平台全红；`tauri dev` 不校验，本地一切正常 | 两者成对升级，并在本地跑 `pnpm tauri build --no-bundle` 验证（§3 第 4 步） |
+| 换了内置 pdfium 却没触发重新嵌入 | 产物里仍是旧库，用户导入 PDF 报 `GetProcAddress(127)` | 换库后 `cargo clean -p handwrite-sim`；build.rs 已对「资产缺失 / 版本过旧」在构建期告警 |
