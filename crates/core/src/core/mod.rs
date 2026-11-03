@@ -11,3 +11,4 @@ pub mod layout;
 pub mod models;
 pub mod perturb;
 pub mod presets;
+pub mod shapes;

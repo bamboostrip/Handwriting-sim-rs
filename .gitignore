@@ -31,6 +31,9 @@ Thumbs.db
 # 临时
 .staging-rust-new/
 *.pgm
+# 符号图形 POC 本地出图目录（正式样张已归档到 docs/screenshots/）
+/tmp_shapes/
+/tmp_issue6/
 
 # pdfium 动态库（PDF 底图栅格化运行时依赖，体积大不入库；
 # 本地从 Python 项目 .venv 的 pypdfium2_raw\pdfium.dll 复制，打包脚本负责分发）

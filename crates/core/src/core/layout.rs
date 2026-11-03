@@ -111,9 +111,9 @@ pub struct LayoutResult {
 }
 
 
-/// 在掩码中画一条带厚度的线段（删除线用）。逐行 bool 掩码，越界自动忽略。
+/// 在掩码中画一条带厚度的线段（删除线 / 符号图形基元）。逐行 bool 掩码，越界自动忽略。
 #[allow(clippy::too_many_arguments)]
-fn draw_thick_line(
+pub(crate) fn draw_thick_line(
     mask: &mut [bool],
     width: usize,
     height: usize,
