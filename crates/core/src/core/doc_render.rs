@@ -2209,6 +2209,30 @@ fn get_runtime_extracted_pdfium_path() -> Option<PathBuf> {
     Some(base_dir.join(filename))
 }
 
+/// 把一次 Pdfium 绑定结果规约为可用的 `Pdfium` 句柄。
+///
+/// pdfium-render 0.9 起把库绑定提升为进程级全局单例（内部 `OnceCell`）：
+/// 第二次调用 `bind_to_library` / `bind_to_system_library` 必定返回
+/// `PdfiumLibraryBindingsAlreadyInitialized`。这并不代表加载失败——库在第一次
+/// 就已成功加载，此处直接复用全局绑定即可（`Pdfium` 仅是持有可选字体提供者的
+/// 轻量句柄，本项目未自定义字体提供者，重建不会丢状态）。
+/// `open_pdfium` 每次导入 PDF 都会被调用，不做这个转换会在第二次导入时误报
+/// 「pdfium 加载失败」。
+fn pdfium_handle_from_bind(
+    bound: Result<
+        Box<dyn pdfium_render::prelude::PdfiumLibraryBindings>,
+        pdfium_render::prelude::PdfiumError,
+    >,
+) -> Result<pdfium_render::prelude::Pdfium, pdfium_render::prelude::PdfiumError> {
+    use pdfium_render::prelude::{Pdfium, PdfiumError};
+
+    match bound {
+        Ok(bindings) => Ok(Pdfium::new(bindings)),
+        Err(PdfiumError::PdfiumLibraryBindingsAlreadyInitialized) => Ok(Pdfium::default()),
+        Err(e) => Err(e),
+    }
+}
+
 /// 打开 pdfium 动态库：
 /// 1. 优先使用 exe 目录或当前工作目录下的外部动态库（若用户手动放入）；
 /// 2. 尝试系统已安装的共享库；
@@ -2236,8 +2260,8 @@ fn open_pdfium(
 
     for candidate in candidates {
         if candidate.is_file() {
-            match Pdfium::bind_to_library(&candidate) {
-                Ok(bindings) => return Ok(Pdfium::new(bindings)),
+            match pdfium_handle_from_bind(Pdfium::bind_to_library(&candidate)) {
+                Ok(pdfium) => return Ok(pdfium),
                 Err(e) => {
                     load_errors.push(format!("加载外部库 {} 失败: {e}", candidate.display()));
                 }
@@ -2246,8 +2270,8 @@ fn open_pdfium(
     }
 
     // 2. 尝试系统默认库
-    if let Ok(bindings) = Pdfium::bind_to_system_library() {
-        return Ok(Pdfium::new(bindings));
+    if let Ok(pdfium) = pdfium_handle_from_bind(Pdfium::bind_to_system_library()) {
+        return Ok(pdfium);
     }
 
     // 3. 自动自解压内置的 64 位 pdfium 动态库
@@ -2294,8 +2318,8 @@ fn open_pdfium(
             }
 
             if target_path.is_file() {
-                match Pdfium::bind_to_library(&target_path) {
-                    Ok(bindings) => return Ok(Pdfium::new(bindings)),
+                match pdfium_handle_from_bind(Pdfium::bind_to_library(&target_path)) {
+                    Ok(pdfium) => return Ok(pdfium),
                     Err(e) => {
                         load_errors.push(format!("加载内置自解压库 {} 失败: {e}", target_path.display()));
                     }
