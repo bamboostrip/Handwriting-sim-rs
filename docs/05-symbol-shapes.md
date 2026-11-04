@@ -329,7 +329,7 @@ POC 实测方案（`shapes.rs:576` `brace()`）：**上下两段三次贝塞尔�
 | --- | --- | --- | --- |
 | 纯图形渲染（研究 POC） | `cargo run -p handwrite-sim --example shapes_poc` | `tmp_shapes/shapes_poc.png` | 图元的**手绘质感**达标，12 类图元全覆盖 |
 | **真实引擎链路**（产品数据流） | `cargo run -p handwrite-sim --example shapes_engine_demo` | `tmp_shapes/shapes_engine_demo_{0,1}.png` | `HandwritingParams.shapes` → 引擎逐页合成 → PNG：按页归属、墨色跟随/覆盖、纯图形页、与文字叠加 |
-| 全量测试 | `cargo test -p handwrite-sim` + `cargo test -p handwrite-sim-tauri` | — | 183 单元 / 5 原有集成 / 7 新增集成 / 17 命令层测试，全绿 |
+| 全量测试 | `cargo test -p handwrite-sim` + `cargo test -p handwrite-sim-tauri` | — | 183 单元 / 5 原有集成 / 12 新增集成 / 17 命令层测试，全绿 |
 
 **真实引擎链路样张**（第 1 页：文字 + 9 个图形；第 2 页：只有 1 个矩形，验证纯图形页）：
 
@@ -417,7 +417,7 @@ POC 实测方案（`shapes.rs:576` `brace()`）：**上下两段三次贝塞尔�
 **已完成（本分支 MVP）**
 
 1. 契约冻结（§5.1.1）→ core 数据/渲染/校验 + 命令层镜像 + 前端状态/交互/面板全部落地；
-2. 两条样张可复现（§6.0），`cargo test`（183 单元 + 5 原有集成 + **8** 新增集成 + 17 命令层）与 `pnpm build` 全绿；
+2. 两条样张可复现（§6.0），`cargo test`（183 单元 + 5 原有集成 + **12** 新增集成 + 17 命令层）与 `pnpm build` 全绿；
 3. 帮助文档（「🧰 更多实用功能 → 6. 图形标注」）与 README 功能列表已同步；
 4. **对抗性审查后的修复批次**（见 §10.1）。
 
@@ -449,3 +449,4 @@ POC 实测方案（`shapes.rs:576` `brace()`）：**上下两段三次贝塞尔�
 **刻意不做**：自由手绘、旋转、图形模板库、图形随预设保存。
 
 > 端点手柄与严格叠放已从「后续」移入已完成（审查后补齐）。
+
