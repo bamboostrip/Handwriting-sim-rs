@@ -310,9 +310,10 @@ function restartOnboarding(): void {
                 <div class="guide-text">
                   <ul class="guide-list">
                     <li><strong>怎么画</strong>：点预览区下方的<strong>「✎ 标注」</strong>进入标注模式，在旁边的下拉里选图元（矩形 / 椭圆 / 三角 / 直线 / 箭头 / 大括号 / 方括号 / 勾 / 下划线），然后在预览图上<strong>按住拖一下</strong>，松手即生成并自动选中——和「框选文字」是同一种手势。</li>
-                    <li><strong>怎么改</strong>：关闭标注模式后单击图形可选中（蓝虚线框 + 8 个手柄），拖手柄改大小、拖框内整体移动；右栏<strong>「④ 图形标注」</strong>里可调类型、线宽、抖动、颜色（可「跟随主墨色」或单独指定）、填充与页码。</li>
+                    <li><strong>怎么改</strong>：关闭标注模式后单击图形可选中（紫色虚线框 + 8 个手柄；直线/箭头/下划线是两个端点手柄），拖手柄改大小或方向、拖框内整体移动；右栏<strong>「④ 图形标注」</strong>里可调类型、线宽、抖动、颜色、填充与页码。</li>
+                    <li><strong>颜色</strong>：默认<strong>跟随主墨色</strong>（与正文同色，不会串色）。想用红笔批注，在「④ 图形标注 → 新建图形默认样式」里关掉「跟随主墨色」选红色，之后画的图形都是红色；已画的可在「图形属性」里单独改。默认样式里的线宽/抖动留「自动」即可（会按纸张大小自适应）。</li>
                     <li><strong>框住一段文字</strong>：先选中一个文字区域，再到「④ 图形标注」点<strong>「＋ 给文字区域加框」</strong>，直接沿该区域生成方框，不用手动对齐。</li>
-                    <li><strong>风格</strong>：图形按手绘风格渲染（带弧度抖动与复描），默认空心、盖在文字之上；<code>Delete</code> 删除选中图形，<code>Esc</code> 退出标注模式。<NTag size="small" type="warning" style="margin-top: 6px">⚠️ 图形与正文、文字区域一样属于当前会话内容，不随预设保存</NTag></li>
+                    <li><strong>风格</strong>：图形按<strong>笔压模型</strong>渲染——起收笔收细、行笔变粗、长线带轻微弓形与波浪、转角会过头或留缝，不是等宽矢量线；抖动调成 0 则回到规整（直尺）效果。默认空心、盖在文字之上；<code>Delete</code> 删除选中图形，<code>Esc</code> 退出标注模式。<NTag size="small" type="warning" style="margin-top: 6px">⚠️ 图形与正文、文字区域一样属于当前会话内容，不随预设保存</NTag></li>
                   </ul>
                 </div>
               </div>

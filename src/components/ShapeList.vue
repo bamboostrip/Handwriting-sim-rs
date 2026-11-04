@@ -6,14 +6,16 @@
 //! 新组件自己的布局与按钮放进 scoped 样式，避免动全局样式。
 
 import { computed } from "vue";
-import { NButton } from "naive-ui";
+import { NButton, NColorPicker, NSlider, NSwitch } from "naive-ui";
 import {
   addShapeAroundRegion,
   cancelRegionEdit,
   clearShapes,
   deleteShape,
   moveShapeOrder,
+  resolveShapeDefault,
   selectShape,
+  setShapeDefault,
   shapeLabel,
   store,
 } from "../store";
@@ -52,9 +54,107 @@ function addAroundRegion(): void {
   // 区域可能在别的页：生成后跟到新图形所在页，方便立刻确认
   if (store.shapes.length > before) jumpToShape(store.shapes.length - 1);
 }
+
+// ---------------------------------------------------------------- 新建图形默认样式
+// shapeDefault 里的 null = 自动：颜色跟随主墨色，线宽 / 抖动按纸张自适应。
+// 这里只写 store；实际取值由 resolveShapeDefault() 统一解析，addShapeFromRect 创建时消费。
+
+/** 实际生效的新建样式（自动项已按纸张解析，供滑块与数值回显）。 */
+const defaultStyle = computed(() => resolveShapeDefault());
+
+/** 跟随主墨色 = fill 为 null；关掉时以当前主墨色作为初值。 */
+const followInkDefault = computed<boolean>({
+  get: () => store.shapeDefault.fill == null,
+  set: (on) => setShapeDefault({ fill: on ? null : store.fontColor }),
+});
+
+const defaultColor = computed<string>({
+  get: () => store.shapeDefault.fill ?? store.fontColor,
+  set: (v) => setShapeDefault({ fill: v }),
+});
+
+/** 线宽 / 抖动：自动 = null。关掉自动时以当前生效值起步，避免滑块跳到端点。 */
+const thicknessAuto = computed<boolean>({
+  get: () => store.shapeDefault.thickness == null,
+  set: (on) => setShapeDefault({ thickness: on ? null : defaultStyle.value.thickness }),
+});
+
+const thicknessValue = computed<number>({
+  get: () => defaultStyle.value.thickness,
+  set: (v) => setShapeDefault({ thickness: v }),
+});
+
+const jitterAuto = computed<boolean>({
+  get: () => store.shapeDefault.jitter == null,
+  set: (on) => setShapeDefault({ jitter: on ? null : defaultStyle.value.jitter }),
+});
+
+const jitterValue = computed<number>({
+  get: () => defaultStyle.value.jitter,
+  set: (v) => setShapeDefault({ jitter: v }),
+});
 </script>
 
 <template>
+  <div class="group-card shape-default-card">
+    <span class="group-legend">新建图形默认样式</span>
+
+    <div class="field-row">
+      <span class="field-label">颜色</span>
+      <NSwitch v-model:value="followInkDefault" size="small" />
+      <span class="prop-hint">跟随主墨色</span>
+      <span
+        v-if="followInkDefault"
+        class="ink-dot"
+        :style="{ backgroundColor: store.fontColor }"
+        :title="`跟随主墨色 ${store.fontColor}`"
+      />
+      <NColorPicker
+        v-else
+        v-model:value="defaultColor"
+        :show-alpha="false"
+        :modes="['hex']"
+        size="small"
+        style="width: 104px"
+      />
+    </div>
+
+    <div class="field-row">
+      <span class="field-label">线宽</span>
+      <NSwitch v-model:value="thicknessAuto" size="small" title="自动 = 按纸张宽度自适应" />
+      <span class="prop-hint">自动</span>
+      <NSlider
+        v-model:value="thicknessValue"
+        :min="1"
+        :max="16"
+        :step="0.2"
+        :disabled="thicknessAuto"
+        style="flex: 1"
+      />
+      <span class="prop-value">{{ defaultStyle.thickness.toFixed(1) }} px</span>
+    </div>
+
+    <div class="field-row">
+      <span class="field-label">抖动</span>
+      <NSwitch v-model:value="jitterAuto" size="small" title="自动 = 随线宽放大，纸越大越明显" />
+      <span class="prop-hint">自动</span>
+      <NSlider
+        v-model:value="jitterValue"
+        :min="0"
+        :max="6"
+        :step="0.1"
+        :disabled="jitterAuto"
+        style="flex: 1"
+        title="手绘抖动幅度，0 = 直尺"
+      />
+      <span class="prop-value">{{ defaultStyle.jitter.toFixed(1) }} px</span>
+    </div>
+
+    <div class="hint-line shape-default-hint">
+      只影响之后新画的图形；已画的图形在下方属性里单独调。
+    </div>
+  </div>
+
   <div class="hint-line shape-hint">
     单击列表项定位；↑↓ 调叠放，🗑 删除。图形属于当前文档，不写进预设。
   </div>
@@ -125,6 +225,41 @@ function addAroundRegion(): void {
 </template>
 
 <style scoped>
+.shape-default-card {
+  /* 首张卡片：同 ShapeProps 一样留出 group-legend 的上溢出空间 */
+  margin-top: 12px;
+  margin-bottom: 10px;
+}
+
+.shape-default-hint {
+  margin: 2px 0 0;
+  white-space: normal;
+}
+
+.prop-value {
+  width: 52px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 11.5px;
+  color: var(--text-sub);
+  font-variant-numeric: tabular-nums;
+}
+
+.prop-hint {
+  font-size: 11px;
+  color: var(--text-sub);
+  white-space: nowrap;
+}
+
+.ink-dot {
+  width: 14px;
+  height: 14px;
+  margin-left: 2px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
 .shape-hint {
   margin-bottom: 6px;
 }

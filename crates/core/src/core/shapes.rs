@@ -19,7 +19,7 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
 
-use crate::core::layout::{draw_bezier_line, draw_thick_line};
+use crate::core::layout::draw_thick_line;
 
 /// 圆周率（f32）。
 const TAU: f32 = std::f32::consts::TAU;
@@ -256,18 +256,41 @@ pub fn rasterize_shape(
     let oy = offset_y as f32;
     let thickness = spec.thickness.clamp(0.8, MAX_PEN_THICKNESS);
     let jitter = spec.jitter.clamp(0.0, MAX_PEN_JITTER);
+    let mut rng = StdRng::seed_from_u64(spec.seed);
+    // 笔压相位：让同一图形的不同笔画宽窄起伏各不相同
+    let phase = rng.random_range(0.0..TAU);
+    let x = spec.x + ox;
+    let y = spec.y + oy;
+    let (bx, by, bw, bh) = normalized_bbox(x, y, spec.w, spec.h);
+    // 整体轻微倾斜 + 微位移：手画的框/圈几乎不可能绝对轴对齐，
+    // 这是「看起来像打印」的主要观感来源之一。jitter=0 时保持规整（且不消耗随机数）。
+    let half_diag = (bw * bw + bh * bh).sqrt() * 0.5;
+    // 倾斜按「端点最大位移 ≈3px」封顶：否则 1000px 宽的长框会被转出 20+px 的斜边，
+    // 框住文字时看起来反而像画歪了（手画长框其实很接近水平）
+    let rot_cap = if half_diag > 1.0 { 3.0 / half_diag } else { 0.03 };
+    let (rot, tx, ty) = if jitter > 0.0 {
+        (
+            rng.random_range(-rot_cap..=rot_cap),
+            rng.random_range(-thickness * 0.25..=thickness * 0.25),
+            rng.random_range(-thickness * 0.25..=thickness * 0.25),
+        )
+    } else {
+        (0.0, 0.0, 0.0)
+    };
     let mut pen = Pen {
         mask,
         width: page_width,
         height: page_height,
-        rng: StdRng::seed_from_u64(spec.seed),
+        rng,
         jitter,
         thickness,
+        phase,
+        rot,
+        tx,
+        ty,
+        cx: bx + bw * 0.5,
+        cy: by + bh * 0.5,
     };
-
-    let x = spec.x + ox;
-    let y = spec.y + oy;
-    let (bx, by, bw, bh) = normalized_bbox(x, y, spec.w, spec.h);
     let points: Vec<(f32, f32)> = spec.points.iter().map(|p| (p[0] + ox, p[1] + oy)).collect();
     let amp = jitter;
 
@@ -413,6 +436,8 @@ pub fn local_mask_box(
     }
     let margin = spec.thickness.clamp(0.8, MAX_PEN_THICKNESS) * 2.0
         + spec.jitter.clamp(0.0, MAX_PEN_JITTER) * 3.0
+        // 整体倾斜最多约 0.012rad，长边外扩量按对角线估
+        + 0.02 * (bw * bw + bh * bh).sqrt()
         + 8.0;
     let x0f = (min_x - margin).floor().max(0.0);
     let y0f = (min_y - margin).floor().max(0.0);
@@ -500,6 +525,16 @@ struct Pen<'a> {
     jitter: f32,
     /// 基础线宽（像素）。
     thickness: f32,
+    /// 笔压相位：让同一图形的不同笔画宽窄起伏互不相同（手写时每笔力度都不一样）。
+    phase: f32,
+    /// 整体轻微旋转（弧度，绕包围盒中心）：手画的框几乎不会绝对轴对齐
+    rot: f32,
+    /// 整体微位移（像素）
+    tx: f32,
+    ty: f32,
+    /// 旋转中心（包围盒中心）
+    cx: f32,
+    cy: f32,
 }
 
 impl Pen<'_> {
@@ -517,22 +552,100 @@ impl Pen<'_> {
         (p.0 + self.noise(amp), p.1 + self.noise(amp))
     }
 
-    /// 直线：复用 layout::draw_bezier_line 的波状二次贝塞尔。
+    /// 把图形局部坐标映射到页面坐标（整体旋转 + 平移）。
+    fn xform(&self, p: (f32, f32)) -> (f32, f32) {
+        if self.rot == 0.0 && self.tx == 0.0 && self.ty == 0.0 {
+            return p;
+        }
+        let (dx, dy) = (p.0 - self.cx, p.1 - self.cy);
+        let (c, s) = (self.rot.cos(), self.rot.sin());
+        (
+            self.cx + dx * c - dy * s + self.tx,
+            self.cy + dx * s + dy * c + self.ty,
+        )
+    }
+
+    /// 画一段（先套整体变换再光栅化）。
+    ///
+    /// `jitter > 0` 时额外给两端沿法线加一点「毛边」偏移：笔尖在纸上不是
+    /// 几何直线，边缘会有轻微抖动——这是二进制掩码下最接近真实笔迹的做法。
+    fn seg(&mut self, a: (f32, f32), b: (f32, f32), thickness: f32) {
+        let a = self.xform(a);
+        let mut b = self.xform(b);
+        if self.jitter > 0.0 {
+            let dx = b.0 - a.0;
+            let dy = b.1 - a.1;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len > 0.5 {
+                let rag = self.thickness * 0.08;
+                let n = self.rng.random_range(-rag..=rag);
+                let (nx, ny) = (-dy / len * n, dx / len * n);
+                b = (b.0 + nx, b.1 + ny);
+            }
+        }
+        draw_thick_line(self.mask, self.width, self.height, a.0, a.1, b.0, b.1, thickness);
+    }
+
+    /// 笔压：沿笔画长度方向平滑变化的线宽系数。
+    ///
+    /// 真实手写几乎不存在「全程等宽」的线——起笔轻、行笔重、收笔再轻，
+    /// 再叠加一点低频起伏（写字时手劲不会突然变，但会缓慢波动）。
+    /// `taper` 为两端收细的比例（0 = 不收细，用于闭合曲线如椭圆）。
+    fn pressure(&self, t: f32, taper: f32) -> f32 {
+        if self.jitter <= f32::EPSILON {
+            return 1.0; // jitter=0 = 规整模式（直尺效果），不做笔压起伏
+        }
+        let pi = std::f32::consts::PI;
+        // 起收笔收细，中段最粗
+        let taper_f = 1.0 - taper * (1.0 - (pi * t).sin());
+        // 低频力度起伏（相位随图形/笔画不同）
+        let press = 1.0 + 0.28 * (self.phase + t * 9.4).sin();
+        (taper_f * press).max(0.55)
+    }
+
+    /// 手写直线：沿法线叠加「一次弓形 + 一次 S 形」的低频摆动，并按笔压逐小段变宽变窄。
+    ///
+    /// 用「逐小段 draw_thick_line」而不是复用 `draw_bezier_line`，是因为后者全程等宽
+    /// ——这正是手绘符号看起来像打印的根因。摆动用两个不同频率的正弦叠加，
+    /// 比单一半圆弧更像「手腕自然带出来的轻微 S 形」，不会像尺子画的直线。
     fn line(&mut self, a: (f32, f32), b: (f32, f32), thickness: f32, amp: f32) {
         let a = self.jittered(a, amp * 0.5);
         let b = self.jittered(b, amp * 0.5);
-        draw_bezier_line(
-            self.mask,
-            self.width,
-            self.height,
-            a.0,
-            a.1,
-            b.0,
-            b.1,
-            thickness,
-            amp * 0.7,
-            &mut self.rng,
-        );
+        let dx = b.0 - a.0;
+        let dy = b.1 - a.1;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 0.6 {
+            self.seg(a, a, thickness);
+            return;
+        }
+        // 长笔画摆动更明显：手写长直线肉眼可见弧度，短笔画几乎笔直
+        // 手写长线 = 「整体轻微弓起」+「若干个小波浪」：
+        // 只有弓会像香蕉，只有高频抖动又像锯齿，两者叠加才像手腕自然带出来的线。
+        let (arch_amp, wave_amp) = if self.jitter > f32::EPSILON {
+            (
+                (len * 0.004).min(4.0) + amp * 0.35,
+                amp * 0.7 + (len * 0.002).min(2.0),
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        let bow = self.noise(arch_amp);
+        let wob = self.noise(wave_amp);
+        let nx = -dy / len;
+        let ny = dx / len;
+        let pi = std::f32::consts::PI;
+
+        let steps = ((len / 9.0).ceil() as usize).clamp(3, 48);
+        let mut prev = a;
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            let base = (a.0 + dx * t, a.1 + dy * t);
+            let off = bow * (pi * t).sin() + wob * (TAU * 2.5 * t + self.phase).sin();
+            let p = (base.0 + nx * off, base.1 + ny * off);
+            let w = thickness * self.pressure(t, 0.45);
+            self.seg(prev, p, w);
+            prev = p;
+        }
     }
 
     /// 手绘直线：主笔 + 一遍整体错位的复描细线。
@@ -541,19 +654,19 @@ impl Pen<'_> {
         self.line(a, b, thickness, amp);
         if double && self.jitter > 0.0 {
             let angle = self.rng.random_range(0.0..TAU);
-            let dist = (thickness * 1.15).max(0.6);
+            let dist = (thickness * 0.38).max(0.4);
             let (sx, sy) = (angle.cos() * dist, angle.sin() * dist);
             self.line(
                 (a.0 + sx, a.1 + sy),
                 (b.0 + sx, b.1 + sy),
-                (thickness * 0.42).max(0.5),
+                (thickness * 0.38).max(0.4),
                 amp * 1.2,
             );
         }
     }
 
     /// 二次贝塞尔段：分小段用 draw_thick_line 光栅化，每段线宽独立抖动。
-    fn quad(&mut self, p0: (f32, f32), c: (f32, f32), p1: (f32, f32), thickness: f32) {
+    fn quad(&mut self, p0: (f32, f32), c: (f32, f32), p1: (f32, f32), thickness: f32, taper: f32) {
         const STEPS: usize = 8;
         let mut prev = p0;
         for i in 1..=STEPS {
@@ -561,12 +674,13 @@ impl Pen<'_> {
             let mt = 1.0 - t;
             let x = mt * mt * p0.0 + 2.0 * mt * t * c.0 + t * t * p1.0;
             let y = mt * mt * p0.1 + 2.0 * mt * t * c.1 + t * t * p1.1;
-            let th = if self.jitter > 0.0 {
-                thickness * self.rng.random_range(0.9..1.1)
+            let jitter_k = if self.jitter > 0.0 {
+                self.rng.random_range(0.95..1.05)
             } else {
-                thickness
+                1.0
             };
-            draw_thick_line(self.mask, self.width, self.height, prev.0, prev.1, x, y, th);
+            let th = thickness * self.pressure(t, taper) * jitter_k;
+            self.seg(prev, (x, y), th);
             prev = (x, y);
         }
     }
@@ -581,6 +695,7 @@ impl Pen<'_> {
         p1: (f32, f32),
         thickness: f32,
         amp: f32,
+        taper: f32,
     ) {
         const STEPS: usize = 16;
         let c1 = self.jittered(c1, amp * 0.7);
@@ -595,12 +710,13 @@ impl Pen<'_> {
             let w3 = t * t * t;
             let x = w0 * p0.0 + w1 * c1.0 + w2 * c2.0 + w3 * p1.0;
             let y = w0 * p0.1 + w1 * c1.1 + w2 * c2.1 + w3 * p1.1;
-            let th = if self.jitter > 0.0 {
-                thickness * self.rng.random_range(0.9..1.1)
+            let jitter_k = if self.jitter > 0.0 {
+                self.rng.random_range(0.95..1.05)
             } else {
-                thickness
+                1.0
             };
-            draw_thick_line(self.mask, self.width, self.height, prev.0, prev.1, x, y, th);
+            let th = thickness * self.pressure(t, taper) * jitter_k;
+            self.seg(prev, (x, y), th);
             prev = (x, y);
         }
     }
@@ -619,12 +735,31 @@ impl Pen<'_> {
             let dy = p1.1 - p0.1;
             let len = (dx * dx + dy * dy).sqrt().max(1e-3);
             // 手写线很少是绝对直的：中点沿法线随机弓一下
-            let bow = self.noise(amp * 0.7);
+            let bow_amp = if self.jitter > f32::EPSILON {
+                amp * 0.5 + (len * 0.004).min(4.0)
+            } else {
+                0.0
+            };
+            let bow = self.noise(bow_amp);
             let c = (
                 (p0.0 + p1.0) * 0.5 - dy / len * bow,
                 (p0.1 + p1.1) * 0.5 + dx / len * bow,
             );
-            self.quad(p0, c, p1, thickness);
+            // 手写转角会「过头」或「欠笔」：每段两端沿方向各延伸一小段随机量，
+            // 使转角出现交叉/缝隙，而不是数字化的完美尖角
+            // 过头量随线宽与边长自适应（手写转角交叉/缝隙），规整模式不做
+            let over_amp = if self.jitter > f32::EPSILON {
+                (thickness * 1.6).min(len * 0.05)
+            } else {
+                0.0
+            };
+            let over0 = self.noise(over_amp);
+            let over1 = self.noise(over_amp);
+            let ux = dx / len;
+            let uy = dy / len;
+            let a = (p0.0 - ux * over0, p0.1 - uy * over0);
+            let b = (p1.0 + ux * over1, p1.1 + uy * over1);
+            self.quad(a, c, b, thickness, 0.38);
         }
     }
 
@@ -634,13 +769,13 @@ impl Pen<'_> {
         self.path(points, closed, amp, thickness);
         if self.jitter > 0.0 {
             let angle = self.rng.random_range(0.0..TAU);
-            let dist = (thickness * 1.15).max(0.6);
+            let dist = (thickness * 0.38).max(0.4);
             let (sx, sy) = (angle.cos() * dist, angle.sin() * dist);
             let ghost: Vec<(f32, f32)> = points
                 .iter()
                 .map(|&(x, y)| (x + sx, y + sy))
                 .collect();
-            self.path(&ghost, closed, amp * 1.25, (thickness * 0.42).max(0.5));
+            self.path(&ghost, closed, amp * 1.25, (thickness * 0.38).max(0.4));
         }
     }
 
@@ -667,11 +802,24 @@ impl Pen<'_> {
             let k = 1.0 / half.cos().max(0.2);
             let p0 = (cx + rx * a0.cos(), cy + ry * a0.sin());
             let p1 = (cx + rx * a1.cos(), cy + ry * a1.sin());
+            let rad = (rx + ry) * 0.5;
+            let dev_amp = if self.jitter > f32::EPSILON {
+                amp * 0.6 + rad * 0.012
+            } else {
+                0.0
+            };
             let c = (
-                cx + rx * am.cos() * k + self.noise(amp * 0.6),
-                cy + ry * am.sin() * k + self.noise(amp * 0.6),
+                cx + rx * am.cos() * k + self.noise(dev_amp),
+                cy + ry * am.sin() * k + self.noise(dev_amp),
             );
-            self.quad(p0, c, p1, thickness);
+            // 闭合曲线没有起收笔，但手画的圈仍有粗细起伏：按角度做低频笔压变化，
+            // 否则椭圆会像矢量圆规画出来的。
+            let wob = if self.jitter > f32::EPSILON {
+                1.0 + 0.20 * (am * 2.0 + self.phase).sin()
+            } else {
+                1.0
+            };
+            self.quad(p0, c, p1, thickness * wob, 0.0);
         }
     }
 
@@ -735,6 +883,7 @@ impl Pen<'_> {
             cusp,
             thickness,
             amp,
+            0.30,
         );
         // 下半段：中间尖角 → 竖脊 → 收笔
         self.cubic(
@@ -744,6 +893,7 @@ impl Pen<'_> {
             bottom,
             thickness,
             amp,
+            0.30,
         );
     }
 
@@ -752,6 +902,9 @@ impl Pen<'_> {
         if points.len() < 3 {
             return;
         }
+        // 填充多边形也要套整体倾斜/位移，否则填充与描边会错位
+        let points: Vec<(f32, f32)> = points.iter().map(|&p| self.xform(p)).collect();
+        let points = &points[..];
         let min_y = points.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
         let max_y = points.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
         let y_lo = (min_y.floor() as isize).max(0);
@@ -955,5 +1108,16 @@ mod tests {
         assert_eq!(spec.with_fill([1, 2, 3]).fill, Some([1, 2, 3]));
     }
 }
+
+
+
+
+
+
+
+
+
+
+
 
 

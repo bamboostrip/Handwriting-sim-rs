@@ -399,6 +399,16 @@ export const cleanText = (s: string): string =>
 
 const PREVIEW_BG_COLORS = ["#c8d0ca", "#565b56"];
 
+/** 新建图形的默认样式：null = 自动（颜色跟随主墨色，线宽 / 抖动按纸张自适应）。 */
+export interface ShapeDefaultStyle {
+  /** "#RRGGBB"；null = 跟随主墨色 store.fontColor */
+  fill: string | null;
+  /** 线宽（背景原始像素）；null = 按纸张自适应 */
+  thickness: number | null;
+  /** 手绘抖动（背景原始像素）；null = 按线宽自适应 */
+  jitter: number | null;
+}
+
 export const store = reactive({
   // ---- 系统字体缓存 ----
   systemFonts: [] as SystemFontItem[],
@@ -455,6 +465,8 @@ export const store = reactive({
   shapes: [] as UiShape[],
   /** 图形列表/预览当前选中的索引（-1 = 未选中） */
   selectedShapeIndex: -1,
+  /** 新建图形默认样式：只作用于之后新画的图形；已画图形各自的样式存在 shape 上 */
+  shapeDefault: { fill: null, thickness: null, jitter: null } as ShapeDefaultStyle,
 
   // ---- 区域对话框（草稿模式：打开时拷贝，确定时写回）----
   pendingRect: null as [number, number, number, number] | null,
@@ -2748,6 +2760,45 @@ function defaultThickness(): number {
   return Math.min(12, Math.max(2.4, Math.round(w / 700)));
 }
 
+/** 数值夹取（lo <= v <= hi）。 */
+function clampRange(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+/**
+ * 设置「新建图形默认样式」。
+ * 传 null（或省略该键）表示恢复自动；颜色统一规范化成 #RRGGBB（小写）。
+ * 只影响之后新画的图形，不触碰已画图形；也不需要重渲染。
+ */
+export function setShapeDefault(patch: Partial<ShapeDefaultStyle>): void {
+  const d = store.shapeDefault;
+  if ("fill" in patch) {
+    d.fill = patch.fill ? normalizeHex(patch.fill) : null;
+  }
+  if ("thickness" in patch) {
+    const v = patch.thickness;
+    d.thickness = typeof v === "number" && Number.isFinite(v) ? clampRange(v, 1, 16) : null;
+  }
+  if ("jitter" in patch) {
+    const v = patch.jitter;
+    d.jitter = typeof v === "number" && Number.isFinite(v) ? clampRange(v, 0, 6) : null;
+  }
+}
+
+/**
+ * 解析新建图形实际生效的样式：
+ * - thickness：手填优先，否则按纸张宽度自适应（defaultThickness）；
+ * - jitter：手填优先，否则取 thickness × 0.9 并夹到 1.4~6 ——
+ *   纸越大线越粗、抖动越小越像尺子，这个比例能保证大纸上也有手绘感；
+ * - fill：手填颜色；null = 跟随主墨色（交给引擎用主墨色绘制）。
+ */
+export function resolveShapeDefault(): { fill: string | null; thickness: number; jitter: number } {
+  const thickness = store.shapeDefault.thickness ?? defaultThickness();
+  const jitter = store.shapeDefault.jitter ?? clampRange(thickness * 0.9, 1.4, 6);
+  const fill = store.shapeDefault.fill ? normalizeHex(store.shapeDefault.fill) : null;
+  return { fill, thickness, jitter };
+}
+
 /** 新建图形：rect = [x0,y0,x1,y1]（可反向拖拽，内部归一化为正宽高）。
  *  points 为背景原始像素的源坐标（line/arrow 用于保留方向）。
  *  返回新图形索引；宽高都 < 2px 的误触返回 -1 且不改动 store。 */
@@ -2758,6 +2809,7 @@ export function addShapeFromRect(
 ): number {
   const box = normalizedShapeBox(rect[0], rect[1], rect[2], rect[3]);
   if (box.w < 2 && box.h < 2) return -1;
+  const style = resolveShapeDefault();
   store.shapes.push({
     kind,
     page: store.pageIndex + 1,
@@ -2766,10 +2818,10 @@ export function addShapeFromRect(
     w: box.w,
     h: box.h,
     points: points?.map(([px, py]) => [px, py] as [number, number]),
-    thickness: defaultThickness(),
-    jitter: 1.4,
+    thickness: style.thickness,
+    jitter: style.jitter,
     filled: false,
-    fill: null,
+    fill: style.fill,
     seed: randomShapeSeed(),
   });
   const index = store.shapes.length - 1;
