@@ -571,6 +571,9 @@ function shapeHitAt(px: number, py: number, tol = 8): number {
    └──点空白 / Esc── [selected] ◄──命中图形/手柄── [adjusting] ◄──拖手柄──┘
 ```
 
+> 给非前端读者看的位置示意图（入口按钮放在哪、手势长什么样、右栏分组长什么样）：
+> `docs/screenshots/issue6-shape-ux-mock.png`；对应文字版说明见 `docs/05-symbol-shapes.md` §5.9。
+
 ---
 
 ## 4. 交互设计建议（5 条操作流）
