@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::shapes::ShapeSpec;
+
 /// 段落对齐方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Align {
@@ -449,6 +451,12 @@ pub enum ParamsError {
     RegionFontMissing { index: usize, path: String },
     #[error("文字区域 {index} 的字号不能为负")]
     RegionFontSize { index: usize },
+    #[error("图形 {index} 的页码必须从 1 开始")]
+    ShapePage { index: usize },
+    #[error("图形 {index} 的坐标、尺寸、线宽或抖动必须是有限值")]
+    ShapeGeometry { index: usize },
+    #[error("图形 {index} 的线宽不能为负")]
+    ShapeThickness { index: usize },
     #[error("角色 {index} 的字体文件不存在：{path}")]
     RoleFontMissing { index: usize, path: String },
     #[error("角色 {index} 的错字率必须在 0~1 之间：{value}")]
@@ -496,6 +504,9 @@ pub struct HandwritingParams {
     /// 非空时在框选矩形内渲染区域文字（可与主文字并存）。
     #[serde(default)]
     pub regions: Vec<TextRegion>,
+    /// 符号图形标注（页面原始像素坐标；与 regions 同级，不进预设）。
+    #[serde(default)]
+    pub shapes: Vec<ShapeSpec>,
     /// 多角色定义（用于不同段落或 TextRun 绑定不同角色）。
     #[serde(default)]
     pub roles: Vec<HandwritingRole>,
@@ -547,6 +558,7 @@ impl Default for HandwritingParams {
             text: String::new(),
             paragraphs: Vec::new(),
             regions: Vec::new(),
+            shapes: Vec::new(),
             roles: Vec::new(),
             fill: [0, 0, 0],
             font_size: 36.0,
@@ -670,6 +682,24 @@ impl HandwritingParams {
             }
             if region.font_size < 0 {
                 return Err(ParamsError::RegionFontSize { index });
+            }
+        }
+        // 图形标注：不要求 w/h 为正（内部归一化负宽高，允许线段某一边为 0），
+        // 但坐标必须有限（进入光栅化 `as isize` 前不能是 NaN/inf），页码 1 基。
+        for (i, shape) in self.shapes.iter().enumerate() {
+            let index = i + 1;
+            if shape.page < 1 {
+                return Err(ParamsError::ShapePage { index });
+            }
+            let finite = [shape.x, shape.y, shape.w, shape.h, shape.thickness, shape.jitter]
+                .iter()
+                .all(|v| v.is_finite())
+                && shape.points.iter().flatten().all(|v| v.is_finite());
+            if !finite {
+                return Err(ParamsError::ShapeGeometry { index });
+            }
+            if shape.thickness < 0.0 {
+                return Err(ParamsError::ShapeThickness { index });
             }
         }
         Ok(())

@@ -304,6 +304,18 @@ function restartOnboarding(): void {
                   软件启动时自动检查新版本（可在「关于」中关闭）；也可随时在<strong>「关于」→「检查更新」</strong>手动检查。更新包下载后自动完成覆盖升级并重启，无需手动解压替换。
                 </div>
               </div>
+
+              <div class="feature-section">
+                <div class="section-title">6. 图形标注：圈注 / 框选 / 连线 / 括号归组</div>
+                <div class="guide-text">
+                  <ul class="guide-list">
+                    <li><strong>怎么画</strong>：点预览区下方的<strong>「✎ 标注」</strong>进入标注模式，在旁边的下拉里选图元（矩形 / 椭圆 / 三角 / 直线 / 箭头 / 大括号 / 方括号 / 勾 / 下划线），然后在预览图上<strong>按住拖一下</strong>，松手即生成并自动选中——和「框选文字」是同一种手势。</li>
+                    <li><strong>怎么改</strong>：关闭标注模式后单击图形可选中（蓝虚线框 + 8 个手柄），拖手柄改大小、拖框内整体移动；右栏<strong>「④ 图形标注」</strong>里可调类型、线宽、抖动、颜色（可「跟随主墨色」或单独指定）、填充与页码。</li>
+                    <li><strong>框住一段文字</strong>：先选中一个文字区域，再到「④ 图形标注」点<strong>「＋ 给文字区域加框」</strong>，直接沿该区域生成方框，不用手动对齐。</li>
+                    <li><strong>风格</strong>：图形按手绘风格渲染（带弧度抖动与复描），默认空心、盖在文字之上；<code>Delete</code> 删除选中图形，<code>Esc</code> 退出标注模式。<NTag size="small" type="warning" style="margin-top: 6px">⚠️ 图形与正文、文字区域一样属于当前会话内容，不随预设保存</NTag></li>
+                  </ul>
+                </div>
+              </div>
             </div>
           </NScrollbar>
         </NTabPane>

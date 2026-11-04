@@ -8,7 +8,16 @@ import { nextTick, reactive, watch } from "vue";
 import { createDiscreteApi } from "naive-ui";
 import { useDebounceFn } from "@vueuse/core";
 import { api, assetUrl, dialogs } from "./api";
-import type { SystemFontItem, UiHandwritingRole, UiParams, UiRegion, UiTextRun, UpdateInfo } from "./types";
+import type {
+  SystemFontItem,
+  UiHandwritingRole,
+  UiParams,
+  UiRegion,
+  UiShape,
+  UiShapeKind,
+  UiTextRun,
+  UpdateInfo,
+} from "./types";
 
 /** 当前版本号与开源仓库地址 */
 export const APP_VERSION = "0.6.0";
@@ -76,6 +85,8 @@ export type PanelCollapseState = {
   style: boolean;
   layout: boolean;
   regions: boolean;
+  /** 图形标注分组（旧记录可能没有该键，缺省按展开处理） */
+  shapes?: boolean;
 };
 
 export function loadPanelCollapseState(): PanelCollapseState | null {
@@ -88,6 +99,8 @@ export function loadPanelCollapseState(): PanelCollapseState | null {
       style: v.style ?? true,
       layout: v.layout ?? true,
       regions: v.regions ?? true,
+      // 图形标注是本版新增分组：旧记录没有该键时默认展开，让用户一眼看到新入口
+      shapes: v.shapes ?? false,
     };
   } catch {
     return null;
@@ -433,6 +446,16 @@ export const store = reactive({
   highlightIndex: -1,
   selectedRegionIndex: -1,
 
+  // ---- 图形标注（坐标与 regions 一致：背景原始像素）----
+  /** 图形标注模式（与 regionMode 互斥） */
+  shapeMode: false,
+  /** 当前要画的图元，默认矩形 */
+  shapeKind: "rect" as UiShapeKind,
+  /** 全量图形（跨页；数组顺序 = 绘制顺序，后画的在上层） */
+  shapes: [] as UiShape[],
+  /** 图形列表/预览当前选中的索引（-1 = 未选中） */
+  selectedShapeIndex: -1,
+
   // ---- 区域对话框（草稿模式：打开时拷贝，确定时写回）----
   pendingRect: null as [number, number, number, number] | null,
   dialogOpen: false,
@@ -627,7 +650,8 @@ export function hasContent(): boolean {
   return (
     hasTextContent() ||
     (store.docPages?.length ?? 0) > 0 ||
-    store.regions.some((r) => r.text.trim() !== "")
+    store.regions.some((r) => r.text.trim() !== "") ||
+    store.shapes.length > 0
   );
 }
 
@@ -636,7 +660,7 @@ export type WorkflowMode = "empty" | "text" | "document";
 /** 当前处于哪种工作流：空 / 纯文字 / 文档填空。 */
 export function workflowMode(): WorkflowMode {
   if ((store.docPages?.length ?? 0) > 0) return "document";
-  return hasTextContent() || store.regions.length > 0 ? "text" : "empty";
+  return hasTextContent() || store.regions.length > 0 || store.shapes.length > 0 ? "text" : "empty";
 }
 
 /** 首启期间 App 跳过了更新检查；引导结束后补一次，避免新用户整场都不检查更新。 */
@@ -867,6 +891,10 @@ export async function loadSample(): Promise<void> {
   store.editingIndex = -1;
   store.highlightIndex = -1;
   store.selectedRegionIndex = -1;
+  // 示例会换纸张：旧纸上的图形坐标随之失效，一并清空并退出标注模式
+  store.shapes.splice(0);
+  store.shapeMode = false;
+  store.selectedShapeIndex = -1;
   store.docPages = null;
   store.docStatus = "";
   setParagraphs(SAMPLE_PARAGRAPHS.map((text, i) => newPara(text, 0, i === 0 ? 0 : 2)));
@@ -900,6 +928,10 @@ export async function handleOnboardingTask(task: "text" | "document" | "sample")
       store.editingIndex = -1;
       store.highlightIndex = -1;
       store.selectedRegionIndex = -1;
+      // 退出文档模式会换回普通纸张，图形坐标同样失效
+      store.shapes.splice(0);
+      store.shapeMode = false;
+      store.selectedShapeIndex = -1;
       store.backgroundPath = "";
       await ensureUsableBackground();
     }
@@ -987,6 +1019,11 @@ export function buildParams(): UiParams {
     text,
     paragraphs: outParas,
     regions: store.regions.map((r) => ({ ...r })),
+    // 深拷贝 points：不能把响应式引用直接递给 IPC（序列化时会读到 Vue proxy）
+    shapes: store.shapes.map((s) => ({
+      ...s,
+      points: s.points?.map((p): [number, number] => [p[0], p[1]]),
+    })),
     roles: store.roles.map((r) => ({ ...r })),
     endChars: store.endChars,
     startChars: store.startChars,
@@ -1049,11 +1086,18 @@ export const scheduleRender = (): void => void debouncedRender();
 export const triggerPreview = scheduleRender;
 
 export function prevPage(): void {
-  if (store.pageIndex > 0) store.pageIndex -= 1;
+  if (store.pageIndex > 0) {
+    store.pageIndex -= 1;
+    // 图形按页归属：切页后清选中，避免属性面板改到别的页上的图形
+    store.selectedShapeIndex = -1;
+  }
 }
 
 export function nextPage(): void {
-  if (store.pageIndex + 1 < store.previewPages.length) store.pageIndex += 1;
+  if (store.pageIndex + 1 < store.previewPages.length) {
+    store.pageIndex += 1;
+    store.selectedShapeIndex = -1;
+  }
 }
 
 export function togglePreviewBg(): void {
@@ -1316,11 +1360,12 @@ export async function importDocx(): Promise<void> {
   if (!p) return;
   await ensureUsableFont();
 
-  // Word 正文会覆盖当前内容：文档/区域/已输入文字任一存在时都先确认
+  // Word 正文会覆盖当前内容：文档/区域/图形/已输入文字任一存在时都先确认
   const hadDoc = (store.docPages?.length ?? 0) > 0;
   const hadRegions = store.regions.length > 0;
+  const hadShapes = store.shapes.length > 0;
   const hadText = hasTextContent();
-  if (hadDoc || hadRegions || hadText) {
+  if (hadDoc || hadRegions || hadShapes || hadText) {
     const ok = await confirmReplaceContent();
     if (!ok) return;
   }
@@ -1475,11 +1520,15 @@ export async function importDocx(): Promise<void> {
       store.backgroundPath = "";
       await ensureUsableBackground();
     }
-    if (hadRegions) {
+    if (hadRegions || hadShapes) {
       store.regions.splice(0);
       store.editingIndex = -1;
       store.highlightIndex = -1;
       store.selectedRegionIndex = -1;
+      // 导入的是新版式：旧纸上的图形坐标失效，一并清空并退出标注模式
+      store.shapes.splice(0);
+      store.shapeMode = false;
+      store.selectedShapeIndex = -1;
     }
 
     focusPara(store.paragraphs[0].id, 0);
@@ -1516,6 +1565,10 @@ export async function importDocument(): Promise<void> {
     store.editingIndex = -1;
     store.highlightIndex = -1;
     store.selectedRegionIndex = -1;
+    // 图形与区域共用同一套背景坐标，换底图后一并清空并退出标注模式
+    store.shapes.splice(0);
+    store.shapeMode = false;
+    store.selectedShapeIndex = -1;
     store.docPages = res.pages; // 先写 docPages 再切背景，避免 syncDocState 误清
     store.backgroundPath = res.pages[0];
     loadBgDimensions(res.pages[0]);
@@ -1641,6 +1694,10 @@ export function applyPreset(
   store.editingIndex = -1;
   store.highlightIndex = -1;
   store.selectedRegionIndex = -1;
+  // 图形与区域共用背景坐标：换纸张后同样失效，清空并退出图形标注模式
+  store.shapes.splice(0);
+  store.shapeMode = false;
+  store.selectedShapeIndex = -1;
   store.currentPresetPath = meta?.path ?? "";
   store.currentPresetName = meta?.name ?? "";
   store.presetDirty = false;
@@ -2137,7 +2194,12 @@ export function clampRect(
 export function setRegionMode(on: boolean): void {
   store.regionMode = on;
   // 对齐 Python 版 set_region_mode：进入框选模式时结束进行中的区域调整
-  if (on) store.editingIndex = -1;
+  if (on) {
+    store.editingIndex = -1;
+    // 与图形标注互斥：进入框选文字时退出图形模式并清空图形选中
+    store.shapeMode = false;
+    store.selectedShapeIndex = -1;
+  }
 }
 
 /** 区域对话框草稿默认值。 */
@@ -2379,7 +2441,268 @@ export function clearRegions(): void {
   store.editingIndex = -1;
   store.highlightIndex = -1;
   store.selectedRegionIndex = -1;
+  // 区域与图形共用背景坐标：清空区域时同步清空图形（与各重置入口保持一致）
+  store.shapes.splice(0);
+  store.shapeMode = false;
+  store.selectedShapeIndex = -1;
   scheduleRender();
+}
+
+// ---------------------------------------------------------------- 图形标注（背景原始像素坐标）
+// 坐标系与 UiRegion 完全一致：图形几何一律存背景原始像素，预览缩放由 PreviewPane 的 factor 负责。
+
+/** 图形类型的中文名称（列表 / 属性面板 / 下拉框共用）。 */
+export const SHAPE_KIND_LABELS: Record<UiShapeKind, string> = {
+  line: "直线",
+  arrow: "箭头",
+  polyline: "折线",
+  rect: "矩形",
+  ellipse: "椭圆",
+  triangle: "三角形",
+  brace_left: "左大括号",
+  brace_right: "右大括号",
+  bracket_left: "左方括号",
+  bracket_right: "右方括号",
+  check: "勾",
+  underline: "下划线",
+};
+
+/** 细长图形：命中测试按「点到线段距离」判定；其余图形按包围盒判定。 */
+const LINE_LIKE_SHAPE_KINDS: ReadonlySet<UiShapeKind> = new Set<UiShapeKind>([
+  "line",
+  "arrow",
+  "underline",
+]);
+
+/** 把 [x0,y0,x1,y1] 归一化为左上角 + 正宽高（用户可从任意方向拖拽）。 */
+function normalizedShapeBox(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+): { x: number; y: number; w: number; h: number } {
+  return {
+    x: Math.min(x0, x1),
+    y: Math.min(y0, y1),
+    w: Math.abs(x1 - x0),
+    h: Math.abs(y1 - y0),
+  };
+}
+
+/** 生成随机 uint32 种子：同一图形的手绘抖动形态由它固定。 */
+function randomShapeSeed(): number {
+  return Math.floor(Math.random() * 2 ** 32);
+}
+
+/** 点到线段的最短距离（背景原始像素）。 */
+function pointSegmentDistance(
+  px: number,
+  py: number,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+): number {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq <= 1e-9) return Math.hypot(px - x0, py - y0);
+  const t = Math.max(0, Math.min(1, ((px - x0) * dx + (py - y0) * dy) / lenSq));
+  return Math.hypot(px - (x0 + t * dx), py - (y0 + t * dy));
+}
+
+/** 线/箭头/下划线的两个端点：优先 points 前两点，否则用包围盒对角线（与 core 一致）。 */
+function shapeEndpoints(s: UiShape): [[number, number], [number, number]] {
+  const pts = s.points;
+  if (pts && pts.length >= 2) {
+    return [
+      [pts[0][0], pts[0][1]],
+      [pts[1][0], pts[1][1]],
+    ];
+  }
+  return [
+    [s.x, s.y],
+    [s.x + s.w, s.y + s.h],
+  ];
+}
+
+/** 进入/退出图形标注模式（与 regionMode 互斥，两种模式都清空选中）。 */
+export function setShapeMode(on: boolean): void {
+  store.shapeMode = on;
+  if (on) {
+    // 与框选文字互斥：进入图形标注时退出区域模式及其调整态
+    store.regionMode = false;
+    store.editingIndex = -1;
+  }
+  store.selectedShapeIndex = -1;
+}
+
+/** 设置当前要画的图元类型。 */
+export function setShapeKind(k: UiShapeKind): void {
+  store.shapeKind = k;
+}
+
+/** 当前页的图形命中测试：返回图形索引（-1 = 未命中）。
+ *  数组顺序 = 绘制顺序，从后往前遍历（后画的在上层，先命中）。 */
+export function shapeAtPoint(srcX: number, srcY: number): number {
+  for (let i = store.shapes.length - 1; i >= 0; i--) {
+    const s = store.shapes[i];
+    // 图形按页归属：只命中当前页，避免选中看不见的图形
+    if (s.page !== store.pageIndex + 1) continue;
+    if (LINE_LIKE_SHAPE_KINDS.has(s.kind)) {
+      // 细线按点到线段距离判定；线宽越大容差越宽
+      const [[x0, y0], [x1, y1]] = shapeEndpoints(s);
+      const tol = Math.max(6, s.thickness * 2);
+      if (pointSegmentDistance(srcX, srcY, x0, y0, x1, y1) <= tol) return i;
+      continue;
+    }
+    // 其余图形（含空心矩形/椭圆）简单按包围盒外扩 3px 判定
+    const box = normalizedShapeBox(s.x, s.y, s.x + s.w, s.y + s.h);
+    if (
+      srcX >= box.x - 3 &&
+      srcX <= box.x + box.w + 3 &&
+      srcY >= box.y - 3 &&
+      srcY <= box.y + box.h + 3
+    ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** 新建图形：rect = [x0,y0,x1,y1]（可反向拖拽，内部归一化为正宽高）。
+ *  points 为背景原始像素的源坐标（line/arrow 用于保留方向）。
+ *  返回新图形索引；宽高都 < 2px 的误触返回 -1 且不改动 store。 */
+export function addShapeFromRect(
+  kind: UiShapeKind,
+  rect: [number, number, number, number],
+  points?: [number, number][],
+): number {
+  const box = normalizedShapeBox(rect[0], rect[1], rect[2], rect[3]);
+  if (box.w < 2 && box.h < 2) return -1;
+  store.shapes.push({
+    kind,
+    page: store.pageIndex + 1,
+    x: box.x,
+    y: box.y,
+    w: box.w,
+    h: box.h,
+    points: points?.map(([px, py]) => [px, py] as [number, number]),
+    thickness: 2.4,
+    jitter: 1.4,
+    filled: false,
+    fill: null,
+    seed: randomShapeSeed(),
+  });
+  const index = store.shapes.length - 1;
+  // 新建后自动选中，方便立刻调属性
+  selectShape(index);
+  scheduleRender();
+  return index;
+}
+
+/** 用文字区域的外接矩形一键生成「矩形」标注（跟随区域所在页，不是当前页）。 */
+export function addShapeAroundRegion(index: number): void {
+  const r = store.regions[index];
+  if (!r) return;
+  if (![r.x, r.y, r.w, r.h].every((v) => Number.isFinite(v))) return;
+  // 空区域（识别失败残留）或完全落在纸张外时跳过
+  if (r.w < 2 && r.h < 2) return;
+  if (store.bgNatW > 0 && store.bgNatH > 0) {
+    const outside =
+      r.x >= store.bgNatW || r.y >= store.bgNatH || r.x + r.w <= 0 || r.y + r.h <= 0;
+    if (outside) return;
+  }
+  const newIndex = addShapeFromRect("rect", [r.x, r.y, r.x + r.w, r.y + r.h]);
+  if (newIndex < 0) return;
+  // 区域可能在别的页：图形跟着区域走，避免框到错误页面
+  store.shapes[newIndex].page = Math.max(1, Math.round(num(r.page, 1)));
+}
+
+/** 写回图形几何（rect 已换算成背景原始像素）。
+ *  points 按新旧包围盒比例重算：p' = 新原点 + (p - 旧原点) * 新尺寸 / 旧尺寸，
+ *  拖动/缩放后线、箭头的方向与相对位置不丢。 */
+export function updateShapeGeometry(
+  index: number,
+  rect: [number, number, number, number],
+): void {
+  const s = store.shapes[index];
+  if (!s) return;
+  const next = normalizedShapeBox(rect[0], rect[1], rect[2], rect[3]);
+  const old = normalizedShapeBox(s.x, s.y, s.x + s.w, s.y + s.h);
+  // 旧宽高为 0（垂直线/水平线）时用 1 兜底，避免除零
+  const sx = next.w / (old.w > 0 ? old.w : 1);
+  const sy = next.h / (old.h > 0 ? old.h : 1);
+  if (s.points) {
+    s.points = s.points.map(
+      ([px, py]) => [next.x + (px - old.x) * sx, next.y + (py - old.y) * sy] as [number, number],
+    );
+  }
+  s.x = next.x;
+  s.y = next.y;
+  s.w = next.w;
+  s.h = next.h;
+  scheduleRender();
+}
+
+/** 修改图形样式（属性面板）：页码变化时同步切到该页，方便在预览中确认。 */
+export function updateShapeStyle(index: number, patch: Partial<UiShape>): void {
+  const s = store.shapes[index];
+  if (!s) return;
+  const next: Partial<UiShape> = { ...patch };
+  // 深层拷贝 points，避免属性面板的草稿数组被直接挂进 store
+  if (next.points) next.points = next.points.map(([px, py]) => [px, py] as [number, number]);
+  Object.assign(s, next);
+  if (typeof patch.page === "number" && Number.isFinite(patch.page)) {
+    s.page = Math.max(1, Math.round(patch.page));
+    // 改页码 = 把图形移到该页并立刻切过去，方便在预览里确认
+    store.pageIndex = s.page - 1;
+  }
+  scheduleRender();
+}
+
+/** 选中图形（-1 / 越界 = 清空选中）。 */
+export function selectShape(index: number): void {
+  store.selectedShapeIndex = index >= 0 && index < store.shapes.length ? index : -1;
+}
+
+/** 清空图形选中（点空白 / 切页 / 退出模式时调用）。 */
+export function clearShapeSelection(): void {
+  store.selectedShapeIndex = -1;
+}
+
+/** 删除单个图形；选中索引随数组收缩修正。 */
+export function deleteShape(index: number): void {
+  if (index < 0 || index >= store.shapes.length) return;
+  store.shapes.splice(index, 1);
+  if (store.selectedShapeIndex === index) store.selectedShapeIndex = -1;
+  else if (store.selectedShapeIndex > index) store.selectedShapeIndex -= 1;
+  scheduleRender();
+}
+
+/** 清空全部图形（保留图形标注模式本身）。 */
+export function clearShapes(): void {
+  store.shapes.splice(0);
+  store.selectedShapeIndex = -1;
+  scheduleRender();
+}
+
+/** 叠放顺序上移/下移（数组顺序 = 绘制顺序，后画的在上层；越界直接返回）。 */
+export function moveShapeOrder(index: number, dir: -1 | 1): void {
+  const to = index + dir;
+  if (index < 0 || index >= store.shapes.length || to < 0 || to >= store.shapes.length) return;
+  const tmp = store.shapes[index];
+  store.shapes[index] = store.shapes[to];
+  store.shapes[to] = tmp;
+  // 选中项跟着图形走，避免上下移后选到隔壁
+  if (store.selectedShapeIndex === index) store.selectedShapeIndex = to;
+  else if (store.selectedShapeIndex === to) store.selectedShapeIndex = index;
+  scheduleRender();
+}
+
+/** 图形列表文案，如 "1. 矩形 第1页 2.4px"。 */
+export function shapeLabel(s: UiShape, i: number): string {
+  return `${i + 1}. ${SHAPE_KIND_LABELS[s.kind] || "图形"} 第${s.page}页 ${s.thickness.toFixed(1)}px`;
 }
 
 // ---------------------------------------------------------------- 关于与更新

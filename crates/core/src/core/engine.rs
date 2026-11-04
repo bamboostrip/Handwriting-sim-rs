@@ -6,6 +6,7 @@
 //! 对齐/缩进/右对齐/跨页，见 layout::layout_paragraphs）。
 //! 预览对超大背景（宽 > `PREVIEW_MAX_WIDTH`）做降采样并等比缩放空间参数，导出始终全分辨率。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ use crate::core::font::FontFace;
 use crate::core::layout;
 use crate::core::models::{Align, HandwritingParams, ParamsError, Paragraph, TextRegion};
 use crate::core::perturb;
+use crate::core::shapes;
 
 /// 引擎错误。
 #[derive(Debug, thiserror::Error)]
@@ -164,6 +166,23 @@ fn scaled_params_for(params: &HandwritingParams, src_w: u32) -> HandwritingParam
             if let Some(m) = r.margin_left.as_mut() { *m *= scale; }
             if let Some(m) = r.margin_right.as_mut() { *m *= scale; }
         }
+    // 图形标注几何同样是空间量：预览降采样必须等比缩放 x/y/w/h/thickness/jitter
+    // 与显式顶点，否则大背景预览中图形位置/粗细与导出不一致。
+    // `page/fill/filled/seed` 与坐标量纲无关，保持原值。
+    for s in scaled.shapes.iter_mut() {
+        s.x *= scale;
+        s.y *= scale;
+        s.w *= scale;
+        s.h *= scale;
+        // 线宽缩后可能 <1px，按 1px 兜底，否则细线在预览中消失
+        // （与字号同样的最小可见性处理，见上方 font_size.max(1.0)）
+        s.thickness = (s.thickness * scale).max(1.0);
+        s.jitter *= scale;
+        for p in s.points.iter_mut() {
+            p[0] *= scale;
+            p[1] *= scale;
+        }
+    }
     scaled
 }
 
@@ -773,11 +792,20 @@ fn generate_pages_with(
         });
     }
 
-    // ---- 总页数 = 主文字 / 背景页数 / 各区域所在页的最大值（至少 1 页） ----
+    // ---- 总页数 = 主文字 / 背景页数 / 各区域或图形所在页的最大值（至少 1 页） ----
     let n_pages = main_pages
         .len()
         .max(params.background_pages.len())
         .max(entries.iter().map(|e| e.target_page + 1).max().unwrap_or(0))
+        // 图形所在页必须计入，否则「只有图形、没有文字」的末页会被丢掉
+        .max(
+            params
+                .shapes
+                .iter()
+                .map(|s| s.page.max(1) as usize)
+                .max()
+                .unwrap_or(0),
+        )
         .max(1);
 
     let perturb_rng = &mut StdRng::seed_from_u64(DefaultEngine::perturb_seed(seed));
@@ -812,6 +840,45 @@ fn generate_pages_with(
                         width,
                         height,
                         &layer.style,
+                        perturb_rng,
+                        &mut canvas,
+                    );
+                }
+            }
+        }
+        // 图形标注最后合成（批注语义：默认压在文字之上）。
+        // 按解析后的墨色分组：同色图形合进一个页面级掩码，把每页
+        // `label_strokes` 的整页 BFS 次数压到颜色数（而不是图形数）。
+        // 图形自身已在几何阶段注入手绘抖动，合成层 σ 取 0 →
+        // `PerturbStyle::is_printed()` 为真，走 `draw_printed_mask` 直写：
+        // 不对整条线做旋转/平移，也不消耗 `perturb_rng`，保持既有文字层
+        // 的同 seed 可复现性（预览=导出）。
+        if !params.shapes.is_empty() {
+            let mut shape_masks: HashMap<[u8; 3], Vec<bool>> = HashMap::new();
+            // HashMap 迭代顺序不稳定；按颜色首次出现顺序绘制，
+            // 保证叠放关系确定、同 seed 输出逐像素可复现。
+            let mut color_order: Vec<[u8; 3]> = Vec::new();
+            for shape in &params.shapes {
+                if shape.page.max(1) as usize - 1 != page_index {
+                    continue;
+                }
+                let color = shape.fill.unwrap_or(params.fill);
+                let mask = shape_masks.entry(color).or_insert_with(|| {
+                    color_order.push(color);
+                    vec![false; width * height]
+                });
+                shapes::rasterize_shape(shape, mask, width, height, 0, 0);
+            }
+            for color in color_order {
+                let Some(mask) = shape_masks.get(&color) else {
+                    continue;
+                };
+                if mask.iter().any(|&b| b) {
+                    perturb::perturb_styled_layer_into(
+                        mask,
+                        width,
+                        height,
+                        &layout::PerturbStyle::new(color, false, 0.0, 0.0, 0.0),
                         perturb_rng,
                         &mut canvas,
                     );

@@ -17,11 +17,20 @@
 //! - Esc 或点击编辑框外空白退出调整态；调整几何未变化时不写回
 //! - 新建/调整阈值：拖动 <4 显示像素视为误触；resize 增量 <4 显示像素忽略
 //!
+//! 图形标注（issue #6，与「框选文字」互斥）：
+//! - 「✎ 标注」进入后十字光标拖拽起稿：虚线框实时预览，线/箭头额外用 SVG 画预览线 + 箭头头；
+//!   松手把显示坐标 /factor 换回背景原始像素调 addShapeFromRect；线/箭头传起止点 points 保留方向；
+//!   显示位移 <4px 视为误触不创建
+//! - 非标注模式下指针优先级：已选图形 8 向手柄/内部 > shapeAtPoint 命中图形 > 原有区域逻辑 > 平移；
+//!   拖内部整体移动、拖手柄缩放，松手才 updateShapeGeometry（显示增量 <4px 忽略）
+//! - 选中图形显示蓝色虚线包围框 + 8 个白色手柄；点空白 / Esc 清选中。
+//!   新增分支全部以 shapeMode / 图形选中为前置条件，区域框选与缩放平移路径零回归。
+//!
 //! 坐标链：区域存背景原始像素 → ×factor(=drawW/bgNatW) → 显示像素。
 //! 缩放/平移只改变 drawW（即 factor）与图纸位置，区域坐标语义与写回逻辑完全不变。
 
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { NButton, NTooltip } from "naive-ui";
+import { NButton, NSelect, NTooltip } from "naive-ui";
 import QuickStart from "./QuickStart.vue";
 import ErrorBanner from "./ErrorBanner.vue";
 import {
@@ -38,8 +47,11 @@ import {
   type ViewState,
 } from "../viewport";
 import {
-  clampRect,
+  SHAPE_KIND_LABELS,
+  addShapeFromRect,
   cancelRegionEdit,
+  clampRect,
+  clearShapeSelection,
   doRender,
   hasContent,
   jumpToRegion,
@@ -47,11 +59,17 @@ import {
   openEditRegionDialog,
   openNewRegionDialog,
   prevPage,
+  selectShape,
   setRegionMode,
+  setShapeKind,
+  setShapeMode,
+  shapeAtPoint,
   store,
   togglePreviewBg,
   updateRegionGeometry,
+  updateShapeGeometry,
 } from "../store";
+import type { UiShapeKind } from "../types";
 
 // ---- 容器尺寸 ----
 const boxEl = ref<HTMLDivElement | null>(null);
@@ -206,10 +224,13 @@ function cur(): { x: number; y: number; w: number; h: number } {
   return editBox.value ?? { x: 0, y: 0, w: 0, h: 0 };
 }
 
-/** 命中部位判定（8px 容差，对齐 _hit_zone） */
-function zoneAt(px: number, py: number): Zone {
-  if (!hasEdit.value) return "outside";
-  const e = cur();
+/** 8 向命中判定（8px 容差，对齐 _hit_zone）：区域调整与图形调整共用同一套几何。
+ *  tl/tr/bl/br = 四角缩放，l/r/t/b = 四边缩放，move = 内部整体拖动。 */
+function zoneInBox(
+  e: { x: number; y: number; w: number; h: number },
+  px: number,
+  py: number,
+): Zone {
   const m = 8;
   const nearL = Math.abs(px - e.x) <= m;
   const nearR = Math.abs(px - (e.x + e.w)) <= m;
@@ -227,6 +248,12 @@ function zoneAt(px: number, py: number): Zone {
   if (nearB && inH) return "b";
   if (inH && inV) return "move";
   return "outside";
+}
+
+/** 命中部位判定（8px 容差，对齐 _hit_zone） */
+function zoneAt(px: number, py: number): Zone {
+  if (!hasEdit.value) return "outside";
+  return zoneInBox(cur(), px, py);
 }
 
 const ZONE_CURSORS: Record<string, string> = {
@@ -259,14 +286,115 @@ function findRegionAt(px: number, py: number): number {
   return -1;
 }
 
+// ---- 图形标注：显示几何 / 命中 / 选中态 ----
+/** 底部下拉的可选图元（11 项，排除 polyline；顺序即下拉顺序） */
+const SHAPE_KIND_OPTIONS: { label: string; value: UiShapeKind }[] = (
+  [
+    "rect",
+    "ellipse",
+    "triangle",
+    "line",
+    "arrow",
+    "brace_left",
+    "brace_right",
+    "bracket_left",
+    "bracket_right",
+    "check",
+    "underline",
+  ] as UiShapeKind[]
+).map((k) => ({ label: SHAPE_KIND_LABELS[k], value: k }));
+
+function onShapeKindChange(v: string): void {
+  setShapeKind(v as UiShapeKind);
+}
+
+/** 当前选中的图形（仅当前页才画包围框，避免跨页选中出现幽灵框） */
+const selectedShape = computed(() => {
+  const i = store.selectedShapeIndex;
+  if (i < 0 || i >= store.shapes.length) return null;
+  const s = store.shapes[i];
+  return s.page === store.pageIndex + 1 ? s : null;
+});
+
+/** 选中图形的静止包围框（显示像素）；图形存背景原始像素，×factor 得显示像素 */
+const shapeBoxBase = computed(() => {
+  const s = selectedShape.value;
+  if (!s) return null;
+  const f = factor.value;
+  return { x: s.x * f, y: s.y * f, w: s.w * f, h: s.h * f };
+});
+
+/** 图形调整态（与区域调整态并行独立，互不影响区域路径） */
+const shapeAdjusting = ref(false);
+const shapeZone = ref<Zone>("outside");
+const shapeAdjustIndex = ref(-1);
+const shapePress = reactive({ x: 0, y: 0 });
+const shapeStartBox = reactive({ x: 0, y: 0, w: 0, h: 0 });
+/** 图形调整中的实时几何（显示像素）；静止时用 shapeBoxBase */
+const shapeRb = reactive({ x: 0, y: 0, w: 0, h: 0 });
+const shapeBox = computed(() => (shapeAdjusting.value ? { ...shapeRb } : shapeBoxBase.value));
+
+/** 新建图形草稿（显示像素；保留拖拽方向，线/箭头靠它传 points + 画预览） */
+const shapeDraftLive = ref(false);
+const shapeDraft = reactive({ x0: 0, y0: 0, x1: 0, y1: 0 });
+/** 草稿虚线框（归一化）：矩形/椭圆/三角/括号/勾/下划线只用它，线/箭头额外叠 SVG */
+const shapeDraftBox = computed(() => ({
+  x: Math.min(shapeDraft.x0, shapeDraft.x1),
+  y: Math.min(shapeDraft.y0, shapeDraft.y1),
+  w: Math.abs(shapeDraft.x1 - shapeDraft.x0),
+  h: Math.abs(shapeDraft.y1 - shapeDraft.y0),
+}));
+const shapeDraftIsLine = computed(
+  () => store.shapeKind === "line" || store.shapeKind === "arrow",
+);
+
+/** 线/箭头草稿的箭头头（显示像素三角形顶点串），方向跟随当前拖拽方向 */
+const shapeDraftArrowHead = computed(() => {
+  const { x0, y0, x1, y1 } = shapeDraft;
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len;
+  const uy = dy / len;
+  const size = 11;
+  const bx = x1 - ux * size;
+  const by = y1 - uy * size;
+  const px = -uy * size * 0.5;
+  const py = ux * size * 0.5;
+  return `${x1},${y1} ${bx + px},${by + py} ${bx - px},${by - py}`;
+});
+
+/** 已选图形的 8 向命中（与区域调整共用 zoneInBox；用静止包围盒判定） */
+function shapeZoneAt(px: number, py: number): Zone {
+  const box = shapeBoxBase.value;
+  if (!box) return "outside";
+  return zoneInBox(box, px, py);
+}
+
+/** 显示坐标 → 背景原始像素（图形 API 一律收源坐标） */
+function displayToSrc(px: number, py: number): [number, number] {
+  const f = factor.value > 0 ? factor.value : 1;
+  return [px / f, py / f];
+}
+
 const cursorStyle = computed(() => {
   if (panning.value) return "grabbing";
+  if (shapeAdjusting.value) return ZONE_CURSORS[shapeZone.value] ?? "default";
   if (adjusting.value) return ZONE_CURSORS[zone.value] ?? "default";
+  if (store.shapeMode) return "crosshair";
+  if (hasPreview.value && shapeBoxBase.value) {
+    const z = shapeZoneAt(hover.x, hover.y);
+    if (z !== "outside") return ZONE_CURSORS[z];
+  }
   if (hasPreview.value && hasEdit.value) {
     const z = zoneAt(hover.x, hover.y);
     if (z !== "outside") return ZONE_CURSORS[z];
   }
   if (store.regionMode) return "crosshair";
+  if (hasPreview.value && factor.value > 0) {
+    const [sx, sy] = displayToSrc(hover.x, hover.y);
+    if (shapeAtPoint(sx, sy) >= 0) return "pointer";
+  }
   if (hasPreview.value && findRegionAt(hover.x, hover.y) >= 0) {
     return "pointer";
   }
@@ -342,7 +470,15 @@ function setActual(): void {
 function onWheel(e: WheelEvent): void {
   if (!hasPreview.value) return;
   e.preventDefault();
-  if (adjusting.value || rubberLive.value || panning.value) return;
+  if (
+    adjusting.value ||
+    shapeAdjusting.value ||
+    rubberLive.value ||
+    shapeDraftLive.value ||
+    panning.value
+  ) {
+    return;
+  }
   const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 100 : 1;
   const dy = e.deltaY * unit;
   if (!dy) return;
@@ -353,7 +489,16 @@ function onWheel(e: WheelEvent): void {
 function beginPan(e: PointerEvent): void {
   // 调整 / 新建拖拽期间禁止另起平移（例如左键拖动选框时按中键），
   // 否则几何映射会在拖动中途变化，写回坐标出错。
-  if (!hasPreview.value || !canPan.value || adjusting.value || rubberLive.value) return;
+  if (
+    !hasPreview.value ||
+    !canPan.value ||
+    adjusting.value ||
+    shapeAdjusting.value ||
+    rubberLive.value ||
+    shapeDraftLive.value
+  ) {
+    return;
+  }
   panning.value = true;
   panStart.clientX = e.clientX;
   panStart.clientY = e.clientY;
@@ -416,6 +561,59 @@ function onDown(e: PointerEvent): void {
   hover.x = p.x;
   hover.y = p.y;
 
+  // 0. 图形标注模式：左键拖拽起稿（十字光标，松手才创建；与区域框选互斥）
+  if (store.shapeMode) {
+    // 例外：已选图形的**手柄**仍然可用——画完一个图形不必先退出标注模式才能微调尺寸；
+    // 拖动内部仍视为起新草稿（方便在已有图形附近继续画），拖角/边才是缩放。
+    if (selectedShape.value && shapeBoxBase.value) {
+      const zh = shapeZoneAt(p.x, p.y);
+      if (zh !== "outside" && zh !== "move") {
+        beginShapeAdjust(zh, p);
+        return;
+      }
+    }
+    clearShapeSelection();
+    cancelRegionEdit();
+    adjusting.value = false;
+    zone.value = "outside";
+    rubberLive.value = false;
+    shapeAdjusting.value = false;
+    shapeZone.value = "outside";
+    shapeAdjustIndex.value = -1;
+    shapeDraft.x0 = p.x;
+    shapeDraft.y0 = p.y;
+    shapeDraft.x1 = p.x;
+    shapeDraft.y1 = p.y;
+    shapeDraftLive.value = true;
+    return;
+  }
+
+  // 1'. 图形选中优先（非图形模式）：先判当前选中图形的 8 向手柄 / 内部，
+  //     再判当前页任意图形命中（选中并进入调整态）；都未命中才回到区域路径。
+  //     `regionMode` 是显式框选模式，此时不得抢占：点击一律走下面的区域框选路径。
+  if (!store.regionMode && selectedShape.value && shapeBoxBase.value) {
+    const z = shapeZoneAt(p.x, p.y);
+    if (z !== "outside") {
+      cancelRegionEdit();
+      beginShapeAdjust(z, p);
+      return;
+    }
+  }
+  if (!store.regionMode && hasPreview.value && factor.value > 0) {
+    const [sx, sy] = displayToSrc(p.x, p.y);
+    const shapeHit = shapeAtPoint(sx, sy);
+    if (shapeHit >= 0) {
+      cancelRegionEdit();
+      selectShape(shapeHit);
+      // 刚选中的图形也直接进入调整态：内部拖动整体移动、边缘拖动缩放（8px 容差）
+      const z = shapeZoneAt(p.x, p.y);
+      beginShapeAdjust(z === "outside" ? "move" : z, p);
+      return;
+    }
+  }
+  // 未命中图形：清图形选中，随后完全走原有区域逻辑（点空白 = 取消选中）
+  if (store.selectedShapeIndex >= 0) clearShapeSelection();
+
   // 1. 已有编辑框优先命中：抓取移动/缩放（即使处于新建模式，对齐 mousePressEvent）
   if (hasEdit.value) {
     const z = zoneAt(p.x, p.y);
@@ -453,24 +651,33 @@ function onDown(e: PointerEvent): void {
 /** 新建橡皮筋是否可见（区别于编辑框复用同一几何容器） */
 const rubberLive = ref(false);
 
-function applyAdjust(p: { x: number; y: number }): void {
+/** 8 向拖动几何（显示像素）：区域调整与图形调整共用同一套计算，结果钳制在图纸内。
+ *  move = 整体平移；其余按命中的边/角移动对应边界，并保证最小显示尺寸 8px。 */
+function adjustedRect(
+  start: { x: number; y: number; w: number; h: number },
+  z: Zone,
+  pressPt: { x: number; y: number },
+  p: { x: number; y: number },
+  areaW: number,
+  areaH: number,
+): { x: number; y: number; w: number; h: number } {
   const cp = clampPt(p);
-  const z = zone.value;
   if (z === "move") {
-    // 整体平移：基于 startBox 与鼠标位移计算，钳制在图纸范围内
-    const dx = cp.x - press.x;
-    const dy = cp.y - press.y;
-    rb.x = Math.max(0, Math.min(startBox.x + dx, draw.value.w - startBox.w));
-    rb.y = Math.max(0, Math.min(startBox.y + dy, draw.value.h - startBox.h));
-    rb.w = startBox.w;
-    rb.h = startBox.h;
-    return;
+    // 整体平移：基于 start 与鼠标位移计算，钳制在图纸范围内
+    const dx = cp.x - pressPt.x;
+    const dy = cp.y - pressPt.y;
+    return {
+      x: Math.max(0, Math.min(start.x + dx, areaW - start.w)),
+      y: Math.max(0, Math.min(start.y + dy, areaH - start.h)),
+      w: start.w,
+      h: start.h,
+    };
   }
 
-  let l = startBox.x;
-  let t = startBox.y;
-  let r = startBox.x + startBox.w;
-  let b = startBox.y + startBox.h;
+  let l = start.x;
+  let t = start.y;
+  let r = start.x + start.w;
+  let b = start.y + start.h;
 
   if (z.includes("l")) l = cp.x;
   if (z.includes("r")) r = cp.x;
@@ -483,10 +690,51 @@ function applyAdjust(p: { x: number; y: number }): void {
   const nh = Math.abs(b - t);
 
   // 保证最小显示尺寸 8px 并钳制在图纸范围内
-  rb.x = Math.max(0, Math.min(nx, draw.value.w - 8));
-  rb.y = Math.max(0, Math.min(ny, draw.value.h - 8));
-  rb.w = Math.max(8, Math.min(nw, draw.value.w - rb.x));
-  rb.h = Math.max(8, Math.min(nh, draw.value.h - rb.y));
+  const x = Math.max(0, Math.min(nx, areaW - 8));
+  const y = Math.max(0, Math.min(ny, areaH - 8));
+  return {
+    x,
+    y,
+    w: Math.max(8, Math.min(nw, areaW - x)),
+    h: Math.max(8, Math.min(nh, areaH - y)),
+  };
+}
+
+function applyAdjust(p: { x: number; y: number }): void {
+  Object.assign(
+    rb,
+    adjustedRect(startBox, zone.value, press, p, draw.value.w, draw.value.h),
+  );
+}
+
+/** 进入图形调整态：从静止包围框抓基准几何，拖动期间只改 shapeRb，松手才写回 store */
+function beginShapeAdjust(z: Zone, p: { x: number; y: number }): void {
+  const base = shapeBoxBase.value;
+  const index = store.selectedShapeIndex;
+  if (!base || index < 0) return;
+  shapeAdjustIndex.value = index;
+  shapeStartBox.x = base.x;
+  shapeStartBox.y = base.y;
+  shapeStartBox.w = base.w;
+  shapeStartBox.h = base.h;
+
+  shapeRb.x = base.x;
+  shapeRb.y = base.y;
+  shapeRb.w = base.w;
+  shapeRb.h = base.h;
+
+  shapeAdjusting.value = true;
+  shapeZone.value = z;
+  const cp = clampPt(p);
+  shapePress.x = cp.x;
+  shapePress.y = cp.y;
+}
+
+function applyShapeAdjust(p: { x: number; y: number }): void {
+  Object.assign(
+    shapeRb,
+    adjustedRect(shapeStartBox, shapeZone.value, shapePress, p, draw.value.w, draw.value.h),
+  );
 }
 
 function onMove(e: PointerEvent): void {
@@ -511,6 +759,16 @@ function onMove(e: PointerEvent): void {
   const p = localPoint(e);
   hover.x = p.x;
   hover.y = p.y;
+  if (shapeAdjusting.value) {
+    applyShapeAdjust(p);
+    return;
+  }
+  if (shapeDraftLive.value) {
+    const cp = clampPt(p);
+    shapeDraft.x1 = cp.x;
+    shapeDraft.y1 = cp.y;
+    return;
+  }
   if (adjusting.value) {
     applyAdjust(p);
     return;
@@ -533,6 +791,50 @@ function onUp(e: PointerEvent): void {
     return;
   }
   const p = localPoint(e);
+  // 图形调整：松手才写回（显示像素增量 <4 视为误触，不写）
+  if (shapeAdjusting.value) {
+    const index = shapeAdjustIndex.value;
+    // 基准用按下时抓取的显示几何（shapeStartBox），不依赖中途重新读取 store
+    const moved = Math.max(
+      Math.abs(shapeRb.x - shapeStartBox.x),
+      Math.abs(shapeRb.y - shapeStartBox.y),
+      Math.abs(shapeRb.x + shapeRb.w - (shapeStartBox.x + shapeStartBox.w)),
+      Math.abs(shapeRb.y + shapeRb.h - (shapeStartBox.y + shapeStartBox.h)),
+    );
+    shapeAdjusting.value = false;
+    shapeZone.value = "outside";
+    shapeAdjustIndex.value = -1;
+    hover.x = p.x;
+    hover.y = p.y;
+    if (moved >= 4 && index >= 0) {
+      const [sx0, sy0] = displayToSrc(shapeRb.x, shapeRb.y);
+      const [sx1, sy1] = displayToSrc(shapeRb.x + shapeRb.w, shapeRb.y + shapeRb.h);
+      updateShapeGeometry(index, [sx0, sy0, sx1, sy1]);
+    }
+    return;
+  }
+  // 图形草稿：位移 <4 显示像素视为误触；线/箭头把起止点一起传下去保留方向
+  if (shapeDraftLive.value) {
+    shapeDraftLive.value = false;
+    const dx = shapeDraft.x1 - shapeDraft.x0;
+    const dy = shapeDraft.y1 - shapeDraft.y0;
+    if (Math.hypot(dx, dy) >= 4) {
+      const [sx0, sy0] = displayToSrc(shapeDraft.x0, shapeDraft.y0);
+      const [sx1, sy1] = displayToSrc(shapeDraft.x1, shapeDraft.y1);
+      const lineLike = store.shapeKind === "line" || store.shapeKind === "arrow";
+      addShapeFromRect(
+        store.shapeKind,
+        [sx0, sy0, sx1, sy1],
+        lineLike
+          ? [
+              [sx0, sy0],
+              [sx1, sy1],
+            ]
+          : undefined,
+      );
+    }
+    return;
+  }
   if (adjusting.value) {
     const changed =
       !ebBase.value ||
@@ -565,6 +867,11 @@ function onCancel(): void {
   zone.value = "outside";
   rubberLive.value = false;
   panning.value = false;
+  // 图形草稿 / 图形调整被系统取消：直接丢弃，不写回 store
+  shapeAdjusting.value = false;
+  shapeZone.value = "outside";
+  shapeAdjustIndex.value = -1;
+  shapeDraftLive.value = false;
 }
 
 /** 双击区域 → 打开属性对话框（修改文字 / 参数）。命中当前页最上层包含点的区域。 */
@@ -581,8 +888,35 @@ function onDblClick(e: MouseEvent): void {
 function onBoxDown(e: PointerEvent): void {
   if (e.target === boxEl.value) {
     cancelRegionEdit();
+    clearShapeSelection();
   }
 }
+
+/** Esc：收尾本组件的图形本地状态（草稿 / 进行中的调整，App.vue 的全局 Esc 够不到）。
+ *  图形选中与模式切换由 App.vue 的 keydown 统一处理；这里不劫持输入框，也不与它抢语义。 */
+function onKeydown(e: KeyboardEvent): void {
+  if (e.key !== "Escape") return;
+  if (
+    store.dialogOpen ||
+    store.helpModalOpen ||
+    store.aboutModalOpen ||
+    store.updateModalOpen ||
+    store.onboardingOpen
+  ) {
+    return;
+  }
+  if (!shapeDraftLive.value && !shapeAdjusting.value) return;
+  const el = e.target as HTMLElement | null;
+  if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) {
+    return;
+  }
+  shapeDraftLive.value = false;
+  shapeAdjusting.value = false;
+  shapeZone.value = "outside";
+  shapeAdjustIndex.value = -1;
+}
+onMounted(() => window.addEventListener("keydown", onKeydown));
+onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
 
 const boxBackground = computed(() =>
   store.previewBgIdx % 2 === 0 ? "#c8d0ca" : "#565b56",
@@ -641,6 +975,32 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
               class="handle-dot"
               :style="h"
             />
+          </div>
+
+          <!-- 图形草稿：虚线框（所有图元）；线/箭头额外用 SVG 画预览直线 + 箭头头，方向可见 -->
+          <div
+            v-if="shapeDraftLive && (shapeDraftBox.w > 0 || shapeDraftBox.h > 0)"
+            class="shape-draft-box"
+            :style="pxStyle(shapeDraftBox)"
+          />
+          <svg v-if="shapeDraftLive && shapeDraftIsLine" class="shape-draft-svg">
+            <line
+              class="shape-draft-line"
+              :x1="shapeDraft.x0"
+              :y1="shapeDraft.y0"
+              :x2="shapeDraft.x1"
+              :y2="shapeDraft.y1"
+            />
+            <polygon
+              v-if="store.shapeKind === 'arrow'"
+              class="shape-draft-arrow"
+              :points="shapeDraftArrowHead"
+            />
+          </svg>
+
+          <!-- 选中图形：蓝色虚线包围框 + 8 个白色手柄（纯视觉，命中靠 8px 容差） -->
+          <div v-if="shapeBox" class="shape-select-box" :style="pxStyle(shapeBox)">
+            <span v-for="(h, i) in HANDLE_DOTS" :key="i" class="handle-dot" :style="h" />
           </div>
 
           <div
@@ -711,7 +1071,84 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
         勾选后在预览图上按住鼠标拖出矩形，松开后输入该区域的文字<br />
         （可独立选择手写体 / 打印体，实现混排）
       </NTooltip>
+      <NTooltip trigger="hover" placement="top">
+        <template #trigger>
+          <NButton
+            size="small"
+            :type="store.shapeMode ? 'primary' : 'default'"
+            :ghost="store.shapeMode"
+            @click="setShapeMode(!store.shapeMode)"
+          >
+            ✎ 标注
+          </NButton>
+        </template>
+        进入图形标注模式：在预览图上按住鼠标拖出图形（与「框选文字」互斥）
+      </NTooltip>
+      <template v-if="store.shapeMode">
+        <NTooltip trigger="hover" placement="top">
+          <template #trigger>
+            <NSelect
+              class="shape-kind-select"
+              size="small"
+              :value="store.shapeKind"
+              :options="SHAPE_KIND_OPTIONS"
+              @update:value="onShapeKindChange"
+            />
+          </template>
+          在预览图上按住拖出图形；选中后拖手柄调整
+        </NTooltip>
+      </template>
       <NButton size="small" :loading="store.rendering" @click="doRender()">↻ 刷新</NButton>
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 图形标注：翻页行新增按钮/下拉后允许换行，窗口较窄时不挤压页码 */
+.pagenav {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.shape-kind-select {
+  width: 104px;
+  flex: 0 0 auto;
+}
+
+/* 新建图形草稿：与 rubber-band 同为蓝色语义，虚线表示尚未落笔；松手即生成 */
+.shape-draft-box {
+  position: absolute;
+  border: 1px dashed var(--rubber-blue);
+  background: rgba(74, 144, 255, 0.1);
+  pointer-events: none;
+}
+
+/* 线/箭头的草稿预览：绝对定位覆盖 draw-area，坐标即显示像素 */
+.shape-draft-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.shape-draft-line {
+  stroke: var(--rubber-blue);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 4;
+}
+
+.shape-draft-arrow {
+  fill: var(--rubber-blue);
+}
+
+/* 选中图形：蓝色虚线包围框 + 白色手柄（手柄复用全局 .handle-dot） */
+.shape-select-box {
+  position: absolute;
+  border: 2px dashed var(--rubber-blue);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.65);
+  background: transparent;
+  pointer-events: none;
+}
+</style>

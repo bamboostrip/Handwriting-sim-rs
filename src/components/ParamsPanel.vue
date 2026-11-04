@@ -1,6 +1,7 @@
 <script setup lang="ts">
 //! 右侧参数面板（按任务阶段重排）：
-//!   顶部「当前方案」+ 三步（① 内容 / ② 字迹 / ③ 版式）+ 条件出现的「文字区域」。
+//!   顶部「当前方案」+ 三步（① 内容 / ② 字迹 / ③ 版式）+ 条件出现的「文字区域」
+//!   + 「④ 图形标注」（图形列表与属性）。
 //!
 //! 设计目标：
 //! - 预设从第六组提升为顶部常驻摘要，不再是隐藏入口；
@@ -24,6 +25,8 @@ import FontPicker from "./FontPicker.vue";
 import RegionDialog from "./RegionDialog.vue";
 import RegionList from "./RegionList.vue";
 import RoleManager from "./RoleManager.vue";
+import ShapeList from "./ShapeList.vue";
+import ShapeProps from "./ShapeProps.vue";
 import TextEditorModal from "./TextEditorModal.vue";
 import QuickChecklist from "./QuickChecklist.vue";
 import {
@@ -62,17 +65,24 @@ const presetOptions = computed(() => {
 });
 
 // ---- 阶段折叠状态：localStorage 记忆；首次使用按默认策略 ----
-type PanelGroup = "content" | "style" | "layout" | "regions";
-const GROUPS: PanelGroup[] = ["content", "style", "layout", "regions"];
+type PanelGroup = "content" | "style" | "layout" | "regions" | "shapes";
+const GROUPS: PanelGroup[] = ["content", "style", "layout", "regions", "shapes"];
 
 const storedCollapse = loadPanelCollapseState();
 const collapse = reactive<Record<PanelGroup, boolean>>(
-  storedCollapse ?? {
-    content: false, // 内容默认展开
-    style: true, // 字迹默认折叠（有字体兜底，不强迫先配）
-    layout: true, // 版式默认折叠
-    regions: true, // 区域默认折叠（仅文档模式出现）
-  },
+  storedCollapse
+    ? {
+        ...storedCollapse,
+        // 旧版本记录里没有 shapes 键：补成展开（false = 展开）
+        shapes: storedCollapse.shapes ?? false,
+      }
+    : {
+        content: false, // 内容默认展开
+        style: true, // 字迹默认折叠（有字体兜底，不强迫先配）
+        layout: true, // 版式默认折叠
+        regions: true, // 区域默认折叠（仅文档模式出现）
+        shapes: false, // 图形标注默认展开（进入标注模式时更容易发现）
+      },
 );
 watch(collapse, () => savePanelCollapseState({ ...collapse }));
 
@@ -118,6 +128,14 @@ watch(
   () => store.regions.length,
   (count, prev) => {
     if (count > 0 && (prev ?? 0) === 0) collapse.regions = false;
+  },
+);
+
+// 进入图形标注模式时自动展开「④ 图形标注」，否则刚画完的图形属性藏在折叠面板里
+watch(
+  () => store.shapeMode,
+  (on) => {
+    if (on) collapse.shapes = false;
   },
 );
 
@@ -410,12 +428,21 @@ function expandRegions(): void {
           </template>
         </NCollapseItem>
 
-        <!-- ============ ④ 文字区域（条件出现） ============ -->
+        <!-- ============ 文字区域（条件出现） ============ -->
         <NCollapseItem v-if="showRegions" name="regions" title="文字区域">
           <template #header-extra>
             <span class="collapse-count">{{ store.regions.length }} 个</span>
           </template>
           <RegionList />
+        </NCollapseItem>
+
+        <!-- ============ ④ 图形标注 ============ -->
+        <NCollapseItem name="shapes" title="④ 图形标注">
+          <template #header-extra>
+            <span class="collapse-count">{{ store.shapes.length }} 个</span>
+          </template>
+          <ShapeList />
+          <ShapeProps />
         </NCollapseItem>
       </NCollapse>
 

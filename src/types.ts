@@ -100,6 +100,32 @@ export interface UiRegion {
   marginRight?: number | null;
 }
 
+/** 图形标注类型 id（与 src-tauri/src/params.rs、core shapes.rs 的 as_id 逐字一致） */
+export type UiShapeKind =
+  | "line" | "arrow" | "polyline" | "rect" | "ellipse" | "triangle"
+  | "brace_left" | "brace_right" | "bracket_left" | "bracket_right"
+  | "check" | "underline";
+
+export interface UiShape {
+  kind: UiShapeKind;
+  /** 1 基页码 */
+  page: number;
+  /** 背景原始像素包围盒（允许负宽高，后端归一化） */
+  x: number; y: number; w: number; h: number;
+  /** 显式顶点（line/arrow 必须给 2 点，用于保留方向），背景原始像素 */
+  points?: [number, number][];
+  /** 线宽（原始像素） */
+  thickness: number;
+  /** 手绘抖动幅度（原始像素，0 = 直尺） */
+  jitter: number;
+  /** 实心（rect/ellipse/triangle 生效） */
+  filled: boolean;
+  /** "#RRGGBB"；null/缺省 = 跟随主墨色 */
+  fill?: string | null;
+  /** 每图形随机种子 */
+  seed: number;
+}
+
 export interface UiParams {
   fontPath: string;
   backgroundPath: string;
@@ -124,6 +150,8 @@ export interface UiParams {
   text: string;
   paragraphs: UiParagraph[];
   regions: UiRegion[];
+  /** 图形标注（背景原始像素坐标，与 regions 同一坐标系） */
+  shapes: UiShape[];
   roles?: UiHandwritingRole[];
   endChars: string;
   startChars: string;

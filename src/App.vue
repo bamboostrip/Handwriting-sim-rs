@@ -12,7 +12,9 @@ import {
   APP_VERSION,
   buildParams,
   cancelRegionEdit,
+  clearShapeSelection,
   cycleThemePreference,
+  deleteShape,
   doRender,
   ensureUsableBackground,
   ensureUsableFont,
@@ -27,6 +29,7 @@ import {
   openOnboarding,
   refreshPresets,
   scheduleRender,
+  setShapeMode,
   setThemePreference,
   startupCheckUpdate,
   store,
@@ -121,14 +124,38 @@ onMounted(async () => {
 });
 
 
-// Esc：退出区域调整态（正在输入框/编辑器里打字时不劫持）
-function onKeydown(e: KeyboardEvent): void {
-  if (e.key !== "Escape" || (store.editingIndex < 0 && store.selectedRegionIndex < 0)) return;
+// 全局快捷键：
+// - Esc：先取消图形选中，再退出文字区域调整态（两者不一起清，避免误伤）；
+// - Delete / Backspace：删除当前选中的图形；
+// 正在输入框 / 文本域 / contenteditable 里打字时不劫持（保留原有判断）。
+function isTypingTarget(e: KeyboardEvent): boolean {
   const el = e.target as HTMLElement | null;
-  if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) {
+  return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+}
+
+function onKeydown(e: KeyboardEvent): void {
+  if (isTypingTarget(e)) return;
+
+  if (e.key === "Escape") {
+    // 图形标注模式（无论是否已选中图形）：Esc 退出模式并清选中。
+    // 进行中的草稿 / 手柄调整由 PreviewPane 自己的监听器收尾（它拿得到本地状态）。
+    if (store.shapeMode || store.selectedShapeIndex >= 0) {
+      clearShapeSelection();
+      if (store.shapeMode) setShapeMode(false);
+      e.preventDefault();
+      return;
+    }
+    if (store.editingIndex < 0 && store.selectedRegionIndex < 0) return;
+    cancelRegionEdit();
+    e.preventDefault();
     return;
   }
-  cancelRegionEdit();
+
+  // 带修饰键的组合留给系统 / 浏览器（如 Ctrl+Z、Alt+←）
+  if (e.key !== "Delete" && e.key !== "Backspace") return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (store.selectedShapeIndex < 0) return;
+  deleteShape(store.selectedShapeIndex);
   e.preventDefault();
 }
 window.addEventListener("keydown", onKeydown);

@@ -1,11 +1,14 @@
 # issue #6 前端 / 命令层可行性研究：图形标注图层（Shape Layer）
 
+> **状态：本文写于实施前；MVP 已按 `issue6-shape-mvp-contract.md` 落地**，因此文中部分「待做」描述与行号已过时，
+> 现行实现与取舍以 `docs/05-symbol-shapes.md` §6、§10 为准。
+>
 > 对应 issue：[#6【建议】增加符号图形](https://github.com/bamboostrip/Handwriting-sim-rs/issues/6)
-> 分支：`feat/symbol-shapes`（未切分支、未提交）
+> 分支：`feat/symbol-shapes`
 > 调研范围：前端（`src/`）+ Tauri 命令层（`src-tauri/src/params.rs`、`main.rs`）+ 必要的引擎接口只读核对。
-> 配套文档：`docs/05-symbol-shapes.md`（方案与引擎侧设计，第 221-224 行明确把逐文件前端清单指向本文）。
+> 配套文档：`docs/05-symbol-shapes.md`（方案与引擎侧设计）。
 > 调研方式：**只读代码，未编译、未运行、未改动任何现有文件**；本文只新建本文件。
-> 行号基准：2026-11-04 07:44 工作区快照。注意 `crates/core/src/core/shapes.rs` 是同事**刚刚落盘、尚未提交**的 POC（`git status` 显示 `?? crates/core/src/core/shapes.rs`，`layout.rs`/`mod.rs` 已改），其行号随后续编辑可能漂移。
+> 行号基准：2026-11-04 07:44 工作区快照（实施前的版本）。
 
 ---
 

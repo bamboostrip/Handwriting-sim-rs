@@ -44,6 +44,11 @@ pub enum BracketSide {
     Right,
 }
 
+/// 图形默认所在页（1 基）：与 `TextRegion.page` 同语义，默认第 1 页。
+fn default_page() -> i32 {
+    1
+}
+
 /// 图形类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,11 +76,56 @@ pub enum ShapeKind {
     Underline,
 }
 
+impl ShapeKind {
+    /// 稳定字符串 id（前端 / 命令层契约，见 `docs/research/issue6-shape-mvp-contract.md` §1）。
+    ///
+    /// 元组变体在这里被扁平化为 `"brace_left"` 等字符串，与前端 `UiShapeKind`
+    /// 的字符串联合类型逐字一致；core 内部仍保留元组变体以便渲染分支类型安全。
+    pub fn as_id(&self) -> &'static str {
+        match self {
+            ShapeKind::Line => "line",
+            ShapeKind::Arrow => "arrow",
+            ShapeKind::Polyline => "polyline",
+            ShapeKind::Rect => "rect",
+            ShapeKind::Ellipse => "ellipse",
+            ShapeKind::Triangle => "triangle",
+            ShapeKind::Brace(BraceSide::Left) => "brace_left",
+            ShapeKind::Brace(BraceSide::Right) => "brace_right",
+            ShapeKind::Bracket(BracketSide::Left) => "bracket_left",
+            ShapeKind::Bracket(BracketSide::Right) => "bracket_right",
+            ShapeKind::Check => "check",
+            ShapeKind::Underline => "underline",
+        }
+    }
+
+    /// 由稳定字符串 id 解析图形类型；未知 id 返回 `None`（调用方跳过该图形）。
+    pub fn from_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "line" => ShapeKind::Line,
+            "arrow" => ShapeKind::Arrow,
+            "polyline" => ShapeKind::Polyline,
+            "rect" => ShapeKind::Rect,
+            "ellipse" => ShapeKind::Ellipse,
+            "triangle" => ShapeKind::Triangle,
+            "brace_left" => ShapeKind::Brace(BraceSide::Left),
+            "brace_right" => ShapeKind::Brace(BraceSide::Right),
+            "bracket_left" => ShapeKind::Bracket(BracketSide::Left),
+            "bracket_right" => ShapeKind::Bracket(BracketSide::Right),
+            "check" => ShapeKind::Check,
+            "underline" => ShapeKind::Underline,
+            _ => return None,
+        })
+    }
+}
+
 /// 一个符号图形的纯数据描述（可序列化，供前端 / 预设 JSON 使用）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShapeSpec {
     /// 图形类型。
     pub kind: ShapeKind,
+    /// 所在页（1 基）；默认第 1 页。用于多页合成与总页数计算。
+    #[serde(default = "default_page")]
+    pub page: i32,
     /// 包围盒左上角 x（页面像素）。
     pub x: f32,
     /// 包围盒左上角 y（页面像素）。
@@ -89,8 +139,10 @@ pub struct ShapeSpec {
     pub points: Vec<[f32; 2]>,
     /// 线宽（像素）。
     pub thickness: f32,
-    /// 墨迹颜色（合成图层用，光栅化到 bool 掩码时不使用）。
-    pub fill: [u8; 3],
+    /// 墨迹颜色覆盖；`None` = 跟随主墨色 `HandwritingParams.fill`。
+    /// （光栅化到 bool 掩码时不使用，由引擎合成层决定颜色。）
+    #[serde(default)]
+    pub fill: Option<[u8; 3]>,
     /// 手绘抖动幅度（像素）；0 = 规整几何图形。
     pub jitter: f32,
     /// 随机种子：同 seed 逐像素可复现，换 seed 笔画抖动不同。
@@ -107,17 +159,19 @@ impl Default for ShapeSpec {
 }
 
 impl ShapeSpec {
-    /// 以类型 + 包围盒创建，线宽/抖动/颜色取默认值（黑色、2px、1.4px 抖动）。
+    /// 以类型 + 包围盒创建，线宽/抖动/颜色取默认值
+    /// （第 1 页、跟随主墨色、2.4px、1.4px 抖动）。
     pub fn new(kind: ShapeKind, x: f32, y: f32, w: f32, h: f32) -> Self {
         Self {
             kind,
+            page: 1,
             x,
             y,
             w,
             h,
             points: Vec::new(),
             thickness: 2.4,
-            fill: [0, 0, 0],
+            fill: None,
             jitter: 1.4,
             seed: 1,
             filled: false,
@@ -136,9 +190,9 @@ impl ShapeSpec {
         self
     }
 
-    /// 设置墨迹颜色。
+    /// 设置墨迹颜色覆盖（`None` 表示跟随主墨色，可用 `with_fill(None)` 还原）。
     pub fn with_fill(mut self, fill: [u8; 3]) -> Self {
-        self.fill = fill;
+        self.fill = Some(fill);
         self
     }
 
@@ -157,6 +211,12 @@ impl ShapeSpec {
     /// 设置是否填充。
     pub fn with_filled(mut self, filled: bool) -> Self {
         self.filled = filled;
+        self
+    }
+
+    /// 设置所在页（1 基；`0` 会被引擎按第 1 页处理）。
+    pub fn with_page(mut self, page: i32) -> Self {
+        self.page = page;
         self
     }
 }
@@ -771,5 +831,47 @@ mod tests {
         // 允许线宽带来的半个像素级溢出，但不应漂出包围盒
         assert!(max_x <= 172, "规整矩形不应超出包围盒右边，实际 {max_x}");
         assert!(max_y <= 122, "规整矩形不应超出包围盒下边，实际 {max_y}");
+    }
+
+    /// 12 个稳定 id 与变体一一对应（前端/命令层契约，字符串逐字冻结）。
+    #[test]
+    fn kind_ids_match_contract() {
+        let kinds = [
+            (ShapeKind::Line, "line"),
+            (ShapeKind::Arrow, "arrow"),
+            (ShapeKind::Polyline, "polyline"),
+            (ShapeKind::Rect, "rect"),
+            (ShapeKind::Ellipse, "ellipse"),
+            (ShapeKind::Triangle, "triangle"),
+            (ShapeKind::Brace(BraceSide::Left), "brace_left"),
+            (ShapeKind::Brace(BraceSide::Right), "brace_right"),
+            (ShapeKind::Bracket(BracketSide::Left), "bracket_left"),
+            (ShapeKind::Bracket(BracketSide::Right), "bracket_right"),
+            (ShapeKind::Check, "check"),
+            (ShapeKind::Underline, "underline"),
+        ];
+        for (kind, id) in kinds {
+            assert_eq!(kind.as_id(), id);
+            assert_eq!(ShapeKind::from_id(id), Some(kind));
+        }
+        assert_eq!(ShapeKind::from_id("unknown"), None);
+        assert_eq!(ShapeKind::from_id("Brace"), None, "id 大小写敏感");
+    }
+
+    /// 旧 JSON（无 page/fill/filled/points）应能反序列化：
+    /// page 默认 1、fill 默认 None（跟随主墨色）、with_fill 写 Some。
+    #[test]
+    fn spec_json_defaults_page_and_fill() {
+        let spec: ShapeSpec = serde_json::from_str(
+            r#"{"kind":"rect","x":10.0,"y":20.0,"w":30.0,"h":40.0,
+                "thickness":2.0,"jitter":1.0,"seed":9}"#,
+        )
+        .unwrap();
+        assert_eq!(spec.page, 1);
+        assert_eq!(spec.fill, None);
+        assert!(!spec.filled);
+        assert!(spec.points.is_empty());
+        assert_eq!(ShapeSpec::new(ShapeKind::Line, 0.0, 0.0, 0.0, 0.0).page, 1);
+        assert_eq!(spec.with_fill([1, 2, 3]).fill, Some([1, 2, 3]));
     }
 }

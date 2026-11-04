@@ -12,6 +12,7 @@ use handwrite_sim::core::models::{
     self, Align, HandwritingParams, HandwritingRole, MiswriteMode, Paragraph, StrikeoutStyle,
     TextRegion, TextRun, TextRunStyle,
 };
+use handwrite_sim::core::shapes::{ShapeKind, ShapeSpec};
 use serde::{Deserialize, Serialize};
 
 /// 清理外来文本的特殊字符（与原 Slint 版 to_ui_spaces 一致）：
@@ -299,6 +300,82 @@ impl From<&TextRegion> for UiRegion {
     }
 }
 
+/// 前端图形标注镜像（camelCase JSON，与 `UiRegion` 同风格）。
+///
+/// 与 core `ShapeSpec` 的差异只有两处（见冻结契约 §1/§3）：
+/// - `kind` 用扁平字符串 id（`"brace_left"` 等），core 元组变体由 `from_id` 映射；
+/// - `fill` 用 `"#RRGGBB"` 字符串，`None`/空 = 跟随主墨色。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UiShape {
+    /// 图元 id：line/arrow/polyline/rect/ellipse/triangle/
+    /// brace_left/brace_right/bracket_left/bracket_right/check/underline
+    pub kind: String,
+    /// 所在页（1 基）
+    pub page: i32,
+    /// 背景原始像素包围盒（允许负宽高，后端归一化）
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    /// 显式顶点（line/arrow 至少两点；背景原始像素）
+    #[serde(default)]
+    pub points: Vec<[f32; 2]>,
+    /// 线宽（原始像素）
+    pub thickness: f32,
+    /// 手绘抖动幅度（原始像素，0 = 直尺）
+    pub jitter: f32,
+    /// 实心（rect/ellipse/triangle 生效）
+    pub filled: bool,
+    /// "#RRGGBB"；null/缺省 = 跟随主墨色
+    #[serde(default)]
+    pub fill: Option<String>,
+    /// 每图形随机种子
+    pub seed: u64,
+}
+
+impl Default for UiShape {
+    /// 缺省值对齐 core `ShapeSpec::new`：第 1 页、2.4px、1.4px 抖动；
+    /// `kind` 为空字符串 → 转换时按未知类型跳过，不会画错东西。
+    fn default() -> Self {
+        Self {
+            kind: String::new(),
+            page: 1,
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+            points: Vec::new(),
+            thickness: 2.4,
+            jitter: 1.4,
+            filled: false,
+            fill: None,
+            seed: 1,
+        }
+    }
+}
+
+impl From<&ShapeSpec> for UiShape {
+    fn from(s: &ShapeSpec) -> Self {
+        Self {
+            kind: s.kind.as_id().to_string(),
+            page: s.page,
+            x: s.x,
+            y: s.y,
+            w: s.w,
+            h: s.h,
+            points: s.points.clone(),
+            thickness: s.thickness,
+            jitter: s.jitter,
+            filled: s.filled,
+            fill: s
+                .fill
+                .map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])),
+            seed: s.seed,
+        }
+    }
+}
+
 /// 前端表单状态镜像（camelCase JSON）。字段语义见 models.rs。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -332,6 +409,8 @@ pub struct UiParams {
     pub text: String,
     pub paragraphs: Vec<UiParagraph>,
     pub regions: Vec<UiRegion>,
+    #[serde(default)]
+    pub shapes: Vec<UiShape>,
     #[serde(default)]
     pub roles: Vec<UiHandwritingRole>,
     pub end_chars: String,
@@ -368,6 +447,7 @@ impl Default for UiParams {
             text: String::new(),
             paragraphs: Vec::new(),
             regions: Vec::new(),
+            shapes: Vec::new(),
             roles: Vec::new(),
             end_chars: d.end_chars,
             start_chars: d.start_chars,
@@ -601,6 +681,36 @@ impl UiParams {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
+        // 图形标注：`kind` 无法识别的整条跳过（不画错东西），其余照常；
+        // `fill` 解析失败按 None（跟随主墨色）处理，不整体报错（冻结契约 §3）。
+        let shapes: Vec<ShapeSpec> = self
+            .shapes
+            .iter()
+            .filter_map(|s| {
+                let kind = ShapeKind::from_id(s.kind.trim())?;
+                let fill = s
+                    .fill
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|hex| !hex.is_empty())
+                    .and_then(|hex| models::parse_color(hex).ok());
+                Some(ShapeSpec {
+                    kind,
+                    page: s.page.max(1),
+                    x: s.x,
+                    y: s.y,
+                    w: s.w,
+                    h: s.h,
+                    points: s.points.clone(),
+                    thickness: s.thickness,
+                    fill,
+                    jitter: s.jitter,
+                    seed: s.seed,
+                    filled: s.filled,
+                })
+            })
+            .collect();
+
         Ok(HandwritingParams {
             font_path,
             background_path,
@@ -610,6 +720,7 @@ impl UiParams {
             roles,
             paragraphs,
             regions,
+            shapes,
             font_size: self.font_size,
             word_spacing: self.word_spacing,
             line_spacing: self.line_spacing,
@@ -666,6 +777,7 @@ impl UiParams {
             text: String::new(),
             paragraphs: Vec::new(),
             regions: Vec::new(),
+            shapes: p.shapes.iter().map(UiShape::from).collect(),
             roles: p.roles.iter().map(UiHandwritingRole::from).collect(),
             end_chars: p.end_chars.clone(),
             start_chars: p.start_chars.clone(),
@@ -926,6 +1038,144 @@ mod tests {
         .to_handwriting_params()
         .unwrap();
         assert_eq!(hp.regions[0].table_index, Some(2));
+    }
+
+    #[test]
+    fn test_ui_shape_mapping_unknown_kind_and_bad_fill() {
+        use handwrite_sim::core::shapes::BraceSide;
+
+        let ui_params = UiParams {
+            shapes: vec![
+                UiShape {
+                    kind: "brace_right".into(),
+                    page: 2,
+                    x: 1.5,
+                    y: 2.5,
+                    w: -30.0,
+                    h: 40.0,
+                    points: vec![[5.0, 6.0]],
+                    thickness: 3.0,
+                    jitter: 1.5,
+                    filled: true,
+                    fill: Some("#A1b2C3".into()),
+                    seed: 42,
+                },
+                // 未知 kind：整条跳过，不画错东西
+                UiShape {
+                    kind: "star".into(),
+                    ..UiShape::default()
+                },
+                // 非法颜色：按 None（跟随主墨色）处理，不整体报错
+                UiShape {
+                    kind: "rect".into(),
+                    page: 3,
+                    fill: Some("not-a-color".into()),
+                    ..UiShape::default()
+                },
+            ],
+            ..UiParams::default()
+        };
+
+        let hp = ui_params.to_handwriting_params().unwrap();
+        assert_eq!(hp.shapes.len(), 2, "未知 kind 应被跳过");
+        let brace = &hp.shapes[0];
+        assert_eq!(brace.kind, ShapeKind::Brace(BraceSide::Right));
+        assert_eq!(brace.page, 2);
+        assert_eq!((brace.x, brace.y, brace.w, brace.h), (1.5, 2.5, -30.0, 40.0));
+        assert_eq!(brace.points, vec![[5.0, 6.0]]);
+        assert_eq!(brace.fill, Some([0xa1, 0xb2, 0xc3]));
+        assert!(brace.filled);
+        assert_eq!(brace.seed, 42);
+        assert_eq!(hp.shapes[1].kind, ShapeKind::Rect);
+        assert_eq!(hp.shapes[1].page, 3);
+        assert_eq!(hp.shapes[1].fill, None, "颜色解析失败应按 None 处理");
+
+        // 反向映射：稳定 id / #RRGGBB / 几何字段都应还原
+        let back = UiParams::from_handwriting_params(&hp);
+        assert_eq!(back.shapes.len(), 2);
+        assert_eq!(back.shapes[0].kind, "brace_right");
+        assert_eq!(back.shapes[0].fill, Some("#a1b2c3".into()));
+        assert_eq!(back.shapes[0].page, 2);
+        assert_eq!(back.shapes[0].points, vec![[5.0, 6.0]]);
+        assert_eq!(back.shapes[1].kind, "rect");
+        assert_eq!(back.shapes[1].fill, None);
+
+        // 缺省字段：UiShape.page 默认 1；旧 UiParams JSON（无 shapes）应得到空数组
+        let single: UiShape = serde_json::from_str(r#"{"kind":"rect"}"#).unwrap();
+        assert_eq!(single.page, 1);
+        let legacy: UiParams = serde_json::from_str("{}").unwrap();
+        assert!(legacy.shapes.is_empty(), "旧前端不带 shapes 字段应兼容");
+
+        // 12 个前端 id 全部可映射，且往返后字符串不变（契约 §1 冻结表）
+        let ids = [
+            "line",
+            "arrow",
+            "polyline",
+            "rect",
+            "ellipse",
+            "triangle",
+            "brace_left",
+            "brace_right",
+            "bracket_left",
+            "bracket_right",
+            "check",
+            "underline",
+        ];
+        let all: UiParams = UiParams {
+            shapes: ids
+                .iter()
+                .map(|id| UiShape {
+                    kind: (*id).into(),
+                    ..UiShape::default()
+                })
+                .collect(),
+            ..UiParams::default()
+        };
+        let mapped = all.to_handwriting_params().unwrap();
+        assert_eq!(mapped.shapes.len(), ids.len(), "12 种图形都不应被跳过");
+        for (shape, expect_id) in mapped.shapes.iter().zip(ids) {
+            assert_eq!(shape.kind.as_id(), expect_id);
+        }
+        let back = UiParams::from_handwriting_params(&mapped);
+        for (shape, expect_id) in back.shapes.iter().zip(ids) {
+            assert_eq!(shape.kind, expect_id);
+        }
+    }
+
+    /// 前端契约的线格式：camelCase 字段、`kind` 扁平 id、`fill` 为 "#RRGGBB"/null。
+    #[test]
+    fn test_ui_shape_json_wire_format() {
+        let shape = UiShape {
+            kind: "brace_right".into(),
+            page: 2,
+            x: 120.5,
+            y: 80.0,
+            w: 24.0,
+            h: 160.0,
+            points: Vec::new(),
+            thickness: 2.4,
+            jitter: 1.2,
+            filled: false,
+            fill: Some("#c83232".into()),
+            seed: 1_234_567_890,
+        };
+        println!(
+            "UiShape JSON 示例：{}",
+            serde_json::to_string_pretty(&shape).unwrap()
+        );
+        let json = serde_json::to_value(&shape).unwrap();
+        assert_eq!(json["kind"], "brace_right");
+        assert_eq!(json["page"], 2);
+        assert_eq!(json["fill"], "#c83232");
+        assert_eq!(json["seed"], 1_234_567_890u64);
+        assert!(json.get("points").is_some());
+
+        // 跟随主墨色时序列化为 null（前端 `fill?: string | null` 可直接接收）
+        let follow = UiShape {
+            fill: None,
+            ..shape
+        };
+        assert_eq!(serde_json::to_value(&follow).unwrap()["fill"], serde_json::Value::Null);
     }
 }
 
