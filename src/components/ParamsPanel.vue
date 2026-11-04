@@ -109,9 +109,17 @@ const textCharCount = computed(() =>
 );
 
 const contentSummary = computed(() => {
-  if (mode.value === "document") return `文档底图 ${store.docPages?.length ?? 0} 页`;
-  if (textParaCount.value > 0) return `${textParaCount.value} 段 · ${textCharCount.value} 字`;
-  if (store.regions.length > 0) return `文字区域 ${store.regions.length} 个`;
+  // 图形标注也是「内容」：纯图形页不能显示「还没有内容」，否则用户以为没画上
+  const shapes = store.shapes.length;
+  const shapePart = shapes > 0 ? ` · 图形 ${shapes} 个` : "";
+  if (mode.value === "document") {
+    return `文档底图 ${store.docPages?.length ?? 0} 页${shapePart}`;
+  }
+  if (textParaCount.value > 0) {
+    return `${textParaCount.value} 段 · ${textCharCount.value} 字${shapePart}`;
+  }
+  if (store.regions.length > 0) return `文字区域 ${store.regions.length} 个${shapePart}`;
+  if (shapes > 0) return `图形 ${shapes} 个`;
   return "还没有内容";
 });
 

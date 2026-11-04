@@ -24,6 +24,12 @@ use crate::core::layout::{draw_bezier_line, draw_thick_line};
 /// 圆周率（f32）。
 const TAU: f32 = std::f32::consts::TAU;
 
+/// 线宽上限（像素）：`draw_thick_line` 的内层循环按线宽展开扫描，
+/// 无穷大/夸张线宽会让它跑近乎无限次，这里兜底夹住（校验层另有量级检查）。
+pub(crate) const MAX_PEN_THICKNESS: f32 = 256.0;
+/// 抖动上限（像素）：抖动会撑大几何跨度，同样需要上限防止扫描步数爆炸。
+pub(crate) const MAX_PEN_JITTER: f32 = 256.0;
+
 /// 大括号朝向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,7 +124,8 @@ impl ShapeKind {
     }
 }
 
-/// 一个符号图形的纯数据描述（可序列化，供前端 / 预设 JSON 使用）。
+/// 一个符号图形的纯数据描述（可序列化，供命令层镜像与工程 JSON 使用；
+/// 注意预设 JSON v2 的白名单**不含图形**，见 presets.rs）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShapeSpec {
     /// 图形类型。
@@ -190,7 +197,7 @@ impl ShapeSpec {
         self
     }
 
-    /// 设置墨迹颜色覆盖（`None` 表示跟随主墨色，可用 `with_fill(None)` 还原）。
+    /// 设置墨迹颜色覆盖（内部写 `Some`）。要恢复「跟随主墨色」请直接把 `fill` 设回 `None`。
     pub fn with_fill(mut self, fill: [u8; 3]) -> Self {
         self.fill = Some(fill);
         self
@@ -214,7 +221,7 @@ impl ShapeSpec {
         self
     }
 
-    /// 设置所在页（1 基；`0` 会被引擎按第 1 页处理）。
+    /// 设置所在页（1 基）。命令层会把 `0`/负数归一化为 1；core 校验会直接拒绝 `< 1`。
     pub fn with_page(mut self, page: i32) -> Self {
         self.page = page;
         self
@@ -226,6 +233,10 @@ impl ShapeSpec {
 /// - `mask`：页面级 `page_width * page_height` 布尔掩码（与文字墨迹共用）；
 /// - `offset_x` / `offset_y`：图形坐标到页面像素的平移量；
 /// - 尺寸不足的掩码直接忽略（防御调用方传错），越界像素自动裁剪。
+///
+/// 防御性上限：坐标/线宽/抖动在 `validate_with` 里已经限定在合理量级，
+/// 这里再夹一次并做「包围盒与画布不相交则早退」——
+/// 否则调用方绕过校验时，`draw_thick_line` 会按坐标跨度/线宽生成天量的扫描步数（等于卡死）。
 #[allow(clippy::too_many_arguments)]
 pub fn rasterize_shape(
     spec: &ShapeSpec,
@@ -238,22 +249,49 @@ pub fn rasterize_shape(
     if page_width == 0 || page_height == 0 || mask.len() < page_width * page_height {
         return;
     }
+    if !spec.thickness.is_finite() || !spec.jitter.is_finite() {
+        return;
+    }
     let ox = offset_x as f32;
     let oy = offset_y as f32;
+    let thickness = spec.thickness.clamp(0.8, MAX_PEN_THICKNESS);
+    let jitter = spec.jitter.clamp(0.0, MAX_PEN_JITTER);
     let mut pen = Pen {
         mask,
         width: page_width,
         height: page_height,
         rng: StdRng::seed_from_u64(spec.seed),
-        jitter: spec.jitter.max(0.0),
-        thickness: spec.thickness.max(0.8),
+        jitter,
+        thickness,
     };
 
     let x = spec.x + ox;
     let y = spec.y + oy;
     let (bx, by, bw, bh) = normalized_bbox(x, y, spec.w, spec.h);
     let points: Vec<(f32, f32)> = spec.points.iter().map(|p| (p[0] + ox, p[1] + oy)).collect();
-    let amp = spec.jitter.max(0.0);
+    let amp = jitter;
+
+    // 早退：图形的有效包围盒（含显式顶点、线宽与抖动余量）与画布不相交时直接跳过，
+    // 避免大坐标/离屏图形触发无谓的巨量扫描。
+    let margin = thickness + jitter * 2.0 + 4.0;
+    let (mut min_x, mut max_x) = (bx, bx + bw);
+    let (mut min_y, mut max_y) = (by, by + bh);
+    for (px, py) in &points {
+        min_x = min_x.min(*px);
+        max_x = max_x.max(*px);
+        min_y = min_y.min(*py);
+        max_y = max_y.max(*py);
+    }
+    if !min_x.is_finite() || !max_x.is_finite() || !min_y.is_finite() || !max_y.is_finite() {
+        return;
+    }
+    if max_x < -margin
+        || max_y < -margin
+        || min_x > page_width as f32 + margin
+        || min_y > page_height as f32 + margin
+    {
+        return;
+    }
 
     match spec.kind {
         ShapeKind::Line => {
@@ -308,7 +346,7 @@ pub fn rasterize_shape(
         ShapeKind::Brace(side) => pen.brace(bx, by, bw, bh, side, amp),
         ShapeKind::Bracket(side) => {
             // 三段折线（横-竖-横），两端略微出锋，像手写时收不住笔
-            let over = 2.0 + pen.thickness;
+            let over = pen.thickness * 1.5 + 0.8;
             let pts = match side {
                 BracketSide::Left => vec![
                     (bx + bw + over, by),
@@ -335,11 +373,11 @@ pub fn rasterize_shape(
             if pen.jitter > 0.0 {
                 // 勾的重描：细线整体略偏，出现复笔层次
                 let angle = pen.rng.random_range(0.0..TAU);
-                let dist = (pen.thickness * 1.0).clamp(1.4, 2.6);
+                let dist = (pen.thickness * 1.0).max(0.8);
                 let (sx, sy) = (angle.cos() * dist, angle.sin() * dist);
                 let ghost: Vec<(f32, f32)> =
                     pts.iter().map(|&(px, py)| (px + sx, py + sy)).collect();
-                pen.path(&ghost, false, amp * 1.1, (pen.thickness * 0.4).max(0.8));
+                pen.path(&ghost, false, amp * 1.1, (pen.thickness * 0.4).max(0.5));
             }
         }
         ShapeKind::Underline => {
@@ -347,6 +385,48 @@ pub fn rasterize_shape(
             pen.sketch_line(a, b, amp * 1.6, true);
         }
     }
+}
+
+/// 计算图形在页面内的**局部掩码包围盒**（用于逐图形合成时只在自身区域内分配掩码）。
+///
+/// 返回 `(x, y, w, h)`（页面像素，已钳制到页面内）；图形完全在页面外、退化尺寸
+/// 或坐标非有限时返回 `None`。外扩余量覆盖线宽、抖动与复描/箭头等笔画外溢。
+pub fn local_mask_box(
+    spec: &ShapeSpec,
+    page_width: usize,
+    page_height: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    if page_width == 0 || page_height == 0 {
+        return None;
+    }
+    let (bx, by, bw, bh) = normalized_bbox(spec.x, spec.y, spec.w, spec.h);
+    let (mut min_x, mut max_x) = (bx, bx + bw);
+    let (mut min_y, mut max_y) = (by, by + bh);
+    for p in &spec.points {
+        min_x = min_x.min(p[0]);
+        max_x = max_x.max(p[0]);
+        min_y = min_y.min(p[1]);
+        max_y = max_y.max(p[1]);
+    }
+    if ![min_x, max_x, min_y, max_y].iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let margin = spec.thickness.clamp(0.8, MAX_PEN_THICKNESS) * 2.0
+        + spec.jitter.clamp(0.0, MAX_PEN_JITTER) * 3.0
+        + 8.0;
+    let x0f = (min_x - margin).floor().max(0.0);
+    let y0f = (min_y - margin).floor().max(0.0);
+    let x1f = (max_x + margin).ceil().min(page_width as f32);
+    let y1f = (max_y + margin).ceil().min(page_height as f32);
+    if x1f <= x0f || y1f <= y0f {
+        return None;
+    }
+    let (x0, y0) = (x0f as usize, y0f as usize);
+    let (x1, y1) = (x1f as usize, y1f as usize);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some((x0, y0, x1 - x0, y1 - y0))
 }
 
 /// 把一组图形依次光栅化进页面掩码（无页面偏移的便捷入口）。
@@ -397,7 +477,7 @@ fn draw_arrow(pen: &mut Pen<'_>, a: (f32, f32), b: (f32, f32), amp: f32) {
     pen.sketch_line(a, b, amp, true);
     let thickness = pen.thickness;
     // 箭头长度随线宽自适应，短箭头时收缩，避免头部盖满整条线
-    let head_len = (thickness * 5.0).max(7.0).min(len * 0.55);
+    let head_len = (thickness * 5.0).min(len * 0.55).max(2.0);
     let base = dy.atan2(dx);
     const HEAD_HALF_ANGLE: f32 = 0.46; // 约 26°，接近手写箭头的自然张开角
     for sign in [-1.0_f32, 1.0] {
@@ -461,12 +541,12 @@ impl Pen<'_> {
         self.line(a, b, thickness, amp);
         if double && self.jitter > 0.0 {
             let angle = self.rng.random_range(0.0..TAU);
-            let dist = (thickness * 1.15).clamp(1.6, 3.2);
+            let dist = (thickness * 1.15).max(0.6);
             let (sx, sy) = (angle.cos() * dist, angle.sin() * dist);
             self.line(
                 (a.0 + sx, a.1 + sy),
                 (b.0 + sx, b.1 + sy),
-                (thickness * 0.42).max(0.8),
+                (thickness * 0.42).max(0.5),
                 amp * 1.2,
             );
         }
@@ -554,13 +634,13 @@ impl Pen<'_> {
         self.path(points, closed, amp, thickness);
         if self.jitter > 0.0 {
             let angle = self.rng.random_range(0.0..TAU);
-            let dist = (thickness * 1.15).clamp(1.6, 3.2);
+            let dist = (thickness * 1.15).max(0.6);
             let (sx, sy) = (angle.cos() * dist, angle.sin() * dist);
             let ghost: Vec<(f32, f32)> = points
                 .iter()
                 .map(|&(x, y)| (x + sx, y + sy))
                 .collect();
-            self.path(&ghost, closed, amp * 1.25, (thickness * 0.42).max(0.8));
+            self.path(&ghost, closed, amp * 1.25, (thickness * 0.42).max(0.5));
         }
     }
 
@@ -617,7 +697,7 @@ impl Pen<'_> {
         self.ellipse_arcs(cx, cy, rx, ry, start, TAU + over, amp, thickness);
         if !filled && self.jitter > 0.0 {
             // 复描：略大一圈的细线，从另一处起笔
-            let inset = (thickness * 0.8 + 0.8).clamp(1.8, 4.0);
+            let inset = (thickness * 0.8 + 0.8).max(0.8);
             let start2 = start + self.rng.random_range(0.5..1.5);
             self.ellipse_arcs(
                 cx,
@@ -627,7 +707,7 @@ impl Pen<'_> {
                 start2,
                 TAU + 0.15,
                 amp * 1.2,
-                (thickness * 0.4).max(0.8),
+                (thickness * 0.4).max(0.5),
             );
         }
     }
@@ -875,3 +955,5 @@ mod tests {
         assert_eq!(spec.with_fill([1, 2, 3]).fill, Some([1, 2, 3]));
     }
 }
+
+

@@ -125,15 +125,46 @@ onMounted(async () => {
 
 
 // 全局快捷键：
-// - Esc：先取消图形选中，再退出文字区域调整态（两者不一起清，避免误伤）；
+// - Esc：退出图形标注（清选中）、再取消文字区域调整态（两者不一起清，避免误伤）；
 // - Delete / Backspace：删除当前选中的图形；
-// 正在输入框 / 文本域 / contenteditable 里打字时不劫持（保留原有判断）。
+// 输入框 / 文本域 / contenteditable / naive-ui 的选择器与滑块聚焦时不劫持；
+// 有弹窗（区域/帮助/关于/更新/引导/正文编辑）时也不劫持——否则 Esc 关弹窗会连带退出标注模式。
 function isTypingTarget(e: KeyboardEvent): boolean {
   const el = e.target as HTMLElement | null;
-  return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+  if (!el) return false;
+  if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) return true;
+  // naive-ui 的 NSelect / NSlider 触发器是 tabindex=0 的 div，不是 input：
+  // 不拦的话，聚焦「类型 / 页码 / 线宽」控件时按 Delete 会删掉选中的图形。
+  return !!el.closest(
+    [
+      ".n-select",
+      ".n-base-selection",
+      ".n-base-selection-tags",
+      ".n-color-picker",
+      ".n-slider",
+      "[role='combobox']",
+      "[role='listbox']",
+      "[role='slider']",
+      "[role='spinbutton']",
+    ].join(","),
+  );
+}
+
+/** 是否有模态层打开（此时键盘事件交给弹窗自己处理）。 */
+function hasOpenModal(): boolean {
+  return (
+    store.dialogOpen ||
+    store.helpModalOpen ||
+    store.aboutModalOpen ||
+    store.updateModalOpen ||
+    store.onboardingOpen
+  );
 }
 
 function onKeydown(e: KeyboardEvent): void {
+  // 已被 naive-ui 等组件处理过（preventDefault）就不再插手
+  if (e.defaultPrevented) return;
+  if (hasOpenModal()) return;
   if (isTypingTarget(e)) return;
 
   if (e.key === "Escape") {

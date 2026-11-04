@@ -101,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let glyph_top_1 = line_top(0);
     let glyph_top_2 = line_top(1);
     // 行内文字的实际左右边界（末项 = 整行右边缘）
-    let line1_right = xs1[xs1.len() - 1] + FONT_SIZE * 0.0;
+    let line1_right = xs1[xs1.len() - 1];
     let row2_end = xs2[xs2.len() - 1];
 
     let shapes = vec![
@@ -261,3 +261,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+

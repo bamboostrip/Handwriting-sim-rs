@@ -6,7 +6,6 @@
 //! 对齐/缩进/右对齐/跨页，见 layout::layout_paragraphs）。
 //! 预览对超大背景（宽 > `PREVIEW_MAX_WIDTH`）做降采样并等比缩放空间参数，导出始终全分辨率。
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -24,6 +23,8 @@ use crate::core::shapes;
 pub enum EngineError {
     #[error("参数校验失败：{0}")]
     Params(#[from] ParamsError),
+    #[error("页数超出上限：{pages} 页（最多 {max} 页，请检查文字区域/图形的页码）")]
+    TooManyPages { pages: usize, max: usize },
     #[error("字体加载失败：{0}")]
     Font(String),
     #[error("背景图片加载失败：{0}")]
@@ -46,6 +47,10 @@ pub enum EngineError {
 /// 变细碎裂、字间隙压缩后视觉上"挤在一起"（与导出观感不一致）；仅对
 /// 超大背景（>4096，如高分辨扫描）兜底降采样控内存。
 const PREVIEW_MAX_WIDTH: u32 = 4096;
+
+/// 单次渲染的页数上限：防止坏页码（如 10000）把渲染循环撑到上万页并 OOM。
+/// 2000 页已远超真实手写文档。
+const MAX_RENDER_PAGES: usize = 2000;
 
 /// 预览背景缓存（路径+修改时间 → (原始宽度, 缩略图)）。
 ///
@@ -712,7 +717,13 @@ fn generate_pages_with(
     let width = first_background.width() as usize;
     let height = first_background.height() as usize;
 
-    let font_map = DefaultEngine::preload_fonts(params)?;
+    // 纯图形/纯背景文档不需要字体：此时不要预加载（否则一个失效的 font_path
+    // 会让「只画符号」的文档报 Font 错误，与「图形不依赖字体」的设计矛盾）。
+    let font_map = if has_renderable_content(params) {
+        DefaultEngine::preload_fonts(params)?
+    } else {
+        std::collections::HashMap::new()
+    };
 
     // ---- 主文字逐页掩码（无文字时为空 → 纯背景路径） ----
     let main_rng = &mut StdRng::seed_from_u64(seed);
@@ -808,6 +819,16 @@ fn generate_pages_with(
         )
         .max(1);
 
+    // 页数兜底：`n_pages` 由「文字区域/图形页码 / 背景页数」直接决定，
+    // 一个坏页码（如 10000）会把渲染循环撑到上万页并 OOM（A4@300dpi 每页约 33MiB）。
+    // 2000 页已远超真实手写文档，超过直接报错而不是硬撑。
+    if n_pages > MAX_RENDER_PAGES {
+        return Err(EngineError::TooManyPages {
+            pages: n_pages,
+            max: MAX_RENDER_PAGES,
+        });
+    }
+
     let perturb_rng = &mut StdRng::seed_from_u64(DefaultEngine::perturb_seed(seed));
     let mut out: Vec<RgbaImage> = Vec::with_capacity(n_pages);
     for page_index in 0..n_pages {
@@ -847,41 +868,59 @@ fn generate_pages_with(
             }
         }
         // 图形标注最后合成（批注语义：默认压在文字之上）。
-        // 按解析后的墨色分组：同色图形合进一个页面级掩码，把每页
-        // `label_strokes` 的整页 BFS 次数压到颜色数（而不是图形数）。
-        // 图形自身已在几何阶段注入手绘抖动，合成层 σ 取 0 →
-        // `PerturbStyle::is_printed()` 为真，走 `draw_printed_mask` 直写：
-        // 不对整条线做旋转/平移，也不消耗 `perturb_rng`，保持既有文字层
-        // 的同 seed 可复现性（预览=导出）。
-        if !params.shapes.is_empty() {
-            let mut shape_masks: HashMap<[u8; 3], Vec<bool>> = HashMap::new();
-            // HashMap 迭代顺序不稳定；按颜色首次出现顺序绘制，
-            // 保证叠放关系确定、同 seed 输出逐像素可复现。
-            let mut color_order: Vec<[u8; 3]> = Vec::new();
-            for shape in &params.shapes {
-                if shape.page.max(1) as usize - 1 != page_index {
-                    continue;
-                }
-                let color = shape.fill.unwrap_or(params.fill);
-                let mask = shape_masks.entry(color).or_insert_with(|| {
-                    color_order.push(color);
-                    vec![false; width * height]
-                });
-                shapes::rasterize_shape(shape, mask, width, height, 0, 0);
+        //
+        // **逐个图形合成，而不是按颜色合并**：
+        // - 数组顺序 = 叠放顺序（后画的在上层），前端列表的「上移/下移一层」才有意义；
+        // - 命中测试也按数组倒序，视觉层次与点选结果一致（按色合并时两者会错位）；
+        // - 图形自身已在几何阶段注入手绘抖动，合成层做「零扰动直写」
+        //   （`perturb::draw_printed_mask`，等价于 σ=0 分支）：
+        //   不对整条线做旋转/平移，也不消耗 `perturb_rng`，
+        //   因此既有文字层的随机数消耗顺序不变（同 seed 预览=导出仍然成立）。
+        //
+        // 每个图形只在**自身包围盒**内分配掩码并直写（而非整页 mask + 整页扫描）：
+        // A4@300dpi 整页掩码 8.3MiB，50 个图形就是 400+MiB 的内存流量／页；
+        // 局部化后开销只与图形面积相关，且不随页面上图形数线性增长。
+        for shape in params
+            .shapes
+            .iter()
+            .filter(|s| s.page.max(1) as usize - 1 == page_index)
+        {
+            let color = shape.fill.unwrap_or(params.fill);
+            let Some((bx, by, bw, bh)) = shapes::local_mask_box(shape, width, height) else {
+                continue; // 完全在页面外 / 退化尺寸
+            };
+            let mut local = vec![false; bw * bh];
+            // 把图形平移到局部坐标原点后再光栅化（rasterize_shape 的 offset 只能加，不能减）
+            let mut shifted = shape.clone();
+            shifted.x -= bx as f32;
+            shifted.y -= by as f32;
+            for p in shifted.points.iter_mut() {
+                p[0] -= bx as f32;
+                p[1] -= by as f32;
             }
-            for color in color_order {
-                let Some(mask) = shape_masks.get(&color) else {
-                    continue;
-                };
-                if mask.iter().any(|&b| b) {
-                    perturb::perturb_styled_layer_into(
-                        mask,
-                        width,
-                        height,
-                        &layout::PerturbStyle::new(color, false, 0.0, 0.0, 0.0),
-                        perturb_rng,
-                        &mut canvas,
-                    );
+            shapes::rasterize_shape(&shifted, &mut local, bw, bh, 0, 0);
+            if !local.iter().any(|&b| b) {
+                continue;
+            }
+            // 把局部掩码按颜色 blit 回整页画布（逐行拷贝，列区间连续）
+            let page_row = width * 3;
+            for row in 0..bh {
+                let ty = by + row;
+                if ty >= height {
+                    break;
+                }
+                let src = &local[row * bw..(row + 1) * bw];
+                let dst_row = &mut canvas[ty * page_row + bx * 3..];
+                for (col, &on) in src.iter().enumerate() {
+                    if !on {
+                        continue;
+                    }
+                    let t = col * 3;
+                    if t + 2 < dst_row.len() {
+                        dst_row[t] = color[0];
+                        dst_row[t + 1] = color[1];
+                        dst_row[t + 2] = color[2];
+                    }
                 }
             }
         }

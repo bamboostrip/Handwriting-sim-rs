@@ -417,3 +417,195 @@ fn same_seed_shapes_render_pixel_identical() {
         "普通背景（≤4096）不应降采样"
     );
 }
+
+/// 8. 叠放顺序 = shapes 数组顺序（后画的在上层）。
+///
+/// 早期实现按「解析墨色」分组合成，同色图形合进一个掩码 → 列表里的
+/// 「上移/下移一层」在默认（全部跟随主墨色）时完全无效，跨色叠放也不等于数组顺序。
+/// 现在逐图形合成，这个测试锁住「后画的盖住先画的」这一语义。
+#[test]
+fn shapes_are_composited_in_array_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let bg = white_bg(dir.path(), 300, 300);
+    let blue = [20u8, 90, 200];
+    let red = [210u8, 50, 40];
+
+    // 两个实心矩形部分重叠：先蓝后红 → 重叠区必须是红
+    let mut params = HandwritingParams {
+        background_path: bg.to_string_lossy().into_owned(),
+        fill: [30, 30, 30],
+        ..HandwritingParams::default()
+    };
+    let mk = |color: [u8; 3], x: f32| {
+        shape(ShapeKind::Rect, 1, x, 80.0, 140.0, 140.0)
+            .with_fill(color)
+            .with_filled(true)
+            .with_jitter(0.0)
+            .with_seed(9)
+    };
+    params.shapes = vec![mk(blue, 40.0), mk(red, 110.0)];
+
+    let pages = DefaultEngine::new(11).render_pages(&params).unwrap();
+    // 重叠区中心 ≈ (145, 150)
+    let px = pages[0].get_pixel(145, 150).0;
+    assert_eq!(
+        [px[0], px[1], px[2]],
+        red,
+        "后画的图形应盖住先画的（数组顺序 = 叠放顺序）"
+    );
+
+    // 交换顺序 → 重叠区应变回蓝
+    params.shapes.swap(0, 1);
+    let pages = DefaultEngine::new(11).render_pages(&params).unwrap();
+    let px = pages[0].get_pixel(145, 150).0;
+    assert_eq!(
+        [px[0], px[1], px[2]],
+        blue,
+        "交换数组顺序后叠放关系应随之改变（列表 ↑↓ 才有意义）"
+    );
+}
+
+/// 9. 图形层不消耗扰动随机源：把图形放到**其它页**或**画布外**时，
+///    第 1 页必须与「完全没有图形」逐像素一致（同 seed 渲两次发现不了这类回归）。
+#[test]
+fn shapes_do_not_consume_perturb_rng_for_other_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let bg = white_bg(dir.path(), 320, 220);
+    let base = HandwritingParams {
+        background_path: bg.to_string_lossy().into_owned(),
+        fill: [25, 25, 25],
+        font_size: 24.0,
+        line_spacing: 32.0,
+        ..HandwritingParams::default()
+    };
+    let font = system_font();
+    let mut params = base.clone();
+    if let Some(f) = &font {
+        params.font_path = f.to_string_lossy().into_owned();
+        params.text = "第一页正文用于对照图形层是否消耗扰动随机源。".into();
+    } else {
+        // 没字体就退化为纯图形对照：只要第 1 页仍然空白即可
+        params.background_path = bg.to_string_lossy().into_owned();
+    }
+
+    let plain = DefaultEngine::new(4242).render_pages(&params).unwrap();
+    let plain_page0 = plain[0].clone();
+
+    // 图形在第 2 页
+    params.shapes = vec![shape(ShapeKind::Rect, 2, 40.0, 40.0, 120.0, 80.0).with_fill([200, 40, 40])];
+    let with_p2 = DefaultEngine::new(4242).render_pages(&params).unwrap();
+    assert!(with_p2.len() >= 2);
+    assert_eq!(
+        plain_page0.as_raw(),
+        with_p2[0].as_raw(),
+        "第 2 页的图形不应改变第 1 页任何像素（图形层不得消耗扰动 rng）"
+    );
+
+    // 图形在第 1 页但完全在画布外
+    params.shapes = vec![shape(ShapeKind::Rect, 1, -500.0, -500.0, 40.0, 40.0)];
+    let off_canvas = DefaultEngine::new(4242).render_pages(&params).unwrap();
+    assert_eq!(
+        plain_page0.as_raw(),
+        off_canvas[0].as_raw(),
+        "画布外的图形不应改变任何像素（也不应消耗 rng）"
+    );
+}
+
+/// 10. 防御性上限：页码过大 / 坐标量级夸张必须在**校验阶段**被拒绝，
+///     而不是让引擎分配上万页或在线段扫描里卡死（见 docs §10.1 审查记录）。
+#[test]
+fn shape_limits_are_validated() {
+    let dir = tempfile::tempdir().unwrap();
+    let font = system_font();
+    let bg = white_bg(dir.path(), 200, 200);
+    let mut base = HandwritingParams {
+        background_path: bg.to_string_lossy().into_owned(),
+        fill: [20, 20, 20],
+        ..HandwritingParams::default()
+    };
+    if let Some(f) = &font {
+        base.font_path = f.to_string_lossy().into_owned();
+        base.text = "校验".into();
+    }
+
+    // 页码超过上限
+    let mut p = base.clone();
+    p.shapes = vec![shape(ShapeKind::Rect, 10000, 10.0, 10.0, 50.0, 50.0)];
+    assert!(
+        matches!(p.validate_with(false), Err(ParamsError::ShapePageRange { .. })),
+        "页码 10000 应被 ShapePageRange 拒绝"
+    );
+
+    // 坐标量级夸张（x + w 会溢出为 inf）
+    let mut p = base.clone();
+    p.shapes = vec![shape(ShapeKind::Rect, 1, 3.0e38, 10.0, 3.0e38, 10.0)];
+    assert!(
+        matches!(p.validate_with(false), Err(ParamsError::ShapeGeometry { .. })),
+        "3e38 级坐标应被 ShapeGeometry 拒绝"
+    );
+
+    // 线宽/抖动夸张
+    let mut p = base.clone();
+    p.shapes = vec![shape(ShapeKind::Rect, 1, 10.0, 10.0, 50.0, 50.0).with_thickness(1.0e30)];
+    assert!(matches!(p.validate_with(false), Err(ParamsError::ShapeGeometry { .. })));
+
+    let mut p = base;
+    p.shapes = vec![shape(ShapeKind::Rect, 1, 10.0, 10.0, 50.0, 50.0).with_jitter(1.0e9)];
+    assert!(matches!(p.validate_with(false), Err(ParamsError::ShapeGeometry { .. })));
+}
+
+/// 11. 只有图形时**不需要字体**：即使 font_path 指向不存在的文件也应能渲染
+///     （纯符号页没有文字，不该因为字体失效而失败）。
+#[test]
+fn shapes_only_does_not_require_a_valid_font() {
+    let dir = tempfile::tempdir().unwrap();
+    let bg = white_bg(dir.path(), 240, 200);
+    let params = HandwritingParams {
+        // 故意给一个不存在的字体路径：没有文字内容时不应尝试加载
+        font_path: dir.path().join("missing-font.ttf").to_string_lossy().into_owned(),
+        background_path: bg.to_string_lossy().into_owned(),
+        fill: [20, 20, 20],
+        shapes: vec![shape(ShapeKind::Ellipse, 1, 60.0, 50.0, 120.0, 90.0)],
+        ..HandwritingParams::default()
+    };
+    let page = render_preview(&params, 5).expect("纯图形页面不应因字体缺失而失败");
+    assert!(page.pixels().any(|p| ink_px(p.0)), "椭圆应留下墨迹");
+}
+
+/// 12. 大背景预览降采样：图形的位置与 points 都要按比例缩放
+///     （只测 Rect 重心会漏掉 Line/Arrow 的 points 缩放）。
+#[test]
+fn huge_background_preview_scales_points() {
+    let dir = tempfile::tempdir().unwrap();
+    let bg = white_bg(dir.path(), 8192, 1200); // > PREVIEW_MAX_WIDTH(4096) → scale = 0.5
+    let params = HandwritingParams {
+        background_path: bg.to_string_lossy().into_owned(),
+        fill: [20, 20, 20],
+        shapes: vec![ShapeSpec::new(ShapeKind::Line, 1600.0, 600.0, 1600.0, 0.0)
+            .with_points(vec![[1600.0, 600.0], [3200.0, 600.0]])
+            .with_thickness(8.0)
+            .with_jitter(0.0)
+            .with_seed(3)],
+        ..HandwritingParams::default()
+    };
+    let pages = render_all_pages_preview(&params, 9).unwrap();
+    let page = &pages[0];
+    assert_eq!(page.width(), 4096, "预览应降采样到 PREVIEW_MAX_WIDTH");
+
+    // 源坐标 (1600..3200, 600) → 预览坐标 (800..1600, 300)
+    let (mut sx, mut sy, mut n) = (0f64, 0f64, 0f64);
+    for (i, px) in page.pixels().enumerate() {
+        if ink_px(px.0) {
+            sx += (i % page.width() as usize) as f64;
+            sy += (i / page.width() as usize) as f64;
+            n += 1.0;
+        }
+    }
+    assert!(n > 0.0, "预览里应存在线的墨迹");
+    let (cx, cy) = (sx / n, sy / n);
+    assert!(
+        (cx - 1200.0).abs() < 12.0,
+        "线中点 x 应按 0.5 缩放到 ≈1200（含抖动余量），实际 {cx:.1}"
+    );
+    assert!((cy - 300.0).abs() < 8.0, "线中点 y 应按 0.5 缩放到 ≈300，实际 {cy:.1}");
+}

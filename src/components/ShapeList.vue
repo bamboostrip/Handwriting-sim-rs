@@ -9,6 +9,7 @@ import { computed } from "vue";
 import { NButton } from "naive-ui";
 import {
   addShapeAroundRegion,
+  cancelRegionEdit,
   clearShapes,
   deleteShape,
   moveShapeOrder,
@@ -32,10 +33,12 @@ const addAroundTitle = computed(() => {
   return `用第 ${store.regions[idx].page} 页的文字区域生成一个矩形标注`;
 });
 
-/** 切到图形所在页并选中；预览页数还没覆盖该页时夹到最后一页，避免越界。 */
+/** 切到图形所在页并选中；预览页数还没覆盖该页时夹到最后一页，避免越界。
+ *  同时结束区域调整态：区域编辑框不判页归属，跨页后会画在错误的页上。 */
 function jumpToShape(index: number): void {
   const s = store.shapes[index];
   if (!s) return;
+  cancelRegionEdit();
   const lastPage = Math.max(store.previewPages.length - 1, 0);
   store.pageIndex = Math.min(Math.max(s.page - 1, 0), lastPage);
   selectShape(index);
@@ -90,18 +93,18 @@ function addAroundRegion(): void {
         <button
           class="shape-act"
           type="button"
-          title="上移一层"
-          :disabled="i === 0"
-          @click.stop="moveShapeOrder(i, -1)"
+          title="上移一层（更靠上层）"
+          :disabled="i === store.shapes.length - 1"
+          @click.stop="moveShapeOrder(i, 1)"
         >
           ↑
         </button>
         <button
           class="shape-act"
           type="button"
-          title="下移一层"
-          :disabled="i === store.shapes.length - 1"
-          @click.stop="moveShapeOrder(i, 1)"
+          title="下移一层（更靠下层）"
+          :disabled="i === 0"
+          @click.stop="moveShapeOrder(i, -1)"
         >
           ↓
         </button>

@@ -47,6 +47,7 @@ import {
   type ViewState,
 } from "../viewport";
 import {
+  LINE_LIKE_SHAPE_KINDS,
   SHAPE_KIND_LABELS,
   addShapeFromRect,
   cancelRegionEdit,
@@ -61,6 +62,7 @@ import {
   prevPage,
   selectShape,
   setRegionMode,
+  setShapeEndpoints,
   setShapeKind,
   setShapeMode,
   shapeAtPoint,
@@ -345,7 +347,10 @@ const shapeDraftBox = computed(() => ({
   h: Math.abs(shapeDraft.y1 - shapeDraft.y0),
 }));
 const shapeDraftIsLine = computed(
-  () => store.shapeKind === "line" || store.shapeKind === "arrow",
+  () =>
+    store.shapeKind === "line" ||
+    store.shapeKind === "arrow" ||
+    store.shapeKind === "underline",
 );
 
 /** 线/箭头草稿的箭头头（显示像素三角形顶点串），方向跟随当前拖拽方向 */
@@ -368,7 +373,18 @@ const shapeDraftArrowHead = computed(() => {
 function shapeZoneAt(px: number, py: number): Zone {
   const box = shapeBoxBase.value;
   if (!box) return "outside";
-  return zoneInBox(box, px, py);
+  const z = zoneInBox(box, px, py);
+  if (z === "outside") return z;
+  // 细长图形的退化手柄：短边方向只有 0~16 显示像素时，边/角手柄在几何上无法分辨
+  //（水平线 nearT/nearB 重叠会被判成 "t"，窄大括号会被判成 "l"），
+  // 统一降级为「整体移动」，避免拖一下就把包围盒拉变形。
+  const THIN = 16;
+  const zIsCorner = z === "tl" || z === "tr" || z === "bl" || z === "br";
+  const zIsVerticalEdge = z === "l" || z === "r";
+  const zIsHorizontalEdge = z === "t" || z === "b";
+  if (box.w < THIN && (zIsVerticalEdge || zIsCorner)) return "move";
+  if (box.h < THIN && (zIsHorizontalEdge || zIsCorner)) return "move";
+  return z;
 }
 
 /** 显示坐标 → 背景原始像素（图形 API 一律收源坐标） */
@@ -377,12 +393,116 @@ function displayToSrc(px: number, py: number): [number, number] {
   return [px / f, py / f];
 }
 
+/** 图形命中容差（背景原始像素）：固定 8 个**显示**像素再按当前缩放换算，
+ *  否则缩小到 25% 时 3 源像素只有 0.75 显示像素，几乎点不中；放大到 400% 又过于灵敏。 */
+function shapeHitTolSrc(): number {
+  const f = factor.value > 0 ? factor.value : 1;
+  return Math.max(3, 8 / f);
+}
+
+/** 显示坐标下点到线段的最短距离（线类图形的「拖线身 = 整体平移」判定用）。 */
+function distToSegmentDisplay(
+  px: number,
+  py: number,
+  a: [number, number],
+  b: [number, number],
+): number {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq <= 1e-9) return Math.hypot(px - a[0], py - a[1]);
+  const t = Math.max(0, Math.min(1, ((px - a[0]) * dx + (py - a[1]) * dy) / lenSq));
+  return Math.hypot(px - (a[0] + t * dx), py - (a[1] + t * dy));
+}
+
+/** 选中线类图形（直线 / 箭头 / 下划线）的两个端点（显示坐标）；盒子类返回 null。
+ *  线类用端点手柄而不是 8 向手柄：水平/垂直线的包围盒高宽为 0，
+ *  8 向判定会退化成「拖边缩放」，既移不动也改不了方向。 */
+const shapeLineEnds = computed<[[number, number], [number, number]] | null>(() => {
+  const s = selectedShape.value;
+  if (!s || !LINE_LIKE_SHAPE_KINDS.has(s.kind)) return null;
+  const f = factor.value;
+  const pts =
+    s.points && s.points.length >= 2
+      ? s.points
+      : [
+          [s.x, s.y],
+          [s.x + s.w, s.y + s.h],
+        ];
+  return [
+    [pts[0][0] * f, pts[0][1] * f],
+    [pts[1][0] * f, pts[1][1] * f],
+  ];
+});
+
+/** 端点手柄命中（显示像素，12px 容差）：返回 0 / 1，未命中 -1。 */
+function shapeEndpointAt(px: number, py: number): 0 | 1 | -1 {
+  const ends = shapeLineEnds.value;
+  if (!ends) return -1;
+  const d0 = Math.hypot(px - ends[0][0], py - ends[0][1]);
+  const d1 = Math.hypot(px - ends[1][0], py - ends[1][1]);
+  if (d0 <= 12 && d0 <= d1) return 0;
+  if (d1 <= 12) return 1;
+  return -1;
+}
+
+/** 端点拖动状态：固定另一端，拖动期间只改被拖的一端（松手才写回 store）。 */
+const lineDrag = ref<{
+  index: number;
+  end: 0 | 1;
+  origin: [number, number];
+  fixed: [number, number];
+  current: [number, number];
+} | null>(null);
+
+/** 选中线类的实时显示几何：拖动中显示实时端点，静止时就是两端点。 */
+const selectedLineOverlay = computed<[[number, number], [number, number]] | null>(() => {
+  const ends = shapeLineEnds.value;
+  if (!ends) return null;
+  const d = lineDrag.value;
+  if (!d) return ends;
+  return d.end === 0 ? [d.current, d.fixed] : [d.fixed, d.current];
+});
+
+/** 进入端点拖动态 */
+function beginLineDrag(end: 0 | 1, p: { x: number; y: number }): void {
+  const idx = store.selectedShapeIndex;
+  const ends = shapeLineEnds.value;
+  if (!ends || idx < 0) return;
+  const fixed = end === 0 ? ends[1] : ends[0];
+  const origin = end === 0 ? ends[0] : ends[1];
+  const cp = clampPt(p);
+  cancelRegionEdit();
+  shapeAdjusting.value = false;
+  lineDrag.value = {
+    index: idx,
+    end,
+    origin: [origin[0], origin[1]],
+    fixed: [fixed[0], fixed[1]],
+    current: [cp.x, cp.y],
+  };
+}
+
 const cursorStyle = computed(() => {
   if (panning.value) return "grabbing";
+  if (lineDrag.value) return "crosshair";
   if (shapeAdjusting.value) return ZONE_CURSORS[shapeZone.value] ?? "default";
   if (adjusting.value) return ZONE_CURSORS[zone.value] ?? "default";
-  if (store.shapeMode) return "crosshair";
-  if (hasPreview.value && shapeBoxBase.value) {
+  if (store.shapeMode) {
+    // 标注模式下仍可抓已选图形的端点/手柄：给出可拖拽光标提示
+    if (hasPreview.value && shapeEndpointAt(hover.x, hover.y) !== -1) return "crosshair";
+    if (hasPreview.value && !shapeLineEnds.value && shapeBoxBase.value) {
+      const z = shapeZoneAt(hover.x, hover.y);
+      if (z !== "outside" && z !== "move") return ZONE_CURSORS[z];
+    }
+    return "crosshair";
+  }
+  if (hasPreview.value && shapeEndpointAt(hover.x, hover.y) !== -1) return "crosshair";
+  const ends = shapeLineEnds.value;
+  if (ends) {
+    // 线类：悬停线身显示可拖动光标
+    if (distToSegmentDisplay(hover.x, hover.y, ends[0], ends[1]) <= 8) return "move";
+  } else if (hasPreview.value && shapeBoxBase.value) {
     const z = shapeZoneAt(hover.x, hover.y);
     if (z !== "outside") return ZONE_CURSORS[z];
   }
@@ -393,7 +513,7 @@ const cursorStyle = computed(() => {
   if (store.regionMode) return "crosshair";
   if (hasPreview.value && factor.value > 0) {
     const [sx, sy] = displayToSrc(hover.x, hover.y);
-    if (shapeAtPoint(sx, sy) >= 0) return "pointer";
+    if (shapeAtPoint(sx, sy, shapeHitTolSrc()) >= 0) return "pointer";
   }
   if (hasPreview.value && findRegionAt(hover.x, hover.y) >= 0) {
     return "pointer";
@@ -563,12 +683,45 @@ function onDown(e: PointerEvent): void {
 
   // 0. 图形标注模式：左键拖拽起稿（十字光标，松手才创建；与区域框选互斥）
   if (store.shapeMode) {
-    // 例外：已选图形的**手柄**仍然可用——画完一个图形不必先退出标注模式才能微调尺寸；
-    // 拖动内部仍视为起新草稿（方便在已有图形附近继续画），拖角/边才是缩放。
-    if (selectedShape.value && shapeBoxBase.value) {
-      const zh = shapeZoneAt(p.x, p.y);
-      if (zh !== "outside" && zh !== "move") {
-        beginShapeAdjust(zh, p);
+    // 例外：**已选中的图形仍可继续微调**——画完一个图形不必先退出标注模式才能拖动/缩放。
+    // 线类：拖端点改方向、拖线身整体平移；盒子类：拖角/边缩放、拖内部整体移动。
+    // 要画新图形时先点一下选中框外面（会先清选中），再拖。
+    if (selectedShape.value) {
+      const ep = shapeEndpointAt(p.x, p.y);
+      if (ep !== -1) {
+        beginLineDrag(ep, p);
+        return;
+      }
+      const ends = shapeLineEnds.value;
+      if (ends) {
+        if (distToSegmentDisplay(p.x, p.y, ends[0], ends[1]) <= 8) {
+          cancelRegionEdit();
+          beginShapeAdjust("move", p);
+          return;
+        }
+      } else if (shapeBoxBase.value) {
+        const zh = shapeZoneAt(p.x, p.y);
+        if (zh !== "outside") {
+          cancelRegionEdit();
+          beginShapeAdjust(zh, p);
+          return;
+        }
+      }
+    }
+    // 点中**其它**已有图形：选中它并进入调整，避免标注模式里「只画不选」
+    if (hasPreview.value && factor.value > 0) {
+      const [sx, sy] = displayToSrc(p.x, p.y);
+      const hit = shapeAtPoint(sx, sy, shapeHitTolSrc());
+      if (hit >= 0) {
+        cancelRegionEdit();
+        selectShape(hit);
+        const ends2 = shapeLineEnds.value;
+        if (ends2) {
+          beginShapeAdjust("move", p);
+        } else {
+          const z2 = shapeZoneAt(p.x, p.y);
+          beginShapeAdjust(z2 === "outside" ? "move" : z2, p);
+        }
         return;
       }
     }
@@ -588,24 +741,50 @@ function onDown(e: PointerEvent): void {
     return;
   }
 
-  // 1'. 图形选中优先（非图形模式）：先判当前选中图形的 8 向手柄 / 内部，
+  // 1'. 图形选中优先（非图形模式）：
+  //     线类：拖端点改方向 / 拖线身整体平移；盒子类：8 向手柄缩放 / 拖内部整体移动；
   //     再判当前页任意图形命中（选中并进入调整态）；都未命中才回到区域路径。
   //     `regionMode` 是显式框选模式，此时不得抢占：点击一律走下面的区域框选路径。
-  if (!store.regionMode && selectedShape.value && shapeBoxBase.value) {
-    const z = shapeZoneAt(p.x, p.y);
-    if (z !== "outside") {
-      cancelRegionEdit();
-      beginShapeAdjust(z, p);
+  if (!store.regionMode && selectedShape.value) {
+    const ep = shapeEndpointAt(p.x, p.y);
+    if (ep !== -1) {
+      beginLineDrag(ep, p);
       return;
+    }
+    const ends = shapeLineEnds.value;
+    if (ends) {
+      // 线类：点在线身附近 = 整体平移（不能用 8 向判定，水平线高为 0 时移不动）
+      if (distToSegmentDisplay(p.x, p.y, ends[0], ends[1]) <= 8) {
+        cancelRegionEdit();
+        beginShapeAdjust("move", p);
+        return;
+      }
+    } else if (shapeBoxBase.value) {
+      const z = shapeZoneAt(p.x, p.y);
+      if (z !== "outside") {
+        cancelRegionEdit();
+        beginShapeAdjust(z, p);
+        return;
+      }
     }
   }
   if (!store.regionMode && hasPreview.value && factor.value > 0) {
     const [sx, sy] = displayToSrc(p.x, p.y);
-    const shapeHit = shapeAtPoint(sx, sy);
+    const shapeHit = shapeAtPoint(sx, sy, shapeHitTolSrc());
     if (shapeHit >= 0) {
       cancelRegionEdit();
       selectShape(shapeHit);
-      // 刚选中的图形也直接进入调整态：内部拖动整体移动、边缘拖动缩放（8px 容差）
+      // 刚选中的图形直接进入可拖动状态：线类拖端点 / 拖线身，盒子类按命中部位
+      const ep = shapeEndpointAt(p.x, p.y);
+      if (ep !== -1) {
+        beginLineDrag(ep, p);
+        return;
+      }
+      const ends = shapeLineEnds.value;
+      if (ends) {
+        beginShapeAdjust("move", p);
+        return;
+      }
       const z = shapeZoneAt(p.x, p.y);
       beginShapeAdjust(z === "outside" ? "move" : z, p);
       return;
@@ -759,6 +938,11 @@ function onMove(e: PointerEvent): void {
   const p = localPoint(e);
   hover.x = p.x;
   hover.y = p.y;
+  if (lineDrag.value) {
+    const cp = clampPt(p);
+    lineDrag.value = { ...lineDrag.value, current: [cp.x, cp.y] };
+    return;
+  }
   if (shapeAdjusting.value) {
     applyShapeAdjust(p);
     return;
@@ -791,9 +975,34 @@ function onUp(e: PointerEvent): void {
     return;
   }
   const p = localPoint(e);
+  // 松手时的真实坐标：快速拖拽时最后一次 pointermove 可能还差几像素，
+  // 用它收尾可以让草稿/调整的终点不「短一截」。
+  const pEnd = clampPt(p);
+  // 线类端点拖动：松手才写回（显示像素位移 <4 视为误触）
+  if (lineDrag.value) {
+    const d = lineDrag.value;
+    // 用松手坐标作为最终端点，再取 overlay（overlay 读的是 lineDrag 的 current）
+    lineDrag.value = { ...d, current: [pEnd.x, pEnd.y] };
+    const overlay = selectedLineOverlay.value;
+    const moved = Math.hypot(pEnd.x - d.origin[0], pEnd.y - d.origin[1]);
+    lineDrag.value = null;
+    hover.x = p.x;
+    hover.y = p.y;
+    if (moved >= 4 && overlay) {
+      // 防御：拖动期间可能被 Delete / 列表操作删掉或换选中，索引可能已经指向别的图形
+      if (d.index === store.selectedShapeIndex && store.shapes[d.index]) {
+        const [ax, ay] = displayToSrc(overlay[0][0], overlay[0][1]);
+        const [bx, by] = displayToSrc(overlay[1][0], overlay[1][1]);
+        setShapeEndpoints(d.index, [ax, ay], [bx, by]);
+      }
+    }
+    return;
+  }
   // 图形调整：松手才写回（显示像素增量 <4 视为误触，不写）
   if (shapeAdjusting.value) {
     const index = shapeAdjustIndex.value;
+    // 用松手坐标收尾，避免快速拖拽时终点停留在最后一次 pointermove
+    applyShapeAdjust(pEnd);
     // 基准用按下时抓取的显示几何（shapeStartBox），不依赖中途重新读取 store
     const moved = Math.max(
       Math.abs(shapeRb.x - shapeStartBox.x),
@@ -807,21 +1016,30 @@ function onUp(e: PointerEvent): void {
     hover.x = p.x;
     hover.y = p.y;
     if (moved >= 4 && index >= 0) {
-      const [sx0, sy0] = displayToSrc(shapeRb.x, shapeRb.y);
-      const [sx1, sy1] = displayToSrc(shapeRb.x + shapeRb.w, shapeRb.y + shapeRb.h);
-      updateShapeGeometry(index, [sx0, sy0, sx1, sy1]);
+      // 防御：拖动期间若图形被删除 / 选中被切换，索引可能指向别的图形，写回会改错对象
+      if (index === store.selectedShapeIndex && store.shapes[index]) {
+        const [sx0, sy0] = displayToSrc(shapeRb.x, shapeRb.y);
+        const [sx1, sy1] = displayToSrc(shapeRb.x + shapeRb.w, shapeRb.y + shapeRb.h);
+        updateShapeGeometry(index, [sx0, sy0, sx1, sy1]);
+      }
     }
     return;
   }
   // 图形草稿：位移 <4 显示像素视为误触；线/箭头把起止点一起传下去保留方向
   if (shapeDraftLive.value) {
     shapeDraftLive.value = false;
+    // 用松手坐标收尾
+    shapeDraft.x1 = pEnd.x;
+    shapeDraft.y1 = pEnd.y;
     const dx = shapeDraft.x1 - shapeDraft.x0;
     const dy = shapeDraft.y1 - shapeDraft.y0;
     if (Math.hypot(dx, dy) >= 4) {
       const [sx0, sy0] = displayToSrc(shapeDraft.x0, shapeDraft.y0);
       const [sx1, sy1] = displayToSrc(shapeDraft.x1, shapeDraft.y1);
-      const lineLike = store.shapeKind === "line" || store.shapeKind === "arrow";
+      const lineLike =
+        store.shapeKind === "line" ||
+        store.shapeKind === "arrow" ||
+        store.shapeKind === "underline";
       addShapeFromRect(
         store.shapeKind,
         [sx0, sy0, sx1, sy1],
@@ -867,16 +1085,19 @@ function onCancel(): void {
   zone.value = "outside";
   rubberLive.value = false;
   panning.value = false;
-  // 图形草稿 / 图形调整被系统取消：直接丢弃，不写回 store
+  // 图形草稿 / 图形调整 / 端点拖动被系统取消：直接丢弃，不写回 store
   shapeAdjusting.value = false;
   shapeZone.value = "outside";
   shapeAdjustIndex.value = -1;
   shapeDraftLive.value = false;
+  lineDrag.value = null;
 }
 
 /** 双击区域 → 打开属性对话框（修改文字 / 参数）。命中当前页最上层包含点的区域。 */
 function onDblClick(e: MouseEvent): void {
   if (!hasPreview.value || store.dialogOpen) return;
+  // 标注模式下双击不该弹区域对话框（用户是在画图，不是在编辑文字）
+  if (store.shapeMode) return;
   const p = localPoint(e);
   const hit = findRegionAt(p.x, p.y);
   if (hit >= 0) {
@@ -905,7 +1126,7 @@ function onKeydown(e: KeyboardEvent): void {
   ) {
     return;
   }
-  if (!shapeDraftLive.value && !shapeAdjusting.value) return;
+  if (!shapeDraftLive.value && !shapeAdjusting.value && !lineDrag.value) return;
   const el = e.target as HTMLElement | null;
   if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) {
     return;
@@ -914,9 +1135,22 @@ function onKeydown(e: KeyboardEvent): void {
   shapeAdjusting.value = false;
   shapeZone.value = "outside";
   shapeAdjustIndex.value = -1;
+  lineDrag.value = null;
 }
-onMounted(() => window.addEventListener("keydown", onKeydown));
-onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
+onMounted(() => {
+  window.addEventListener("keydown", onKeydown);
+  // 窗口失焦时 pointerup 可能收不到：兜底取消进行中的草稿/拖动，避免状态卡死
+  window.addEventListener("blur", onCancel);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", onKeydown);
+  window.removeEventListener("blur", onCancel);
+});
+
+// 拖拽/调整期间窗口尺寸变化会改变 factor，写回坐标会整体缩放：直接取消本次操作
+watch([cw, chh], () => {
+  if (shapeDraftLive.value || shapeAdjusting.value || lineDrag.value) onCancel();
+});
 
 const boxBackground = computed(() =>
   store.previewBgIdx % 2 === 0 ? "#c8d0ca" : "#565b56",
@@ -998,8 +1232,32 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
             />
           </svg>
 
-          <!-- 选中图形：蓝色虚线包围框 + 8 个白色手柄（纯视觉，命中靠 8px 容差） -->
-          <div v-if="shapeBox" class="shape-select-box" :style="pxStyle(shapeBox)">
+          <!-- 选中线类图形（直线 / 箭头 / 下划线）：画一条淡蓝辅助线 + 两个圆形端点手柄。
+               线类不用 8 向包围盒：水平线高为 0，8 向判定会退化成「拖边」而移不动。 -->
+          <template v-if="selectedLineOverlay">
+            <svg class="shape-select-svg">
+              <line
+                class="shape-select-line"
+                :x1="selectedLineOverlay[0][0]"
+                :y1="selectedLineOverlay[0][1]"
+                :x2="selectedLineOverlay[1][0]"
+                :y2="selectedLineOverlay[1][1]"
+              />
+            </svg>
+            <span
+              v-for="(pt, i) in selectedLineOverlay"
+              :key="i"
+              class="shape-endpoint-dot"
+              :style="{ left: `${pt[0] - 5}px`, top: `${pt[1] - 5}px` }"
+            />
+          </template>
+
+          <!-- 选中盒类图形：蓝色虚线包围框 + 8 个白色手柄（纯视觉，命中靠 8px 容差） -->
+          <div
+            v-else-if="shapeBox"
+            class="shape-select-box"
+            :style="pxStyle(shapeBox)"
+          >
             <span v-for="(h, i) in HANDLE_DOTS" :key="i" class="handle-dot" :style="h" />
           </div>
 
@@ -1011,6 +1269,7 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
             @pointermove="onMove"
             @pointerup="onUp"
             @pointercancel="onCancel"
+            @lostpointercapture="onCancel"
             @dblclick="onDblClick"
           />
         </div>
@@ -1143,12 +1402,44 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
   fill: var(--rubber-blue);
 }
 
-/* 选中图形：蓝色虚线包围框 + 白色手柄（手柄复用全局 .handle-dot） */
+/* 选中图形：紫色虚线包围框 + 白色手柄。
+   刻意与「文字区域」的蓝色实线编辑框区分，避免两种框同时出现时分不清。 */
 .shape-select-box {
   position: absolute;
-  border: 2px dashed var(--rubber-blue);
+  border: 2px dashed #7b52d6;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.65);
   background: transparent;
   pointer-events: none;
 }
+
+/* 选中线类图形：辅助线 + 两个圆形端点手柄（拖端点改方向，拖线身整体平移） */
+.shape-select-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.shape-select-line {
+  stroke: var(--rubber-blue);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 4;
+  opacity: 0.85;
+}
+
+.shape-endpoint-dot {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--rubber-blue);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7);
+  pointer-events: none;
+}
 </style>
+
+
+

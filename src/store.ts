@@ -1265,6 +1265,30 @@ export async function chooseFont(): Promise<void> {
 }
 
 export async function chooseBackground(): Promise<void> {
+  // 换纸会改背景原始尺寸，而图形/区域坐标是绝对像素：旧标注会错位或跑出可见区。
+  // 这里先确认再换（与切预设的语义对齐），并把图形清掉（区域维持既有行为，不动）。
+  if (store.shapes.length > 0) {
+    const ok = await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (v: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve(v);
+      };
+      appDialog.warning({
+        title: "换纸会清除图形标注",
+        content: `当前有 ${store.shapes.length} 个图形标注，它们记录的是这张纸上的像素坐标；换纸后位置会错位。继续会清空图形标注。`,
+        positiveText: "继续换纸",
+        negativeText: "取消",
+        onPositiveClick: () => finish(true),
+        onNegativeClick: () => finish(false),
+        onClose: () => finish(false),
+        onMaskClick: () => finish(false),
+      });
+    });
+    if (!ok) return;
+    resetShapes();
+  }
   const p = await dialogs.pickImage();
   if (typeof p === "string") store.backgroundPath = p;
 }
@@ -1546,7 +1570,8 @@ export async function importDocument(): Promise<void> {
 
   // 文档模式不显示主文字：已有正文/底图/区域时先确认，导入成功后收起旧内容
   const hadText = hasTextContent();
-  const hadDocState = (store.docPages?.length ?? 0) > 0 || store.regions.length > 0;
+  const hadDocState =
+    (store.docPages?.length ?? 0) > 0 || store.regions.length > 0 || store.shapes.length > 0;
   if (hadText || hadDocState) {
     const ok = await confirmReplaceContent();
     if (!ok) return;
@@ -1776,7 +1801,8 @@ function confirmReplaceContent(): Promise<boolean> {
 }
 
 function confirmDiscardDocPages(reason: "preset" | "text" = "preset"): Promise<boolean> {
-  if (!store.docPages?.length && store.regions.length === 0) return Promise.resolve(true);
+  const hasContent = !!store.docPages?.length || store.regions.length > 0 || store.shapes.length > 0;
+  if (!hasContent) return Promise.resolve(true);
   const toText = reason === "text";
   return new Promise((resolve) => {
     let settled = false;
@@ -1786,10 +1812,10 @@ function confirmDiscardDocPages(reason: "preset" | "text" = "preset"): Promise<b
       resolve(value);
     };
     appDialog.warning({
-      title: toText ? "切换到文字模式？" : "切换预设会重置文档底图与文字区域",
+      title: toText ? "切换到文字模式？" : "切换预设会重置文档底图、文字区域与图形",
       content: toText
-        ? "当前已导入文档底图或创建了文字区域。继续会清空这些内容，回到纯文字排版；建议先导出。"
-        : "当前已导入文档底图或手动创建了文字区域。切换预设会清空这些内容，建议先导出或保存当前设置。",
+        ? "当前已导入文档底图、创建文字区域或图形标注。继续会清空这些内容，回到纯文字排版；建议先导出。"
+        : "当前已导入文档底图、手动创建文字区域或图形标注。切换预设会清空这些内容，建议先导出或保存当前设置。",
       positiveText: toText ? "切换并编辑" : "继续切换",
       negativeText: "取消",
       onPositiveClick: () => finish(true),
@@ -2416,6 +2442,9 @@ export function jumpToRegion(index: number): void {
   }
   store.selectedRegionIndex = index;
   store.editingIndex = index;
+  // 区域与图形互斥选中：否则跨页后会留下「看不见但可被 Delete」的幽灵图形
+  store.selectedShapeIndex = -1;
+  store.shapeMode = false;
 }
 
 /** 列表「🔍」：跳到该区域所在页、选中，并请求预览居中放大到该区域。 */
@@ -2441,10 +2470,8 @@ export function clearRegions(): void {
   store.editingIndex = -1;
   store.highlightIndex = -1;
   store.selectedRegionIndex = -1;
-  // 区域与图形共用背景坐标：清空区域时同步清空图形（与各重置入口保持一致）
-  store.shapes.splice(0);
-  store.shapeMode = false;
-  store.selectedShapeIndex = -1;
+  // 注意：**不清图形**。清空文字区域既不换纸张也不改坐标，图形仍然有效；
+  // 图形由「④ 图形标注 → 清空」单独管理（避免误点一下连标注一起丢）。
   scheduleRender();
 }
 
@@ -2467,8 +2494,8 @@ export const SHAPE_KIND_LABELS: Record<UiShapeKind, string> = {
   underline: "下划线",
 };
 
-/** 细长图形：命中测试按「点到线段距离」判定；其余图形按包围盒判定。 */
-const LINE_LIKE_SHAPE_KINDS: ReadonlySet<UiShapeKind> = new Set<UiShapeKind>([
+/** 细长图形：命中测试按「点到线段距离」判定、交互用端点手柄而不是 8 向手柄。 */
+export const LINE_LIKE_SHAPE_KINDS: ReadonlySet<UiShapeKind> = new Set<UiShapeKind>([
   "line",
   "arrow",
   "underline",
@@ -2526,6 +2553,117 @@ function shapeEndpoints(s: UiShape): [[number, number], [number, number]] {
   ];
 }
 
+/** 点到「包围盒四条边」的最短距离（用于空心矩形 / 大括号 / 方括号的命中）。 */
+function distanceToBoxBorder(
+  box: { x: number; y: number; w: number; h: number },
+  px: number,
+  py: number,
+): number {
+  const dx = Math.max(box.x - px, px - (box.x + box.w), 0);
+  const dy = Math.max(box.y - py, py - (box.y + box.h), 0);
+  // 在框内：到最近边的距离；在框外：到框的欧氏距离
+  if (dx === 0 && dy === 0) {
+    return Math.min(
+      Math.abs(px - box.x),
+      Math.abs(px - (box.x + box.w)),
+      Math.abs(py - box.y),
+      Math.abs(py - (box.y + box.h)),
+    );
+  }
+  return Math.hypot(dx, dy);
+}
+
+/** 点到椭圆描边（环）的近似像素距离：|归一化半径 - 1| × min(rx, ry)。 */
+function distanceToEllipseRing(
+  box: { x: number; y: number; w: number; h: number },
+  px: number,
+  py: number,
+): number {
+  const rx = Math.max(box.w / 2, 1e-3);
+  const ry = Math.max(box.h / 2, 1e-3);
+  const cx = box.x + rx;
+  const cy = box.y + ry;
+  const r = Math.hypot((px - cx) / rx, (py - cy) / ry);
+  return Math.abs(r - 1) * Math.min(rx, ry);
+}
+
+/** 三角形三条边的最近距离：顶点与 core 一致（上中 / 左下 / 右下），
+ *  显式 points 给了 3 点时用指定顶点。 */
+function distanceToTriangleEdges(
+  s: UiShape,
+  box: { x: number; y: number; w: number; h: number },
+  px: number,
+  py: number,
+): number {
+  const pts = s.points;
+  const v: [number, number][] =
+    pts && pts.length >= 3
+      ? [
+          [pts[0][0], pts[0][1]],
+          [pts[1][0], pts[1][1]],
+          [pts[2][0], pts[2][1]],
+        ]
+      : [
+          [box.x + box.w / 2, box.y],
+          [box.x, box.y + box.h],
+          [box.x + box.w, box.y + box.h],
+        ];
+  let best = Infinity;
+  for (let k = 0; k < 3; k++) {
+    const a = v[k];
+    const b = v[(k + 1) % 3];
+    best = Math.min(best, pointSegmentDistance(px, py, a[0], a[1], b[0], b[1]));
+  }
+  return best;
+}
+
+/** 勾（✓）两段折线的最近距离：与 core 的顶点公式一致。 */
+function distanceToCheckStrokes(
+  box: { x: number; y: number; w: number; h: number },
+  px: number,
+  py: number,
+): number {
+  const a: [number, number] = [box.x, box.y + box.h * 0.55];
+  const b: [number, number] = [box.x + box.w * 0.36, box.y + box.h * 0.95];
+  const c: [number, number] = [box.x + box.w, box.y + box.h * 0.05];
+  return Math.min(
+    pointSegmentDistance(px, py, a[0], a[1], b[0], b[1]),
+    pointSegmentDistance(px, py, b[0], b[1], c[0], c[1]),
+  );
+}
+
+/** 大括号的笔迹折线近似：与 core `shapes.rs::brace()` 一致——
+ *  从近侧边起笔 → 竖脊（55% 宽处）→ 中间尖角 → 竖脊 → 近侧边收笔。
+ *  只用包围盒四边近似会漏掉竖脊（点在脊上选不中）。 */
+function distanceToBraceStrokes(
+  box: { x: number; y: number; w: number; h: number },
+  side: "left" | "right",
+  px: number,
+  py: number,
+): number {
+  const dir = side === "right" ? 1 : -1;
+  const nearX = dir > 0 ? box.x : box.x + box.w;
+  const cuspX = dir > 0 ? box.x + box.w : box.x;
+  const spineX = nearX + dir * box.w * 0.55;
+  const pts: [number, number][] = [
+    [nearX, box.y],
+    [spineX, box.y + box.h * 0.05],
+    [spineX, box.y + box.h * 0.45],
+    [cuspX, box.y + box.h * 0.5],
+    [spineX, box.y + box.h * 0.55],
+    [spineX, box.y + box.h * 0.95],
+    [nearX, box.y + box.h],
+  ];
+  let best = Infinity;
+  for (let k = 0; k + 1 < pts.length; k++) {
+    best = Math.min(
+      best,
+      pointSegmentDistance(px, py, pts[k][0], pts[k][1], pts[k + 1][0], pts[k + 1][1]),
+    );
+  }
+  return best;
+}
+
 /** 进入/退出图形标注模式（与 regionMode 互斥，两种模式都清空选中）。 */
 export function setShapeMode(on: boolean): void {
   store.shapeMode = on;
@@ -2543,31 +2681,71 @@ export function setShapeKind(k: UiShapeKind): void {
 }
 
 /** 当前页的图形命中测试：返回图形索引（-1 = 未命中）。
- *  数组顺序 = 绘制顺序，从后往前遍历（后画的在上层，先命中）。 */
-export function shapeAtPoint(srcX: number, srcY: number): number {
+ *  数组顺序 = 绘制顺序，从后往前遍历（后画的在上层，先命中）。
+ *
+ *  `tolSrc` 是**背景原始像素**容差，由调用方按显示比例换算
+ *  （`PreviewPane` 用 `8 / factor`，保证不同缩放下点选手感一致）。
+ *
+ *  空心图形只命中描边：否则在文字上画一个大方框后，框内任意位置都会选中这个框，
+ *  文字区域就再也点不到了（图形优先于区域）。实心图形才按内部命中。 */
+export function shapeAtPoint(srcX: number, srcY: number, tolSrc = 3): number {
+  const tol = Math.max(1, tolSrc);
   for (let i = store.shapes.length - 1; i >= 0; i--) {
     const s = store.shapes[i];
     // 图形按页归属：只命中当前页，避免选中看不见的图形
     if (s.page !== store.pageIndex + 1) continue;
     if (LINE_LIKE_SHAPE_KINDS.has(s.kind)) {
-      // 细线按点到线段距离判定；线宽越大容差越宽
+      // 细线按点到线段距离判定；容差取「显示容差」与「半线宽」的较大者
+      //（半线宽而不是 2×线宽：8px 粗线在 400% 下 2×线宽会变成约 64 CSS px 的巨大容差）
       const [[x0, y0], [x1, y1]] = shapeEndpoints(s);
-      const tol = Math.max(6, s.thickness * 2);
-      if (pointSegmentDistance(srcX, srcY, x0, y0, x1, y1) <= tol) return i;
+      const lineTol = Math.max(tol, s.thickness * 0.5);
+      if (pointSegmentDistance(srcX, srcY, x0, y0, x1, y1) <= lineTol) return i;
       continue;
     }
-    // 其余图形（含空心矩形/椭圆）简单按包围盒外扩 3px 判定
     const box = normalizedShapeBox(s.x, s.y, s.x + s.w, s.y + s.h);
-    if (
-      srcX >= box.x - 3 &&
-      srcX <= box.x + box.w + 3 &&
-      srcY >= box.y - 3 &&
-      srcY <= box.y + box.h + 3
-    ) {
-      return i;
+    const insideBox =
+      srcX >= box.x - tol &&
+      srcX <= box.x + box.w + tol &&
+      srcY >= box.y - tol &&
+      srcY <= box.y + box.h + tol;
+    if (!insideBox) continue;
+    // 实心图形：内部即命中
+    if (s.filled) return i;
+    // 空心图形：只认描边附近（按各图元的真实笔迹求距离，避免误吞内部点击；
+    // 大括号用「竖脊 + 尖角」折线，不能用包围盒四边近似——会漏掉 55% 宽处的脊）
+    let dist: number;
+    switch (s.kind) {
+      case "ellipse":
+        dist = distanceToEllipseRing(box, srcX, srcY);
+        break;
+      case "triangle":
+        dist = distanceToTriangleEdges(s, box, srcX, srcY);
+        break;
+      case "check":
+        dist = distanceToCheckStrokes(box, srcX, srcY);
+        break;
+      case "brace_left":
+        dist = distanceToBraceStrokes(box, "left", srcX, srcY);
+        break;
+      case "brace_right":
+        dist = distanceToBraceStrokes(box, "right", srcX, srcY);
+        break;
+      default:
+        dist = distanceToBoxBorder(box, srcX, srcY);
+        break;
     }
+    if (dist <= Math.max(tol, s.thickness * 0.5)) return i;
   }
   return -1;
+}
+
+/** 新建图形的默认线宽：按纸张原始像素宽度自适应。
+ *  固定 2.4px 在 4200×5930 的扫描纸上、fit 视图（≈12.5%）只有 0.3 显示像素，
+ *  用户刚画完会以为「没画上 / 没生效」。 */
+function defaultThickness(): number {
+  const w = store.bgNatW;
+  if (!w || w <= 0) return 2.4;
+  return Math.min(12, Math.max(2.4, Math.round(w / 700)));
 }
 
 /** 新建图形：rect = [x0,y0,x1,y1]（可反向拖拽，内部归一化为正宽高）。
@@ -2588,7 +2766,7 @@ export function addShapeFromRect(
     w: box.w,
     h: box.h,
     points: points?.map(([px, py]) => [px, py] as [number, number]),
-    thickness: 2.4,
+    thickness: defaultThickness(),
     jitter: 1.4,
     filled: false,
     fill: null,
@@ -2613,7 +2791,14 @@ export function addShapeAroundRegion(index: number): void {
       r.x >= store.bgNatW || r.y >= store.bgNatH || r.x + r.w <= 0 || r.y + r.h <= 0;
     if (outside) return;
   }
-  const newIndex = addShapeFromRect("rect", [r.x, r.y, r.x + r.w, r.y + r.h]);
+  // 沿区域 bbox 外扩一点：线宽会跨在边界上，零 padding 必然压到最外圈的字
+  const pad = Math.round(defaultThickness() / 2 + 4);
+  const newIndex = addShapeFromRect("rect", [
+    r.x - pad,
+    r.y - pad,
+    r.x + r.w + pad,
+    r.y + r.h + pad,
+  ]);
   if (newIndex < 0) return;
   // 区域可能在别的页：图形跟着区域走，避免框到错误页面
   store.shapes[newIndex].page = Math.max(1, Math.round(num(r.page, 1)));
@@ -2630,18 +2815,45 @@ export function updateShapeGeometry(
   if (!s) return;
   const next = normalizedShapeBox(rect[0], rect[1], rect[2], rect[3]);
   const old = normalizedShapeBox(s.x, s.y, s.x + s.w, s.y + s.h);
-  // 旧宽高为 0（垂直线/水平线）时用 1 兜底，避免除零
+  // 退化轴（水平线 h≈0 / 垂直线 w≈0）：按比例缩放会把点全贴到新框的上/左边缘，
+  // 这里改成映射到**新包围盒的中线**，拖动/缩放后线的位置符合直觉。
+  const zeroW = old.w < 0.5;
+  const zeroH = old.h < 0.5;
   const sx = next.w / (old.w > 0 ? old.w : 1);
   const sy = next.h / (old.h > 0 ? old.h : 1);
   if (s.points) {
-    s.points = s.points.map(
-      ([px, py]) => [next.x + (px - old.x) * sx, next.y + (py - old.y) * sy] as [number, number],
-    );
+    s.points = s.points.map(([px, py]) => {
+      const nx = zeroW ? next.x + next.w / 2 : next.x + (px - old.x) * sx;
+      const ny = zeroH ? next.y + next.h / 2 : next.y + (py - old.y) * sy;
+      return [nx, ny] as [number, number];
+    });
   }
   s.x = next.x;
   s.y = next.y;
   s.w = next.w;
   s.h = next.h;
+  scheduleRender();
+}
+
+/** 直接写回线类图形（直线 / 箭头 / 下划线）的两个端点（背景原始像素）。
+ *  端点拖动专用：同时重算包围盒，保证 points 与 bbox 始终一致；
+ *  端点是用户拖出来的真实方向，不能用 bbox 对角线反推（反向拖拽会丢方向）。 */
+export function setShapeEndpoints(
+  index: number,
+  a: [number, number],
+  b: [number, number],
+): void {
+  const s = store.shapes[index];
+  if (!s) return;
+  const box = normalizedShapeBox(a[0], a[1], b[0], b[1]);
+  s.points = [
+    [a[0], a[1]],
+    [b[0], b[1]],
+  ];
+  s.x = box.x;
+  s.y = box.y;
+  s.w = box.w;
+  s.h = box.h;
   scheduleRender();
 }
 
@@ -2655,8 +2867,12 @@ export function updateShapeStyle(index: number, patch: Partial<UiShape>): void {
   Object.assign(s, next);
   if (typeof patch.page === "number" && Number.isFinite(patch.page)) {
     s.page = Math.max(1, Math.round(patch.page));
-    // 改页码 = 把图形移到该页并立刻切过去，方便在预览里确认
-    store.pageIndex = s.page - 1;
+    // 改页码 = 把图形移到该页并切过去，方便在预览里确认。
+    // 夹到现有预览页内：目标页还没渲染出来时直接跳会让预览空白一帧。
+    store.pageIndex = Math.max(
+      0,
+      Math.min(s.page - 1, Math.max(store.previewPages.length - 1, 0)),
+    );
   }
   scheduleRender();
 }
@@ -2681,13 +2897,41 @@ export function deleteShape(index: number): void {
 }
 
 /** 清空全部图形（保留图形标注模式本身）。 */
-export function clearShapes(): void {
+/** 内部：直接清空图形（不做确认，供已经确认过的调用方复用）。 */
+function resetShapes(): void {
   store.shapes.splice(0);
   store.selectedShapeIndex = -1;
   scheduleRender();
 }
 
-/** 叠放顺序上移/下移（数组顺序 = 绘制顺序，后画的在上层；越界直接返回）。 */
+/** 清空全部图形：带二次确认。
+ *  图形没有撤销、也不随预设保存，误点「清空」等于永久丢失整页标注。 */
+export async function clearShapes(): Promise<void> {
+  if (store.shapes.length === 0) return;
+  const ok = await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (v: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+    appDialog.warning({
+      title: "清空全部图形标注？",
+      content: `将删除当前文档里的 ${store.shapes.length} 个图形标注，此操作无法撤销（图形也不随预设保存）。`,
+      positiveText: "清空",
+      negativeText: "取消",
+      onPositiveClick: () => finish(true),
+      onNegativeClick: () => finish(false),
+      onClose: () => finish(false),
+      onMaskClick: () => finish(false),
+    });
+  });
+  if (ok) resetShapes();
+}
+
+/** 叠放顺序：数组顺序 = 绘制顺序（越靠后越在上层）。
+ *  `dir = +1` 表示「更靠上一层」（与列表里的 ↑ 对应），`-1` 表示下移一层。
+ *  引擎已按数组顺序逐图形合成（不再按颜色合并），所以这个顺序在预览/导出里真实可见。 */
 export function moveShapeOrder(index: number, dir: -1 | 1): void {
   const to = index + dir;
   if (index < 0 || index >= store.shapes.length || to < 0 || to >= store.shapes.length) return;

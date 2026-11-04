@@ -107,7 +107,7 @@ const pageOptions = computed(() => {
         <NSlider
           v-model:value="thicknessValue"
           :min="1"
-          :max="8"
+          :max="16"
           :step="0.2"
           style="flex: 1"
         />

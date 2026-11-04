@@ -7,6 +7,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::shapes::ShapeSpec;
 
+/// 图形页码上限：引擎的总页数直接由「最大页码」决定，
+/// 一个坏页码就能把渲染循环撑到上万页（A4@300dpi 每页 RGBA 约 33MiB）。
+/// 2000 页已远超任何真实手写文档，超过直接报错而不是尝试渲染。
+pub const MAX_SHAPE_PAGE: i32 = 2000;
+
+/// 图形坐标/尺寸的量级上限（像素）：真实标注都落在页面像素内，
+/// 这里的余量只为挡住 1e30 这类会让线段扫描步数爆炸的输入。
+pub const MAX_SHAPE_COORD: f32 = 1_000_000.0;
+
 /// 段落对齐方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Align {
@@ -453,7 +462,9 @@ pub enum ParamsError {
     RegionFontSize { index: usize },
     #[error("图形 {index} 的页码必须从 1 开始")]
     ShapePage { index: usize },
-    #[error("图形 {index} 的坐标、尺寸、线宽或抖动必须是有限值")]
+    #[error("图形 {index} 的页码必须在 1~{max} 之间（当前 {value}）")]
+    ShapePageRange { index: usize, max: i32, value: i32 },
+    #[error("图形 {index} 的坐标、尺寸、线宽或抖动必须是有限值且在合理范围内")]
     ShapeGeometry { index: usize },
     #[error("图形 {index} 的线宽不能为负")]
     ShapeThickness { index: usize },
@@ -685,17 +696,35 @@ impl HandwritingParams {
             }
         }
         // 图形标注：不要求 w/h 为正（内部归一化负宽高，允许线段某一边为 0），
-        // 但坐标必须有限（进入光栅化 `as isize` 前不能是 NaN/inf），页码 1 基。
+        // 但坐标必须有限且量级合理（进入光栅化 `as isize` 前不能是 NaN/inf；
+        // 1e30 这类量级会让线段扫描步数爆炸，等于把渲染线程卡死），
+        // 页码 1 基且有上限（`n_pages` 直接由最大页码决定，一个坏页码就能撑出上万页）。
         for (i, shape) in self.shapes.iter().enumerate() {
             let index = i + 1;
             if shape.page < 1 {
                 return Err(ParamsError::ShapePage { index });
+            }
+            if shape.page > MAX_SHAPE_PAGE {
+                return Err(ParamsError::ShapePageRange {
+                    index,
+                    max: MAX_SHAPE_PAGE,
+                    value: shape.page,
+                });
             }
             let finite = [shape.x, shape.y, shape.w, shape.h, shape.thickness, shape.jitter]
                 .iter()
                 .all(|v| v.is_finite())
                 && shape.points.iter().flatten().all(|v| v.is_finite());
             if !finite {
+                return Err(ParamsError::ShapeGeometry { index });
+            }
+            // 量级上限：真实标注都落在页面像素内，这里给足余量但挡住夸张输入
+            if [shape.x, shape.y, shape.w, shape.h]
+                .iter()
+                .any(|v| v.abs() > MAX_SHAPE_COORD)
+                || shape.thickness > crate::core::shapes::MAX_PEN_THICKNESS
+                || shape.jitter > crate::core::shapes::MAX_PEN_JITTER
+            {
                 return Err(ParamsError::ShapeGeometry { index });
             }
             if shape.thickness < 0.0 {
