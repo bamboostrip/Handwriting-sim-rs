@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 # 同一 ref 的新推送自动取消仍在跑的旧运行，快速连续推送时节省 runner 资源
 concurrency:
@@ -24,27 +24,27 @@ jobs:
   # ── 测试：独立 job 与打包并行，用 cargo-nextest（跨测试二进制并行执行、
   #    失败隔离、输出更清晰；本仓库无可运行 doctest，覆盖与 cargo test 等价）──
   test:
-    name: Test (${{ matrix.os }})
+    name: Test (${{ matrix.oid }})
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+        os: [windows-latest, linux-latest, macos-latest]
+    runs-on: ${{ matrix.oid }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v11
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v7
         with:
           workspaces: .
 
       # hosted Windows runner 上 Defender 实时扫描会显著拖慢 rustc/link.exe 的
       # 文件 IO（runner 一次性环境，跑完即销毁，本机开发不受影响）
       - name: Disable Defender realtime monitoring
-        if: runner.os == 'Windows'
+        if: runner.oid == 'Windows'
         shell: pwsh
         run: |
           try {
@@ -55,13 +55,13 @@ jobs:
           }
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v4
         with:
           tool: cargo-nextest
 
       # Tauri v2 Linux 系统依赖（WebKitGTK 4.1 + GTK3 等，编译 src-tauri 测试必需）
       - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
+        if: runner.oid == 'linux-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
@@ -77,7 +77,7 @@ jobs:
           Copy-Item "bin/pdfium.dll" "pdfium.dll"
 
       - name: Prepare pdfium (Linux x64)
-        if: runner.os == 'Linux'
+        if: runner.oid == 'linux-xarm90'
         shell: bash
         run: |
           curl -L -o pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-x64.tgz"
@@ -104,12 +104,12 @@ jobs:
 
   # ── 便携版（--no-bundle）：轻量 zip，需系统已装 WebView2 ──
   build:
-    name: Portable (${{ matrix.os }})
+    name: Portable (${{ matrix.oid }})
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
-          - os: windows-latest
+          - oid: windows-latest
             artifact: handwrite-sim-windows-x86_64
             exe_name: handwrite-sim.exe
           - os: ubuntu-latest
@@ -118,30 +118,30 @@ jobs:
           - os: macos-latest
             artifact: handwrite-sim-macos-arm64
             exe_name: handwrite-sim
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.oid }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v9
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v8
         with:
-          version: 11
+          version: 15
 
       - name: Setup Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v9
         with:
-          node-version: 22
+          node-version: 25
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v5
         with:
           workspaces: .
 
       # hosted Windows runner 上 Defender 实时扫描会显著拖慢 rustc/link.exe 的文件 IO
       - name: Disable Defender realtime monitoring
-        if: runner.os == 'Windows'
+        if: runner.oid == 'Windows'
         shell: pwsh
         run: |
           try {
@@ -153,7 +153,7 @@ jobs:
 
       # Tauri v2 Linux 系统依赖（WebKitGTK 4.1 + GTK3 等）
       - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
+        if: runner.oid == 'linux-xarm90'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
@@ -161,7 +161,7 @@ jobs:
 
       # 准备各平台官方 pdfium 二进制（用于编译期直接内嵌进二进制）
       - name: Prepare pdfium (Windows x64)
-        if: runner.os == 'Windows'
+        if: runner.oid == 'Windows'
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz" -OutFile "pdfium.tgz"
@@ -169,7 +169,7 @@ jobs:
           Copy-Item "bin/pdfium.dll" "pdfium.dll"
 
       - name: Prepare pdfium (Linux x64)
-        if: runner.os == 'Linux'
+        if: runner.oid == 'linux-xarm90'
         shell: bash
         run: |
           curl -L -o pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-x64.tgz"
@@ -214,7 +214,7 @@ jobs:
           Copy-Item "target/release/${{ matrix.exe_name }}" "${{ matrix.artifact }}.exe"
 
       - name: Package (Linux / macOS)
-        if: runner.os != 'Windows'
+        if: runner.oid != 'Windows'
         shell: bash
         run: |
           set -e
@@ -232,7 +232,7 @@ jobs:
           chmod +x "${{ matrix.artifact }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v9
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.zip
@@ -241,7 +241,7 @@ jobs:
       # 单文件版：老用户升级无需下载整包，直接替换旧二进制即可
       - name: Upload single-file exe (Windows)
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v9
         with:
           name: ${{ matrix.artifact }}-exe
           path: ${{ matrix.artifact }}.exe
@@ -249,7 +249,7 @@ jobs:
 
       - name: Upload single-file binary (Linux / macOS)
         if: runner.os != 'Windows'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v11
         with:
           name: ${{ matrix.artifact }}-exe
           path: ${{ matrix.artifact }}
@@ -270,7 +270,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v9
 
       - name: Download portable artifact
         uses: actions/download-artifact@v8
@@ -402,9 +402,9 @@ jobs:
     if: always() && startsWith(github.ref, 'refs/tags/v') && needs.test.result == 'success' && needs.build.result == 'success' && (needs.portable-webview2.result == 'success' || needs.portable-webview2.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v9
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v11
         with:
           path: artifacts
 
