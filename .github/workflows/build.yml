@@ -19,6 +19,10 @@ concurrency:
 env:
   # CI 每次都是全新还原的缓存，增量编译产物是纯开销
   CARGO_INCREMENTAL: "0"
+  # release 的 codegen-units=1 + thin LTO 是本仓库最耗时的一步（本地实测全量 16 分钟）。
+  # 非发版构建（PR / master 推送）：提速优先，用 8 个 codegen 单元，LTO 保持 thin。
+  # 正式发版（tag）：在 build job 里覆盖回 1，产物质量/体积优先，不牺牲发布包。
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
 
 jobs:
   # ── 测试：独立 job 与打包并行，用 cargo-nextest（跨测试二进制并行执行、
@@ -40,6 +44,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
+          # 失败的构建也保存缓存：CI 迭代时半成品依赖可复用，避免每次从头编
+          cache-on-failure: true
 
       # hosted Windows runner 上 Defender 实时扫描会显著拖慢 rustc/link.exe 的
       # 文件 IO（runner 一次性环境，跑完即销毁，本机开发不受影响）
@@ -133,11 +139,15 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 22
+          # 缓存 pnpm store，避免每次 CI 重新下载 ~200 个前端包
+          cache: pnpm
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
+          # 失败的构建也保存缓存：CI 迭代时半成品依赖可复用，避免每次从头编
+          cache-on-failure: true
 
       # hosted Windows runner 上 Defender 实时扫描会显著拖慢 rustc/link.exe 的文件 IO
       - name: Disable Defender realtime monitoring
@@ -191,8 +201,11 @@ jobs:
 
       # --no-bundle：不做安装器，只产出裸二进制（便携 zip 分发模式）。
       # beforeBuildCommand 自动执行 vue-tsc + vite build 并嵌入前端。
+      # 打 tag 发版时把 codegen-units 覆盖回 1：用更慢的构建换最优产物体积/性能。
       - name: Build (release, Tauri --no-bundle)
         run: pnpm tauri build --no-bundle
+        env:
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '8' }}
 
       # macOS 可执行文件需 ad-hoc 签名，否则 Gatekeeper 会拦截
       - name: Ad-hoc sign (macOS)

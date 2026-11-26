@@ -17,7 +17,8 @@
   - 移除 `dev` 下 5 个包级 `opt-level = 2/3` override（handwrite-sim / ab_glyph / fast_image_resize / image / pdfium-render）——它们把每次迭代的 codegen 拉到 200s+。原先注释称「编译时间基本不受影响」不成立。
   - 新增 `[profile.preview]`（`inherits = "dev"`，`opt-level = 2`，重采样库 `fast_image_resize` 提到 3）。需要验证渲染性能时用 `cargo build --profile preview` / `cargo tauri dev --profile preview`，首次切换会全量重编一次。
   - Windows MSVC 链接器切到 `rust-lld`（随 rustup 分发），降低链接阶段的磁盘与进程开销。
-  - 运行时产物不受影响：release profile（`opt-level=3` + thin LTO + `codegen-units=1` + strip）保持不变。
+  - 运行时产物不受影响：本地 release profile（`opt-level=3` + thin LTO + `codegen-units=1` + strip）保持不变。
+  - CI 针对性提速：`Swatinem/rust-cache` 加 `cache-on-failure`（失败构建也存缓存）、`setup-node` 开启 `cache: pnpm`（避免每次重下前端依赖）、非发版构建的 release `codegen-units` 从 1 提到 8；打 tag 发版时覆盖回 1，保证发布包体积/性能不降级。
 
 ### Fixed
 
