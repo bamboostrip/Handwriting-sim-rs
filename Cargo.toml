@@ -13,25 +13,19 @@ panic = "abort"
 
 
 [profile.dev]
-debug = 1
+# line-tables-only：保留行号映射（backtrace 可读），不生成变量/类型调试信息。
+# 相比 debug=1，codegen 与链接体积都明显下降，是最划算的 dev 提速项。
+# CI 仍可用 CARGO_PROFILE_DEV_DEBUG=0 一键全关。
+debug = "line-tables-only"
 incremental = true
 
-# dev 构建下优化核心渲染路径：debug 未优化时引擎慢 10~30 倍，
-# 预览/导出会卡顿数秒。只优化重计算 crate，编译时间基本不受影响。
-# debug 跟随 [profile.dev]（=1），不要在此重复声明——
-# CI 通过 CARGO_PROFILE_DEV_DEBUG=0 一键关闭全部调试符号。
-[profile.dev.package."handwrite-sim"]
+# 性能验证走独立 profile：dev 只负责快速迭代，默认不抬高 opt-level。
+# 需要测渲染性能时用 `cargo build --profile preview`
+# （Tauri 侧：`cargo tauri dev --profile preview`）。
+[profile.preview]
+inherits = "dev"
 opt-level = 2
 
-
-[profile.dev.package.ab_glyph]
-opt-level = 2
-
-[profile.dev.package.fast_image_resize]
+# preview 下只给最吃 CPU 的重采样库额外加满优化。
+[profile.preview.package.fast_image_resize]
 opt-level = 3
-
-[profile.dev.package.image]
-opt-level = 2
-
-[profile.dev.package.pdfium-render]
-opt-level = 2

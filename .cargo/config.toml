@@ -1,4 +1,11 @@
-# 注意：这里曾给 MSVC 显式追加 `-C link-arg=/DEBUG:FASTLINK` 提速本地链接，
+# Windows 本地链接器用 rust-lld（随 rustup 分发），比 msvc 的 link.exe 快得多，
+# 尤其本仓库 target 有 44GB / 近 10 万文件，链接阶段的磁盘与进程开销很重。
+# 注意：llbuild/lld 对 /DEBUG:FASTLINK 的支持与 link.exe 不同，
+# rustc 1.100 只传裸 /DEBUG，由链接器自行取默认值，这里无需追加 link-arg。
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
+
+# 历史注记：曾给 MSVC 显式追加 `-C link-arg=/DEBUG:FASTLINK` 提速本地链接，
 # 但 VS 2026 起链接器已移除该选项（LNK4315 警告并回退 /DEBUG:FULL，且会让
 # release 无调试符号的链接也强制生成 PDB）。rustc 1.96+ 只传裸 /DEBUG，
 # 由链接器自行取默认值：VS2022/2025（本地）默认 FASTLINK，VS2026（CI）默认 FULL。

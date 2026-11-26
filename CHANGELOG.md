@@ -10,6 +10,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **开发期编译提速约 6.5 倍**（本地实测：仅重编两个本地 crate，dev profile 从 237.7s → 36.8s；其中核心 crate 219.7s → 21.5s）：
+  - `dev` 的 `debug = 1` 改为 `line-tables-only`（保留行号、去掉变量/类型调试信息，backtrace 仍可读；CI 仍可用 `CARGO_PROFILE_DEV_DEBUG=0` 全关）。
+  - 移除 `dev` 下 5 个包级 `opt-level = 2/3` override（handwrite-sim / ab_glyph / fast_image_resize / image / pdfium-render）——它们把每次迭代的 codegen 拉到 200s+。原先注释称「编译时间基本不受影响」不成立。
+  - 新增 `[profile.preview]`（`inherits = "dev"`，`opt-level = 2`，重采样库 `fast_image_resize` 提到 3）。需要验证渲染性能时用 `cargo build --profile preview` / `cargo tauri dev --profile preview`，首次切换会全量重编一次。
+  - Windows MSVC 链接器切到 `rust-lld`（随 rustup 分发），降低链接阶段的磁盘与进程开销。
+  - 运行时产物不受影响：release profile（`opt-level=3` + thin LTO + `codegen-units=1` + strip）保持不变。
+
 ### Fixed
 
 - **图形标注的手写质感（issue #6 追加反馈：「符号和附图里的真实手写差很远」）**：
