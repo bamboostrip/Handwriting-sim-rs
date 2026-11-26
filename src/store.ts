@@ -20,7 +20,7 @@ import type {
 } from "./types";
 
 /** 当前版本号与开源仓库地址 */
-export const APP_VERSION = "0.6.0";
+export const APP_VERSION = "0.6.1";
 
 export const PYTHON_REPO_URL = "https://github.com/bamboostrip/Handwriting-simulator";
 export const RUST_REPO_URL = "https://github.com/bamboostrip/Handwriting-sim-rs";

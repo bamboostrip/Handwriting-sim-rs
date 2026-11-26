@@ -1788,7 +1788,7 @@ dependencies = [
 
 [[package]]
 name = "handwrite-sim"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ab_glyph",
  "fast_image_resize",
@@ -1808,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "handwrite-sim-tauri"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "handwrite-sim",
  "image",
