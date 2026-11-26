@@ -147,10 +147,7 @@ pub fn is_highlight_pixel(r: u8, g: u8, b: u8) -> bool {
     }
     // 饱和度 diff / max >= 0.20
     let sat = diff as f32 / max as f32;
-    if sat < 0.20 {
-        return false;
-    }
-    true
+    sat >= 0.20
 }
 
 /// 检测图像中的高亮区域包围盒。
