@@ -93,6 +93,12 @@ const jitterValue = computed<number>({
   get: () => defaultStyle.value.jitter,
   set: (v) => setShapeDefault({ jitter: v }),
 });
+
+/** 实心填充：只对矩形/椭圆/三角生效，行首 `▶` 项目符号就是「三角 + 实心」。 */
+const filledDefault = computed<boolean>({
+  get: () => store.shapeDefault.filled,
+  set: (on) => setShapeDefault({ filled: on }),
+});
 </script>
 
 <template>
@@ -148,6 +154,12 @@ const jitterValue = computed<number>({
         title="手绘抖动幅度，0 = 直尺"
       />
       <span class="prop-value">{{ defaultStyle.jitter.toFixed(1) }} px</span>
+    </div>
+
+    <div class="field-row">
+      <span class="field-label">实心</span>
+      <NSwitch v-model:value="filledDefault" size="small" />
+      <span class="prop-hint">矩形 / 椭圆 / 三角（行首 ▶）</span>
     </div>
 
     <div class="hint-line shape-default-hint">

@@ -886,41 +886,42 @@ fn generate_pages_with(
             .filter(|s| s.page.max(1) as usize - 1 == page_index)
         {
             let color = shape.fill.unwrap_or(params.fill);
-            let Some((bx, by, bw, bh)) = shapes::local_mask_box(shape, width, height) else {
+            let Some((bx, by, bw, bh, cov)) = shapes::shape_coverage(shape, width, height) else {
                 continue; // 完全在页面外 / 退化尺寸
             };
-            let mut local = vec![false; bw * bh];
-            // 把图形平移到局部坐标原点后再光栅化（rasterize_shape 的 offset 只能加，不能减）
-            let mut shifted = shape.clone();
-            shifted.x -= bx as f32;
-            shifted.y -= by as f32;
-            for p in shifted.points.iter_mut() {
-                p[0] -= bx as f32;
-                p[1] -= by as f32;
-            }
-            shapes::rasterize_shape(&shifted, &mut local, bw, bh, 0, 0);
-            if !local.iter().any(|&b| b) {
+            if !cov.iter().any(|&a| a > 0.004) {
                 continue;
             }
-            // 把局部掩码按颜色 blit 回整页画布（逐行拷贝，列区间连续）
+            // 覆盖率 → 画布：按 alpha 混合写入，而不是布尔掩码直写。
+            // 图形自身已带 1px 抗锯齿与像素级毛边，直写会把软边重新拍成硬边，
+            // 于是「手绘」又变回「矢量图形」——这一步是柔边落墨的关键。
+            let (cr, cg, cb) = (
+                f32::from(color[0]),
+                f32::from(color[1]),
+                f32::from(color[2]),
+            );
             let page_row = width * 3;
             for row in 0..bh {
                 let ty = by + row;
                 if ty >= height {
                     break;
                 }
-                let src = &local[row * bw..(row + 1) * bw];
+                let src = &cov[row * bw..(row + 1) * bw];
                 let dst_row = &mut canvas[ty * page_row + bx * 3..];
-                for (col, &on) in src.iter().enumerate() {
-                    if !on {
+                for (col, &a) in src.iter().enumerate() {
+                    if a <= 0.004 {
                         continue;
                     }
                     let t = col * 3;
-                    if t + 2 < dst_row.len() {
-                        dst_row[t] = color[0];
-                        dst_row[t + 1] = color[1];
-                        dst_row[t + 2] = color[2];
+                    if t + 2 >= dst_row.len() {
+                        continue;
                     }
+                    let a = a.min(1.0);
+                    let inv = 1.0 - a;
+                    let px = &mut dst_row[t..t + 3];
+                    px[0] = (cr * a + f32::from(px[0]) * inv).round().clamp(0.0, 255.0) as u8;
+                    px[1] = (cg * a + f32::from(px[1]) * inv).round().clamp(0.0, 255.0) as u8;
+                    px[2] = (cb * a + f32::from(px[2]) * inv).round().clamp(0.0, 255.0) as u8;
                 }
             }
         }

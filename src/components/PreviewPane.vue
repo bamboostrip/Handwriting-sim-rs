@@ -29,8 +29,9 @@
 //! 坐标链：区域存背景原始像素 → ×factor(=drawW/bgNatW) → 显示像素。
 //! 缩放/平移只改变 drawW（即 factor）与图纸位置，区域坐标语义与写回逻辑完全不变。
 
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { NButton, NSelect, NTooltip } from "naive-ui";
+import { computed, h, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import type { VNodeChild } from "vue";
+import { NButton, NSelect, NSwitch, NTooltip } from "naive-ui";
 import QuickStart from "./QuickStart.vue";
 import ErrorBanner from "./ErrorBanner.vue";
 import {
@@ -47,8 +48,10 @@ import {
   type ViewState,
 } from "../viewport";
 import {
+  FILLABLE_SHAPE_KINDS,
   LINE_LIKE_SHAPE_KINDS,
   SHAPE_KIND_LABELS,
+  SHAPE_TOOL_SOLID_TRIANGLE,
   addShapeFromRect,
   cancelRegionEdit,
   clampRect,
@@ -62,6 +65,7 @@ import {
   prevPage,
   selectShape,
   setRegionMode,
+  setShapeDefault,
   setShapeEndpoints,
   setShapeKind,
   setShapeMode,
@@ -289,12 +293,16 @@ function findRegionAt(px: number, py: number): number {
 }
 
 // ---- 图形标注：显示几何 / 命中 / 选中态 ----
-/** 底部下拉的可选图元（11 项，排除 polyline；顺序即下拉顺序） */
-const SHAPE_KIND_OPTIONS: { label: string; value: UiShapeKind }[] = (
+/** 底部下拉的可选图元（排除 polyline；顺序即下拉顺序）。
+ *  `▶ 实心三角` 不是新图元 id，只是「三角形 + 实心」的一键预设：
+ *  行首项目符号是图形标注里最高频的小符号，不该让用户先画三角形、
+ *  再翻到右栏属性面板打开「填充」才拿到它。 */
+const SHAPE_KIND_OPTIONS: { label: string; value: string }[] = (
   [
     "rect",
     "ellipse",
     "triangle",
+    SHAPE_TOOL_SOLID_TRIANGLE,
     "line",
     "arrow",
     "brace_left",
@@ -303,11 +311,51 @@ const SHAPE_KIND_OPTIONS: { label: string; value: UiShapeKind }[] = (
     "bracket_right",
     "check",
     "underline",
-  ] as UiShapeKind[]
-).map((k) => ({ label: SHAPE_KIND_LABELS[k], value: k }));
+  ] as const
+).map((k) =>
+  k === SHAPE_TOOL_SOLID_TRIANGLE
+    ? { label: "▶ 实心三角", value: SHAPE_TOOL_SOLID_TRIANGLE }
+    : { label: SHAPE_KIND_LABELS[k as UiShapeKind], value: k },
+);
+
+/** 下拉当前值：选了「▶ 实心三角」时回显它，而不是裸的「三角形」。 */
+const shapeToolValue = computed<string>(() =>
+  store.shapeKind === "triangle" && store.shapeDefault.filled
+    ? SHAPE_TOOL_SOLID_TRIANGLE
+    : store.shapeKind,
+);
+
+/** 当前图元的完整文案（触发器很窄时会省略号截断，用它给 hover 兜底）。 */
+const shapeToolLabel = computed<string>(
+  () => SHAPE_KIND_OPTIONS.find((o) => o.value === shapeToolValue.value)?.label ?? "图元",
+);
+
+/** 下拉项自定义渲染：文本外面套一层 `title`，窄屏 / 放大字号把文字截断时，
+ *  鼠标悬停仍能看到完整图元名（naive-ui 的选项内容默认 `text-overflow: ellipsis`）。 */
+function renderShapeOptionLabel(option: { label?: unknown; value?: unknown }): VNodeChild {
+  const text = typeof option.label === "string" ? option.label : String(option.value ?? "");
+  return h("span", { title: text }, text);
+}
+
+/** 当前图元是否支持实心填充（决定下拉右边那个「实心」开关是否显示）。 */
+const shapeToolFillable = computed(() => FILLABLE_SHAPE_KINDS.has(store.shapeKind));
+
+/** 「实心」开关：与「新建图形默认样式」里的同名开关是**同一个** store 字段，
+ *  放在这里是为了画之前就能看见状态，不用画完再去右栏找。 */
+const shapeToolFilled = computed<boolean>({
+  get: () => store.shapeDefault.filled,
+  set: (on) => setShapeDefault({ filled: on }),
+});
 
 function onShapeKindChange(v: string): void {
+  if (v === SHAPE_TOOL_SOLID_TRIANGLE) {
+    setShapeKind("triangle");
+    setShapeDefault({ filled: true });
+    return;
+  }
   setShapeKind(v as UiShapeKind);
+  // 显式选「三角形」= 要空心三角：关掉实心，否则下拉回显会一直停在「▶ 实心三角」
+  if (v === "triangle") setShapeDefault({ filled: false });
 }
 
 /** 当前选中的图形（仅当前页才画包围框，避免跨页选中出现幽灵框） */
@@ -1346,15 +1394,28 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
       <template v-if="store.shapeMode">
         <NTooltip trigger="hover" placement="top">
           <template #trigger>
-            <NSelect
-              class="shape-kind-select"
-              size="small"
-              :value="store.shapeKind"
-              :options="SHAPE_KIND_OPTIONS"
-              @update:value="onShapeKindChange"
-            />
+            <span class="shape-kind-wrap" :title="`当前图元：${shapeToolLabel}`">
+              <NSelect
+                class="shape-kind-select"
+                size="small"
+                :value="shapeToolValue"
+                :options="SHAPE_KIND_OPTIONS"
+                :render-label="renderShapeOptionLabel"
+                :menu-props="{ class: 'shape-kind-menu' }"
+                @update:value="onShapeKindChange"
+              />
+            </span>
           </template>
-          在预览图上按住拖出图形；选中后拖手柄调整
+          当前图元：{{ shapeToolLabel }}；在预览图上按住拖出图形，选中后拖手柄调整
+        </NTooltip>
+        <NTooltip v-if="shapeToolFillable" trigger="hover" placement="top">
+          <template #trigger>
+            <span class="shape-filled-toggle">
+              <NSwitch v-model:value="shapeToolFilled" size="small" />
+              <span class="shape-filled-label">实心</span>
+            </span>
+          </template>
+          勾上后画的矩形 / 椭圆 / 三角是实心的（行首 ▶ 就是「实心三角」）
         </NTooltip>
       </template>
       <NButton size="small" :loading="store.rendering" @click="doRender()">↻ 刷新</NButton>
@@ -1370,8 +1431,31 @@ function pxStyle(r: { x: number; y: number; w: number; h: number }) {
 }
 
 .shape-kind-select {
-  width: 104px;
+  /* 104px 时「▶ 实心三角」会被省略号截断（用户截图反馈）；
+     132px 刚好容下 6 个全角字形 + 右侧箭头，又不至于把「刷新」挤出这一行 */
+  width: 132px;
   flex: 0 0 auto;
+}
+
+/* 触发器外层：给窄屏下的省略号留一个 hover 显示完整文案的入口 */
+.shape-kind-wrap {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+/* 标注工具栏的「实心」开关：和下拉同一行，紧凑但不挤压页码 */
+.shape-filled-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.shape-filled-label {
+  font-size: 11.5px;
+  color: var(--text-sub);
+  white-space: nowrap;
 }
 
 /* 新建图形草稿：与 rubber-band 同为蓝色语义，虚线表示尚未落笔；松手即生成 */

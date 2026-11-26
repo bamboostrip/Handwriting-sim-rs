@@ -889,3 +889,15 @@ html.dark .setup-note.is-warn {
   height: min(46vh, 420px);
   min-height: 240px;
 }
+
+/* 图形标注的图元下拉（PreviewPane）：选项按内容宽度展示，避免「▶ 实心三角」被省略号截断。
+   下拉弹层被 teleport 到 body，组件内的 scoped 样式够不到，所以放在全局。 */
+.shape-kind-menu {
+  min-width: 164px !important;
+}
+
+.shape-kind-menu .n-base-select-option__content {
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+}

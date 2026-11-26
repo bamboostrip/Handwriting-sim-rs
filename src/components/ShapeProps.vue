@@ -4,7 +4,7 @@
 
 import { computed } from "vue";
 import { NColorPicker, NSelect, NSlider, NSwitch } from "naive-ui";
-import { SHAPE_KIND_LABELS, store, updateShapeStyle } from "../store";
+import { FILLABLE_SHAPE_KINDS, SHAPE_KIND_LABELS, store, updateShapeStyle } from "../store";
 import type { UiShape, UiShapeKind } from "../types";
 
 /** 属性下拉不暴露折线（MVP 不做）；顺序按契约：矩形优先，其次线与括号等。 */
@@ -23,16 +23,9 @@ const KIND_ORDER: UiShapeKind[] = [
 ];
 const kindOptions = KIND_ORDER.map((k) => ({ label: SHAPE_KIND_LABELS[k], value: k }));
 
-/** 只有这三类支持实心填充。 */
-const FILLABLE_KINDS: ReadonlySet<UiShapeKind> = new Set<UiShapeKind>([
-  "rect",
-  "ellipse",
-  "triangle",
-]);
-
 const index = computed(() => store.selectedShapeIndex);
 const shape = computed<UiShape | null>(() => store.shapes[index.value] ?? null);
-const fillable = computed(() => !!shape.value && FILLABLE_KINDS.has(shape.value.kind));
+const fillable = computed(() => !!shape.value && FILLABLE_SHAPE_KINDS.has(shape.value.kind));
 
 /** 统一写入口：未选中 / 越界时什么都不做（属性控件此时也不会渲染）。 */
 function patch(p: Partial<UiShape>): void {
@@ -150,7 +143,7 @@ const pageOptions = computed(() => {
       <div v-if="fillable" class="field-row">
         <span class="field-label">填充</span>
         <NSwitch v-model:value="filledValue" size="small" />
-        <span class="prop-hint">实心填充（矩形 / 椭圆 / 三角形）</span>
+        <span class="prop-hint">实心填充（行首 ▶ 就靠它）</span>
       </div>
 
       <div class="field-row">

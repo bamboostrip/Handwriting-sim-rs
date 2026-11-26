@@ -407,6 +407,8 @@ export interface ShapeDefaultStyle {
   thickness: number | null;
   /** 手绘抖动（背景原始像素）；null = 按线宽自适应 */
   jitter: number | null;
+  /** 是否实心填充（只对矩形 / 椭圆 / 三角形生效）：行首 `▶`、实心色块靠它 */
+  filled: boolean;
 }
 
 export const store = reactive({
@@ -466,7 +468,7 @@ export const store = reactive({
   /** 图形列表/预览当前选中的索引（-1 = 未选中） */
   selectedShapeIndex: -1,
   /** 新建图形默认样式：只作用于之后新画的图形；已画图形各自的样式存在 shape 上 */
-  shapeDefault: { fill: null, thickness: null, jitter: null } as ShapeDefaultStyle,
+  shapeDefault: { fill: null, thickness: null, jitter: null, filled: false } as ShapeDefaultStyle,
 
   // ---- 区域对话框（草稿模式：打开时拷贝，确定时写回）----
   pendingRect: null as [number, number, number, number] | null,
@@ -2513,6 +2515,18 @@ export const LINE_LIKE_SHAPE_KINDS: ReadonlySet<UiShapeKind> = new Set<UiShapeKi
   "underline",
 ]);
 
+/** 支持实心填充的图元（core 只有 Rect / Ellipse / Triangle 三条填充分支）。 */
+export const FILLABLE_SHAPE_KINDS: ReadonlySet<UiShapeKind> = new Set<UiShapeKind>([
+  "rect",
+  "ellipse",
+  "triangle",
+]);
+
+/** 图元下拉里的「▶ 实心三角」快捷项。
+ *  它不是新的图元 id（后端契约仍是 12 个），只是「三角形 + 实心」的一键预设：
+ *  选它 → 拖出来的就是行首项目符号 `▶`，不用先画三角形再翻到属性面板开「填充」。 */
+export const SHAPE_TOOL_SOLID_TRIANGLE = "triangle_solid" as const;
+
 /** 把 [x0,y0,x1,y1] 归一化为左上角 + 正宽高（用户可从任意方向拖拽）。 */
 function normalizedShapeBox(
   x0: number,
@@ -2753,11 +2767,16 @@ export function shapeAtPoint(srcX: number, srcY: number, tolSrc = 3): number {
 
 /** 新建图形的默认线宽：按纸张原始像素宽度自适应。
  *  固定 2.4px 在 4200×5930 的扫描纸上、fit 视图（≈12.5%）只有 0.3 显示像素，
- *  用户刚画完会以为「没画上 / 没生效」。 */
+ *  用户刚画完会以为「没画上 / 没生效」。
+ *
+ *  比例 `纸宽/460` ≈ 0.22% 纸宽，对应真实 0.45~0.5mm 中性笔
+ *  （A4 210mm → 0.46mm）；早期用 `纸宽/700`（≈0.3mm 细笔），
+ *  在 2480px 的 A4 上只有 3.5px，缩到 fit 视图后像一根矢量细线，
+ *  用户反馈「符号不像手写、和手写笔记差很远」很大一部分来自这里。 */
 function defaultThickness(): number {
   const w = store.bgNatW;
-  if (!w || w <= 0) return 2.4;
-  return Math.min(12, Math.max(2.4, Math.round(w / 700)));
+  if (!w || w <= 0) return 3.0;
+  return Math.min(14, Math.max(3.0, Math.round(w / 460)));
 }
 
 /** 数值夹取（lo <= v <= hi）。 */
@@ -2783,20 +2802,30 @@ export function setShapeDefault(patch: Partial<ShapeDefaultStyle>): void {
     const v = patch.jitter;
     d.jitter = typeof v === "number" && Number.isFinite(v) ? clampRange(v, 0, 6) : null;
   }
+  if ("filled" in patch) {
+    d.filled = !!patch.filled;
+  }
 }
 
 /**
  * 解析新建图形实际生效的样式：
  * - thickness：手填优先，否则按纸张宽度自适应（defaultThickness）；
- * - jitter：手填优先，否则取 thickness × 0.9 并夹到 1.4~6 ——
- *   纸越大线越粗、抖动越小越像尺子，这个比例能保证大纸上也有手绘感；
+ * - jitter：手填优先，否则取 thickness × 0.62 并夹到 1.6~6 ——
+ *   抖动是**顶点位移的像素幅度**，跟线宽同量级才像手抖；取 0.9 倍线宽
+ *   会让粗笔的框/圈歪得像画坏了，取 0.62 倍在粗笔上仍明显、又不失真；
+ * - filled：实心填充开关（只对矩形/椭圆/三角生效，行首 `▶` 靠它）；
  * - fill：手填颜色；null = 跟随主墨色（交给引擎用主墨色绘制）。
  */
-export function resolveShapeDefault(): { fill: string | null; thickness: number; jitter: number } {
+export function resolveShapeDefault(): {
+  fill: string | null;
+  thickness: number;
+  jitter: number;
+  filled: boolean;
+} {
   const thickness = store.shapeDefault.thickness ?? defaultThickness();
-  const jitter = store.shapeDefault.jitter ?? clampRange(thickness * 0.9, 1.4, 6);
+  const jitter = store.shapeDefault.jitter ?? clampRange(thickness * 0.62, 1.6, 6);
   const fill = store.shapeDefault.fill ? normalizeHex(store.shapeDefault.fill) : null;
-  return { fill, thickness, jitter };
+  return { fill, thickness, jitter, filled: store.shapeDefault.filled };
 }
 
 /** 新建图形：rect = [x0,y0,x1,y1]（可反向拖拽，内部归一化为正宽高）。
@@ -2820,7 +2849,8 @@ export function addShapeFromRect(
     points: points?.map(([px, py]) => [px, py] as [number, number]),
     thickness: style.thickness,
     jitter: style.jitter,
-    filled: false,
+    // 实心只对 Rect / Ellipse / Triangle 有渲染分支，其它图元忽略这个开关
+    filled: FILLABLE_SHAPE_KINDS.has(kind) ? style.filled : false,
     fill: style.fill,
     seed: randomShapeSeed(),
   });
@@ -2852,6 +2882,8 @@ export function addShapeAroundRegion(index: number): void {
     r.y + r.h + pad,
   ]);
   if (newIndex < 0) return;
+  // 区域框永远是空心：默认样式里开着「实心」时不能把整段文字涂成墨块
+  store.shapes[newIndex].filled = false;
   // 区域可能在别的页：图形跟着区域走，避免框到错误页面
   store.shapes[newIndex].page = Math.max(1, Math.round(num(r.page, 1)));
 }
@@ -2996,9 +3028,17 @@ export function moveShapeOrder(index: number, dir: -1 | 1): void {
   scheduleRender();
 }
 
+/** 图形类型文案：实心的矩形/椭圆/三角单独显示，避免列表里看不出 `▶` 是实心的。 */
+export function shapeKindLabel(s: UiShape): string {
+  const base = SHAPE_KIND_LABELS[s.kind] || "图形";
+  if (!s.filled) return base;
+  if (s.kind === "triangle") return "▶ 实心三角";
+  return `实心${base}`;
+}
+
 /** 图形列表文案，如 "1. 矩形 第1页 2.4px"。 */
 export function shapeLabel(s: UiShape, i: number): string {
-  return `${i + 1}. ${SHAPE_KIND_LABELS[s.kind] || "图形"} 第${s.page}页 ${s.thickness.toFixed(1)}px`;
+  return `${i + 1}. ${shapeKindLabel(s)} 第${s.page}页 ${s.thickness.toFixed(1)}px`;
 }
 
 // ---------------------------------------------------------------- 关于与更新
